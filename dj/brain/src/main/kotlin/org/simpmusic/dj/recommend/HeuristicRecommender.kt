@@ -67,7 +67,7 @@ class HeuristicRecommender(
             if (plan != null) {
                 transition = when (plan.kind) {
                     PlanKind.BEAT_MATCHED -> 0.6f + 0.4f * plan.confidence
-                    PlanKind.CUT -> 0.45f
+                    PlanKind.CUT, PlanKind.ECHO_OUT -> 0.45f
                     PlanKind.SIMPLE_CROSSFADE -> 0.25f
                 }
                 why += "transition ${plan.kind.name.lowercase()}"

@@ -10,7 +10,9 @@ import kotlin.test.assertTrue
 
 class PlannerTest {
     private val planner = DjTransitionPlanner()
-    private val settings = DjSettings(enabled = true)
+    // These are the classic end-of-track tests: they pin the AT_END behaviour (exit near the outro, entry at the first
+    // phrase). The default MixPoint.ANYWHERE is covered by PlannerAnywhereTest.
+    private val settings = DjSettings(enabled = true, mixPoint = MixPoint.AT_END)
 
     private val cache = HashMap<String, SyntheticTracks.Rendered>()
     private fun band(bpm: Float, key: MusicalKey = MusicalKey(9, Mode.MINOR), firstBeatMs: Int = 180): SyntheticTracks.Rendered =
@@ -136,9 +138,10 @@ class PlannerTest {
         assertTrue(plan.reason.contains("no bar alignment claimed"))
         assertTrue(plan.overlapMs <= 16.5 * 500.0, "overlap ${plan.overlapMs} should be capped at 4 bars")
         assertTrue(!plan.reason.contains("phrase"), "phrase starts must not be used when downbeats are untrusted")
-        // and a CUT needs trusted downbeats
+        // incompatible tempos and no trusted downbeats: an echo-out on a beat (its delay is synced to the outgoing beat
+        // grid, which is all it needs), never a cut
         val far = customAnalysis("c", 260, 160f, downConf = 0.05f) { it * 375.0 + 100 }
-        assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(a, far, settings).kind)
+        assertEquals(PlanKind.ECHO_OUT, planner.plan(a, far, settings).kind)
     }
 
     /** Least-squares ideal grid (time = c + p * index) through ALL beats of an analysis: the fixture's own jitter averages out. */
@@ -268,31 +271,39 @@ class PlannerTest {
     }
 
     @Test
-    fun beyondBendCutsOnDownbeatOrCrossfades() {
+    fun beyondBendEchoesOutOnDownbeatsInsteadOfACutOrCrossfades() {
         val from = ana(120f, "a")
         val to = ana(150f, "b")
         val plan = planner.plan(from, to, settings)
         println("120->150: ${plan.kind} ${plan.reason}")
-        assertEquals(PlanKind.CUT, plan.kind)
+        // a bare cut is never planned any more: incompatible tempos get an echo-out
+        assertEquals(PlanKind.ECHO_OUT, plan.kind)
+        assertNotNull(plan.echoOut)
         assertEquals(0L, plan.overlapMs)
         assertTrue(from.downbeatBeatIndices!!.value.any { abs(from.beatTimesMs!!.value[it] - plan.exitPointMs) <= 1 })
         assertTrue(to.downbeatBeatIndices!!.value.any { abs(to.beatTimesMs!!.value[it] - plan.entryPointMs) <= 1 })
+        // no tempo automation at all: both decks stay at native rate, the outgoing dry signal is gone at T0
         assertEquals(1f, plan.outgoing.rate.valueAt(0))
+        assertEquals(1f, plan.outgoing.rate.valueAt(plan.preRollMs))
+        assertEquals(1f, plan.incoming.rate.valueAt(plan.settleMs))
         assertEquals(0f, plan.outgoing.volume.valueAt(0))
         assertEquals(1f, plan.incoming.volume.valueAt(plan.settleMs))
+        // the echo rings out after T0 and counts as settling time
+        assertTrue(plan.settleMs >= plan.echoOut!!.tailMs)
+        assertEquals(0f, plan.echoOut!!.wet.valueAt(plan.echoOut!!.tailMs))
         assertWithinFiles(plan, from, to)
 
-        // same, but downbeats are not trusted -> plain crossfade
+        // same, but downbeats are not trusted: still no cut, and no bar-aligned echo-out claimed either way
         val weak = to.copy(downbeatBeatIndices = to.downbeatBeatIndices!!.copy(confidence = 0.2f))
         val p2 = planner.plan(from, weak, settings)
         println("120->150 weak downbeats: ${p2.kind} ${p2.reason}")
-        assertEquals(PlanKind.SIMPLE_CROSSFADE, p2.kind)
+        assertTrue(p2.kind != PlanKind.CUT)
 
         // 120 -> 130 is inside the split bend (+-4.1%) but not with a tighter setting
         val p3 = planner.plan(ana(120f, "a"), ana(130f, "c"), settings)
         assertEquals(PlanKind.BEAT_MATCHED, p3.kind)
         val p4 = planner.plan(ana(120f, "a"), ana(130f, "c"), settings.copy(maxTempoBend = 0.03f))
-        assertEquals(PlanKind.CUT, p4.kind)
+        assertEquals(PlanKind.ECHO_OUT, p4.kind)
     }
 
     @Test
@@ -518,7 +529,7 @@ class PlannerTest {
             }
             when (plan.kind) {
                 PlanKind.BEAT_MATCHED -> beatMatched++
-                PlanKind.CUT -> cuts++
+                PlanKind.CUT, PlanKind.ECHO_OUT -> cuts++
                 PlanKind.SIMPLE_CROSSFADE -> simple++
             }
             if (plan.kind != PlanKind.SIMPLE_CROSSFADE && fromArg != null && toArg != null) {

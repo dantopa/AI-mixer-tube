@@ -16,6 +16,10 @@ interface TrackAnalyzer {
 /** Picks how a transition between two tracks is done. Pure function: no I/O, no Android. */
 interface TransitionPlanner {
     fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan
+
+    /** Same with the caller's playback constraints. The default ignores them (old implementers keep compiling). */
+    fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan =
+        plan(from, to, settings)
 }
 
 enum class AnalysisPriority { NOW_PLAYING, NEXT_UP, BACKGROUND }
