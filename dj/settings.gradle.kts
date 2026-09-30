@@ -13,3 +13,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "dj"
 include(":brain")
+include(":ml")
