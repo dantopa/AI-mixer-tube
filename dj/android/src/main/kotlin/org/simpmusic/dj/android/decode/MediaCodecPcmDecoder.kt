@@ -4,6 +4,7 @@ import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import org.simpmusic.dj.android.log.DjLog
 import java.io.IOException
 import java.nio.ByteOrder
 
@@ -40,28 +41,62 @@ class MediaCodecPcmDecoder {
     ) {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
+        val stats = Stats()
+        val t0 = System.nanoTime()
+        var stage = "open"
         try {
             try {
                 input.applyTo(extractor)
             } catch (e: Exception) {
                 throw DecodeException("cannot open audio source ${input.describe()}: ${e.message}", e)
             }
+            stage = "select-track"
+            val mimes = (0 until extractor.trackCount).map { extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME) }
             val trackIndex =
                 (0 until extractor.trackCount).firstOrNull {
                     extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-                } ?: throw DecodeException("no audio track in ${input.describe()}")
+                } ?: throw DecodeException("no audio track in ${input.describe()} (tracks=$mimes)")
             extractor.selectTrack(trackIndex)
             val format = extractor.getTrackFormat(trackIndex)
             val mime = format.getString(MediaFormat.KEY_MIME)!!
+            DjLog.i(
+                TAG,
+                "extractor opened ${input.describe()} in ${(System.nanoTime() - t0) / 1_000_000} ms: tracks=${extractor.trackCount} $mimes selected=$trackIndex mime=$mime " +
+                    "sampleRate=${intOf(format, MediaFormat.KEY_SAMPLE_RATE)} channels=${intOf(format, MediaFormat.KEY_CHANNEL_COUNT)} " +
+                    "durationUs=${if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else -1} " +
+                    "range=[${request.startMs},${if (request.endMs == Long.MAX_VALUE) "end" else request.endMs.toString()}) ms out=${request.outSampleRate} Hz x${request.outChannels}",
+            )
 
             val startUs = request.startMs * 1000L
             val endUs = if (request.endMs == Long.MAX_VALUE) Long.MAX_VALUE else request.endMs * 1000L
             if (startUs > 0) extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
 
+            stage = "create-codec"
             codec = MediaCodec.createDecoderByType(mime)
+            stage = "configure"
             codec.configure(format, null, null, 0)
+            stage = "start"
             codec.start()
-            pump(extractor, codec, request, startUs, endUs, sink, cancel)
+            DjLog.d(TAG, "codec started: name=${codec.name} mime=$mime")
+            stage = "pump"
+            pump(extractor, codec, request, startUs, endUs, sink, cancel, stats)
+            DjLog.i(
+                TAG,
+                "decode finished in ${(System.nanoTime() - t0) / 1_000_000} ms: codec=${codec.name} inputBuffers=${stats.inputBuffers} inputBytes=${stats.inputBytes} " +
+                    "pcmFrames(in ${stats.inRate} Hz)=${stats.decodedFrames} resample ${stats.inRate}->${request.outSampleRate} (ratio ${"%.4f".format(request.outSampleRate.toDouble() / maxOf(1, stats.inRate))}) " +
+                    "sinkSamples=${stats.sinkSamples} floatPcm=${stats.floatPcm}",
+            )
+        } catch (e: java.util.concurrent.CancellationException) {
+            DjLog.d(TAG, "decode cancelled at stage=$stage after ${(System.nanoTime() - t0) / 1_000_000} ms")
+            throw e
+        } catch (e: Throwable) {
+            DjLog.e(
+                TAG,
+                "decode FAILED at stage=$stage after ${(System.nanoTime() - t0) / 1_000_000} ms (codec=${codec?.let { runCatching { it.name }.getOrNull() }} " +
+                    "inputBuffers=${stats.inputBuffers} inputBytes=${stats.inputBytes} decodedFrames=${stats.decodedFrames} outputEos=${stats.outputEos} input=${input.describe()})",
+                e,
+            )
+            throw e
         } finally {
             try {
                 codec?.stop()
@@ -84,6 +119,7 @@ class MediaCodecPcmDecoder {
         endUs: Long,
         sink: PcmSink,
         cancel: CancelSignal,
+        stats: Stats,
     ) {
         val info = MediaCodec.BufferInfo()
         var inputDone = false
@@ -98,8 +134,12 @@ class MediaCodecPcmDecoder {
         var scratchMix = FloatArray(0)
 
         var stalled = 0
+        var lastProgressNs = System.nanoTime()
 
-        val emit: (FloatArray, Int) -> Unit = { buf, n -> sink.write(buf, n) }
+        val emit: (FloatArray, Int) -> Unit = { buf, n ->
+            stats.sinkSamples += n
+            sink.write(buf, n)
+        }
 
         while (!outputDone) {
             if (cancel.isCancelled()) throw java.util.concurrent.CancellationException("decode cancelled")
@@ -115,6 +155,9 @@ class MediaCodecPcmDecoder {
                         inputDone = true
                     } else {
                         codec.queueInputBuffer(inIdx, 0, size, t, 0)
+                        stats.inputBuffers++
+                        lastProgressNs = System.nanoTime()
+                        stats.inputBytes += size
                         extractor.advance()
                     }
                 }
@@ -130,10 +173,14 @@ class MediaCodecPcmDecoder {
                         f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
                         f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
                     resampler = StreamingResampler(inRate, request.outSampleRate, request.outChannels)
+                    stats.inRate = inRate
+                    stats.floatPcm = floatPcm
+                    DjLog.d(TAG, "codec output format: $f -> $inRate Hz x$inCh floatPcm=$floatPcm")
                 }
 
                 outIdx >= 0 -> {
                     stalled = 0
+                    lastProgressNs = System.nanoTime()
                     val out = codec.getOutputBuffer(outIdx)!!
                     if (info.size > 0 && inRate > 0) {
                         out.position(info.offset)
@@ -141,6 +188,7 @@ class MediaCodecPcmDecoder {
                         out.order(ByteOrder.nativeOrder())
                         val bytesPerSample = if (floatPcm) 4 else 2
                         val frames = info.size / (bytesPerSample * inCh)
+                        stats.decodedFrames += frames
                         if (scratchIn.size < frames * inCh) scratchIn = FloatArray(frames * inCh)
                         if (floatPcm) {
                             out.asFloatBuffer().get(scratchIn, 0, frames * inCh)
@@ -173,21 +221,42 @@ class MediaCodecPcmDecoder {
                         }
                     }
                     codec.releaseOutputBuffer(outIdx, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputDone = true
+                        stats.outputEos = true
+                    }
                 }
 
                 outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
                     // With input exhausted and no output for a long time the codec is wedged.
                     if (inputDone && ++stalled > STALL_LIMIT) throw DecodeException("codec stalled at end of stream")
+                    if (System.nanoTime() - lastProgressNs > NO_PROGRESS_NS) {
+                        throw DecodeException("codec made no progress for ${NO_PROGRESS_NS / 1_000_000_000L} s (inputDone=$inputDone, in=${stats.inputBuffers} buffers)")
+                    }
                 }
             }
         }
         resampler?.finish(emit)
     }
 
+    /** Counters for the log; one per [decode] call. */
+    private class Stats {
+        var inputBuffers = 0
+        var inputBytes = 0L
+        var decodedFrames = 0L
+        var sinkSamples = 0L
+        var inRate = 0
+        var floatPcm = false
+        var outputEos = false
+    }
+
+    private fun intOf(f: MediaFormat, key: String): Int = if (f.containsKey(key)) f.getInteger(key) else -1
+
     private companion object {
+        const val TAG = "codec"
         const val TIMEOUT_US = 10_000L
         const val PAD_US = 200_000L
         const val STALL_LIMIT = 300 // * TIMEOUT_US = 3 s
+        const val NO_PROGRESS_NS = 30_000_000_000L
     }
 }

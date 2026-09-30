@@ -149,10 +149,15 @@ class DjTransitionRunner(
                 clock = clock,
                 userVolume = port::userVolume,
                 calibrator = hooks.calibrator,
-                log = { hooks.log(it) },
+                log = { hooks.log("xition", it) },
             )
         controller = c
         isRunning = true
+        hooks.log(
+            "xition",
+            "START ${prepared.fromId} -> ${prepared.toId} ${prepared.plan.kind}: outgoing position=${outPlayer.currentPosition} ms, window ready=${wDeck.isReady}, " +
+                "calibrator startLatency=${"%.0f".format(hooks.calibrator.startLatencyMs)} ms seekBias=${"%.0f".format(hooks.calibrator.seekBiasMs)} ms",
+        )
         // Never let the window mix on top of the outgoing player's own effects: both decks share the app's
         // audio chain (equalizer, delay, reverb are per-player instances), so they apply once per deck.
         c.start()
@@ -226,7 +231,7 @@ class DjTransitionRunner(
         }
 
         override fun onEvent(event: TransitionEvent) {
-            hooks.log("dj event: $event")
+            hooks.log("xition", "event: $event (calibrator startLatency=${"%.0f".format(hooks.calibrator.startLatencyMs)} ms seekBias=${"%.0f".format(hooks.calibrator.seekBiasMs)} ms)")
         }
     }
 }

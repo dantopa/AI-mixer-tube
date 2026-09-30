@@ -11,3 +11,12 @@ actual fun rememberDjModeEnabled(): Boolean = false
 
 @Composable
 actual fun rememberDjFallbackSeconds(): Int = 0
+
+@Composable
+actual fun DjStatusChip(modifier: androidx.compose.ui.Modifier) = Unit
+
+@Composable
+actual fun DjNextSheet(
+    onDismiss: () -> Unit,
+    onDone: () -> Unit,
+) = Unit

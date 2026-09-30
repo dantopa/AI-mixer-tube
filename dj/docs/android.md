@@ -241,9 +241,127 @@ Beat alignment *inside* the mix is sample exact because it is rendered.
 
 * Only the outgoing -> incoming pair of the *next* queue item is prepared; shuffle/queue edits re-plan (pair changes
   discard the window).
-* No BACKGROUND library warming yet: analyses are requested for the current and the next track only (the scheduler
-  supports BACKGROUND; nothing enqueues it).
+* Library warming is opt-in and slow by design (section 8): one song at a time, Wi-Fi, charging or >= 50 % battery.
 * The notification progress bar is frozen at the entry point until T0 and then follows the mix.
 * `RepeatOne`, video, casting, listen-together and non-unity playback speed/pitch skip DJ (documented guards).
 * Crossfade/EQ "Auto" durations are ignored while DJ mode is on (its fallback uses `DjSettings.fallbackCrossfadeMs`).
 * Dev/QA aid missing: there is no in-app switch to force a specific plan; use the debug line in Settings.
+
+## 8. Library analysis, "what next?" and Auto DJ
+
+Everything here lives in `:djAndroid` (packages `library`, `recommend`, `auto`) plus the UI in `composeApp` (`expect/ui/Dj*`).
+It only ever talks to the app through `core/domain` interfaces (`SongRepository`, `MediaPlayerHandler`), never Room. No core
+patch is needed for it: the player is driven through the handler's own `playNext` / `loadMoreCatalog(isAddToQueue = true)`.
+
+### 8.1 Library analysis (`LibraryAnalysisCoordinator`)
+
+* Candidates (`DomainLibrarySource`): liked, then downloaded, then most played (top 50 by play time), then the 300 most
+  recently added songs; de-duplicated keeping the first (= highest priority) occurrence; **known videos, podcast episodes,
+  tracks under 60 s and over 9 min are skipped** (`CandidateSelection`); hard cap **300** tracks.
+* Fed to the scheduler **one track at a time** (`DjAnalysisScheduler.analyseInBackground` suspends until the job ends), so
+  the queue never holds more than one BACKGROUND job. A request for the playing or next track **preempts** a running
+  BACKGROUND decode (the decoder checks its cancel flag between codec buffers). Nothing new starts while the engine is
+  planning, decoding, rendering or mixing (`DjDebugState.isHeavy`).
+* Policy (`LibraryAnalysisPolicy`): never in battery saver; only while charging or at >= 50 % battery; **unmetered network
+  only**. Deliberately NOT the "analyze on mobile data" switch: that one (default ON since the first device test) is for the
+  next track, one song at a time; hundreds of songs would silently spend a data plan. On a metered network only DOWNLOADED
+  songs are analysed (they decode from the download cache, no network).
+* Progress is `StateFlow<LibraryAnalysisState>` (`analysed` of `total`, `pause` reason, `failed`, `finished`). A song that
+  fails is skipped for the rest of the session; everything analysed is on disk, so stop / restart resumes for free. The
+  on/off choice is persisted (`DjSettingsRepository.libraryAnalysis`) and resumed at startup by `DjRuntime`.
+* **Data cost**: the audio comes through the cache-first `AudioSourceResolver`. A fully cached or downloaded track costs no
+  network. Otherwise the whole stream is fetched (`RepositoryStreamUrlProvider`: the stored format's URL, else a fresh
+  extraction) at the user's quality: about 3-4 MB per 4-minute song at itag 251 (Opus ~130 kbps), about 7-8 MB at 256 kbps.
+  300 songs are therefore 1-2.5 GB in the worst case, on Wi-Fi only. The fetched audio is **not** kept in the player cache
+  (the decoder reads it once), so playing the song later downloads it again.
+* Time: measured nowhere yet (no device). The DSP analyzer runs on the decoded mono 22.05 kHz audio; Beat This! adds a
+  model inference. Expect tens of seconds per song on a phone: 300 songs are hours, not minutes. The `analyzer` and `ort`
+  log lines carry the real numbers once a device has run it.
+
+### 8.2 "DJ: what next?" (`DjRecommendationService`)
+
+Now Playing -> "more" sheet -> **DJ: what next?** (shown only while AI DJ mode is on). It ranks the analysed library
+(`AnalysisPool`: the same candidate set, only songs with a fresh stored analysis) after the playing track:
+
+1. `HeuristicRecommender` **without** planner over the whole pool (cheap: harmony, tempo, energy flow, timbre, loudness);
+2. the best 40 go through the **real `DjTransitionPlanner`** (`DjRanking.SHORTLIST`), so plan quality counts in the score
+   without running the planner 300 times;
+3. what was played recently (last 30 songs), everything in the current queue and the playing track are excluded.
+
+The sheet lists 10 rows: title, artist, Camelot key, BPM, energy, the `reason` line, and Play next / Play now
+(`playNext`, and `playNext` + skip). If the playing track is not analysed yet it says so, requests it at NOW_PLAYING
+priority, shows "Library analysed: N of M" and fills in by itself when the analysis lands.
+
+### 8.3 Auto DJ (`AutoDjController`), and its precedence with the app's radio / Endless queue
+
+Settings -> Playback -> AI DJ mode -> **Auto DJ** (only active while AI DJ mode itself is on), energy arc: steady (default),
+build up, cool down, wave. The rules, in order:
+
+1. The DJ **only adds** (`playNext` / add to queue). It never removes, reorders or replaces anything, so the radio's queue
+   is always intact underneath it.
+2. **Radio queue** (a real `RD...` radio, `RadioQueueTrim.appliesTo`): the slot right after the current track is the DJ's. At
+   every track start it inserts its pick with "play next"; the radio's tracks are pushed back and only play when the DJ has
+   nothing to offer. A track the user put next by hand is respected (the queue grew by one track nobody here queued).
+3. **Finite queue** (playlist, album, local list, favourites...): untouched until `tracksAhead <= 2`, then the DJ **appends**
+   (chained from the last queued track). The app's Endless queue reacts at 1 track ahead
+   (`MediaServiceHandlerImpl.onMediaItemTransition`: `size - index < 3`), the DJ at 2, so while the DJ succeeds the radio is
+   never asked for more. When it cannot decide, the app's queue carries on exactly as before.
+4. The DJ decides only when it can: >= 8 analysed library songs (`MIN_POOL`), the anchor track analysed (it is requested and
+   waited for, max 90 s, cancelled by the next queue change), and a best score of at least 0.30 (`MIN_AUTO_SCORE`). Otherwise
+   it does nothing and says why.
+5. Choice: with >= 8 candidates a `SetBuilder` beam search (width 6, look-ahead 3, cheap score) proposes the next track so a
+   pick does not paint the set into a corner; the planner then re-scores that pick together with the greedy top 5 and the beam
+   pick is vetoed when its transition scores under 75 % of the best. The energy arc is the `energyTrend` of each step.
+6. Never a track from the last 30 played, the DJ's own last 30 picks, or anything already in the queue.
+7. Off in exactly the cases the transition engine is off (casting, Listen Together, repeat one, video) plus repeat all (the
+   queue never runs out) and shuffle (the order is not the queue's own).
+
+Every decision (pick or "why not") is logged (`autodj` tag) and the last one is shown in the settings block ("Last Auto DJ
+decision").
+
+### 8.4 What could not be verified
+
+* All of section 8 runs on the JVM with fakes only. The real queue behaviour (`playNext` right after a track starts, `loadMoreCatalog`
+  appends while the endless queue is active, the radio trim when the DJ inserts ahead) has **never been run on a device**.
+* Whether inserting one track per track start into a 50-track radio keeps the radio-trim bookkeeping (`queueData` vs player
+  offsets) consistent is read from the code (`playNext` is the same call the queue UI makes), not measured.
+* Analysis time per song and the library's real data use are estimates.
+* The Now Playing chip and the log viewer were compiled, never rendered.
+
+## 9. Diagnostics: the DJ log
+
+`DjLog` (`org.simpmusic.dj.android.log`) is the one place every DJ component writes to: a ring of the last 3000 lines, a rotating
+file `filesDir/dj/dj-debug.log` (1 MB x 2, the second is `dj-debug.log.1`) and a Logcat mirror under the tag `DJ`
+(`adb logcat -s DJ`). Every line is `MM-dd HH:mm:ss.SSS +<ms since start> [thread] <component> <level> message`; exceptions are
+logged with message, the first 8 frames and the cause chain. URLs are reduced to `host itag clen` (no signature, no path); audio
+is never logged. In the app: Settings -> AI DJ mode -> **DJ log** (or tap the chip on Now Playing): live tail, Copy all, Share
+(a text file through the FileProvider), Clear, **Run analysis now** (resolve -> decode -> analyse -> store for the playing track,
+step by step, outside the scheduler) and **Self-check**.
+
+| Tag | Source | A healthy run shows |
+|---|---|---|
+| `boot` | DjModule, DjRuntime | log installed (device, ABI), runtime starting, "AI DJ mode ON" |
+| `selfcheck` | DjSelfCheck | `model-asset PASS`, `onnx-runtime PASS`, `decoder PASS`, `dsp-analyzer PASS`, `store-dir PASS` |
+| `prefetch` | AnalysisPrefetcher | "track started: current=X next=Y ... requesting analyses now" at every track start |
+| `sched` | DjAnalysisScheduler | `request X NEXT_UP: queued`, `start X ... network=allowed`, `done X by dsp-1+beat-this: analyse N ms ... bpm= key=` |
+| `resolve` | AudioSourceResolver | `X -> CACHE download` or `X -> NETWORK fetch ... host= itag=`; partial cache says `PARTIAL` -> fetch |
+| `decode` | MediaCodecTrackDecoder | `analysis decode X from ...`, `produced N samples ... in N ms` |
+| `codec` | MediaCodecPcmDecoder | `extractor opened ... mime=audio/webm sampleRate=48000 ...`, `codec started`, `decode finished ... resample 48000->22050` |
+| `analyzer` | DjAnalyzerFactory | asset present (size), `DSP X in N ms: prepare= energy= ...` |
+| `ort` | Beat This! loader | `session created in N ms`, `Beat This! inference N ms ...: beats= downbeats= bpm=` |
+| `engine` | DjEngine | `queue context`, `both analyses ready`, `window READY ... mix audible at outgoing src N ms` |
+| `planner` | LoggingPlanner | `plan A->B = BEAT_MATCHED conf=0.8 ... reason:` |
+| `render` | LoggingRenderer | `rendered A->B in N ms: frames ... B` |
+| `adapter` / `poll` / `port` | patched adapter | `track started`, every 5 s `poll: ... -> <why the DJ did or did not fire>`, `TRIGGER` |
+| `xition` | TransitionController / runner | `START`, phase changes, hand-off events with residuals |
+| `library` / `autodj` | coordinator / controller | progress, pauses, every Auto DJ decision |
+| `probe` | DjDiagnostics | the four steps of "Run analysis now" |
+
+"Waiting analysis" is diagnosed from `sched` (`nothing runnable: ... BATTERY_SAVER`, `waits for the network`, `FAILED`/`GIVING UP`
+with the exception and stack), `resolve` (no URL) and `codec` (`decode FAILED at stage=...`).
+
+Bugs found by reading the pipeline while adding this (each one alone keeps "waiting analysis" on screen forever): a Beat This!
+model that fails to load threw an `Error` that ended the scheduler's worker loop; a composite analysis without a neural grid
+kept the DSP analyzer's id, which the store treats as stale and deletes on sight, so the analysis never stuck; the store
+reads shared the analysis thread and so waited for the running job; a `SIMPLE_CROSSFADE` plan left the engine phase on
+"planning", which reads as "busy" to the library analysis.

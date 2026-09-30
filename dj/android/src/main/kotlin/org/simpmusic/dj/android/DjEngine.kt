@@ -2,6 +2,8 @@ package org.simpmusic.dj.android
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +20,8 @@ import org.simpmusic.dj.android.decode.TrackDecoder
 import org.simpmusic.dj.android.render.RenderRequest
 import org.simpmusic.dj.android.render.RenderedWindow
 import org.simpmusic.dj.android.render.TransitionWindowRenderer
+import org.simpmusic.dj.android.log.DjLog
+import org.simpmusic.dj.android.scheduler.AnalysisStatus
 import org.simpmusic.dj.android.scheduler.DjAnalysisScheduler
 import org.simpmusic.dj.android.window.Eligibility
 import org.simpmusic.dj.android.window.LatencyCalibrator
@@ -84,7 +88,23 @@ data class DjDebugState(
     val confidence: Float? = null,
     /** Result of the last executed (or attempted) transition, e.g. "hand-offs 2.1 / 3.4 ms" or "lock failed". */
     val lastOutcome: String? = null,
+    /** What is happening to the analysis of the playing track / of the next track (null until the engine looked). */
+    val currentAnalysis: AnalysisStatus? = null,
+    val nextAnalysis: AnalysisStatus? = null,
+    /** The last three analysis failures (`id: message`), so a screenshot of the settings line is enough to diagnose. */
+    val recentErrors: List<String> = emptyList(),
+    /** Outgoing source position at which the prepared mix becomes audible (plan exit point), when [phase] is ready. */
+    val mixAtMs: Long? = null,
+    /** While [phase] is "mixing": wall-clock time the window started and how long it runs until the overlap is over. */
+    val mixStartedAtEpochMs: Long? = null,
+    val mixDurationMs: Long? = null,
 ) {
+    /** A DJ mix is audible right now (the adapter started the window). */
+    val isMixing: Boolean get() = phase == "mixing"
+
+    /** The engine is busy planning, decoding, rendering or mixing: background library analysis keeps out of the way. */
+    val isHeavy: Boolean get() = phase == "planning" || phase == "decoding" || phase == "rendering" || phase == "mixing"
+
     /** One human line, e.g. "BEAT_MATCHED 124.0 BPM 8A -> 9A (conf 0.82): matched +3.1% ...". */
     fun summary(): String =
         buildString {
@@ -123,12 +143,18 @@ interface DjHooks {
     /** Drops preparation state (queue cleared, seek, release...). */
     fun reset(reason: String)
 
+    /** The adapter started the prepared window (the mix is now running). Main thread. */
+    fun onMixStarted(prepared: PreparedTransition) {}
+
     /** Called on the main thread when a window finished rendering for the pair the player is waiting on. */
     fun setOnPrepared(listener: ((PreparedTransition) -> Unit)?)
 
     val debug: StateFlow<DjDebugState>
 
     fun log(message: String)
+
+    /** Same, under a component [tag] (`adapter`, `xition`...) so the DJ log can be read per component. */
+    fun log(tag: String, message: String) = log("[$tag] $message")
 }
 
 /**
@@ -145,7 +171,7 @@ class DjEngine(
     private val heavyDispatcher: CoroutineDispatcher,
     private val windowDir: File,
     override val calibrator: LatencyCalibrator = LatencyCalibrator(),
-    private val logger: (String) -> Unit = {},
+    private val logger: (String) -> Unit = { DjLog.d("hook", it) },
     /** How long to wait for both analyses before giving up on this pair. */
     private val analysisWaitMs: Long = 10 * 60_000L,
 ) : DjHooks {
@@ -177,18 +203,28 @@ class DjEngine(
 
     override fun log(message: String) = logger(message)
 
+    override fun log(tag: String, message: String) = DjLog.d(tag, message)
+
     override fun prepared(currentId: String, nextId: String): PreparedTransition? =
         ready?.takeIf { it.fromId == currentId && it.toId == nextId && key(currentId, nextId) != consumedKey }
 
     override fun consumed(prepared: PreparedTransition, outcome: String) {
+        DjLog.i(TAG, "consumed ${prepared.fromId}->${prepared.toId}: $outcome")
         consumedKey = key(prepared.fromId, prepared.toId)
         if (ready === prepared) ready = null
         deleteWindow(prepared)
-        _debug.update { it.copy(phase = "idle", lastOutcome = outcome) }
+        _debug.update { it.copy(phase = "idle", lastOutcome = outcome, mixStartedAtEpochMs = null, mixDurationMs = null, mixAtMs = null) }
+    }
+
+    override fun onMixStarted(prepared: PreparedTransition) {
+        val plan = prepared.plan
+        val total = plan.overlapMs - prepared.timeline.startRelMs
+        DjLog.i(TAG, "MIX STARTED ${prepared.fromId} -> ${prepared.toId} (${plan.kind}), overlap ${plan.overlapMs} ms, window runs ${total} ms until the overlap is over")
+        _debug.update { it.copy(phase = "mixing", kind = plan.kind, mixStartedAtEpochMs = System.currentTimeMillis(), mixDurationMs = total, mixAtMs = null) }
     }
 
     override fun reset(reason: String) {
-        logger("dj reset: $reason")
+        DjLog.i(TAG, "reset: $reason (pair=$pairKey ready=${ready?.let { it.fromId + "->" + it.toId }})")
         cancelPipeline()
         ready?.let { deleteWindow(it) }
         ready = null
@@ -196,9 +232,16 @@ class DjEngine(
         consumedKey = null
     }
 
+    private var lastLoggedContext: String? = null
+
     override fun onQueueContext(context: DjQueueContext) {
         val settings = settingsFlow.value
         val next = context.nextId
+        val ctxLine = "current=${context.currentId} next=${context.nextId} blocked=${context.blockedReason} enabled=${settings.enabled}"
+        if (ctxLine != lastLoggedContext) {
+            lastLoggedContext = ctxLine
+            DjLog.i(TAG, "queue context: $ctxLine")
+        }
         if (!settings.enabled) {
             if (pairKey != null) reset("disabled")
             return
@@ -237,36 +280,70 @@ class DjEngine(
                 } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
-                    logger("dj pipeline $fromId -> $toId failed: $e")
+                    DjLog.e(TAG, "pipeline $fromId -> $toId FAILED", e)
                     _debug.update { it.copy(phase = "error", fromId = fromId, toId = toId, kind = null, reason = "${e.javaClass.simpleName}: ${e.message}") }
                 }
             }
     }
 
     private suspend fun run(fromId: String, toId: String, cancelFlag: AtomicBoolean) {
+        val tRun = System.nanoTime()
+        fun since() = (System.nanoTime() - tRun) / 1_000_000
+        DjLog.i(TAG, "pipeline start $fromId -> $toId")
         _debug.update { DjDebugState(enabled = true, phase = "waiting-analysis", fromId = fromId, toId = toId, lastOutcome = it.lastOutcome) }
         val pair =
-            withTimeoutOrNull(analysisWaitMs) {
-                combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a != null && b != null) a to b else null }
-                    .first { it != null }
+            coroutineScope {
+                // While the analyses are pending, publish what is happening to each track once a second.
+                val ticker =
+                    launch {
+                        var lastLine = ""
+                        while (isActive) {
+                            val cur = scheduler.statusOf(fromId)
+                            val nxt = scheduler.statusOf(toId)
+                            val errors = scheduler.state.value.recentErrors
+                            _debug.update { it.copy(currentAnalysis = cur, nextAnalysis = nxt, recentErrors = errors) }
+                            val line = "analysis wait ($fromId=$cur, $toId=$nxt)"
+                            if (line != lastLine) {
+                                lastLine = line
+                                DjLog.i(TAG, "$line after ${since()} ms")
+                            }
+                            delay(1000)
+                        }
+                    }
+                try {
+                    withTimeoutOrNull(analysisWaitMs) {
+                        combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a != null && b != null) a to b else null }
+                            .first { it != null }
+                    }
+                } finally {
+                    ticker.cancel()
+                }
             } ?: run {
+                DjLog.w(TAG, "gave up waiting for analyses after ${since()} ms: $fromId=${scheduler.statusOf(fromId)} $toId=${scheduler.statusOf(toId)}")
                 _debug.update { it.copy(phase = "waiting-analysis", reason = "analysis not available") }
                 return
             }
         val (from, to) = pair!!
-        _debug.update { it.copy(phase = "planning") }
+        DjLog.i(TAG, "both analyses ready after ${since()} ms")
+        _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
         val settings = settingsFlow.value
         val plan = withContext(heavyDispatcher) { planner.plan(from, to, settings) }
         publishPlan(from, to, plan)
-        if (plan.kind == PlanKind.SIMPLE_CROSSFADE) return
+        if (plan.kind == PlanKind.SIMPLE_CROSSFADE) {
+            DjLog.i(TAG, "plan is SIMPLE_CROSSFADE (${plan.reason}): the app's normal crossfade will do this transition")
+            _debug.update { it.copy(phase = "fallback") }
+            return
+        }
         val eligibility = WindowTimeline.check(plan)
         if (eligibility is Eligibility.Rejected) {
+            DjLog.w(TAG, "window not possible for ${plan.kind}: ${eligibility.reason} (${plan.reason}) -> normal crossfade")
             _debug.update { it.copy(phase = "fallback", kind = PlanKind.SIMPLE_CROSSFADE, reason = "window not possible: ${eligibility.reason} (${plan.reason})") }
             return
         }
         val timeline = WindowTimeline.build(plan)
         val bounds = checkBounds(timeline, from, to)
         if (bounds != null) {
+            DjLog.w(TAG, "window bounds rejected: $bounds (${plan.reason}) -> normal crossfade")
             _debug.update { it.copy(phase = "fallback", kind = PlanKind.SIMPLE_CROSSFADE, reason = "$bounds (${plan.reason})") }
             return
         }
@@ -275,9 +352,15 @@ class DjEngine(
         _debug.update { it.copy(phase = "decoding") }
         val out = timeline.outgoingDecodeRange()
         val inn = timeline.incomingDecodeRange()
+        DjLog.i(TAG, "decoding windows: outgoing $fromId src ${out.first}..${out.last} ms, incoming $toId src ${inn.first}..${inn.last} ms (window plan time ${timeline.startRelMs}..${timeline.endRelMs})")
+        val tDec = System.nanoTime()
         val outgoingTail = decoder.decodeStereoRange(fromId, out.first, out.last, cancel)
         val incomingHead = decoder.decodeStereoRange(toId, inn.first, inn.last, cancel)
-        if (cancelFlag.get()) return
+        DjLog.i(TAG, "both ranges decoded in ${(System.nanoTime() - tDec) / 1_000_000} ms (${outgoingTail.frames} + ${incomingHead.frames} frames)")
+        if (cancelFlag.get()) {
+            DjLog.i(TAG, "pipeline cancelled after decode")
+            return
+        }
 
         _debug.update { it.copy(phase = "rendering") }
         val file = File(windowDir, "${fromId}_$toId.wav")
@@ -296,13 +379,18 @@ class DjEngine(
                 )
             }
         if (cancelFlag.get()) {
+            DjLog.i(TAG, "pipeline cancelled after render, deleting ${file.name}")
             file.delete()
             return
         }
         val prepared = PreparedTransition(fromId, toId, plan, timeline, rendered, to.durationMs)
         ready = prepared
-        _debug.update { it.copy(phase = "ready") }
-        logger("dj window ready $fromId -> $toId (${rendered.durationMs} ms, ${plan.reason})")
+        _debug.update { it.copy(phase = "ready", mixAtMs = plan.exitPointMs) }
+        DjLog.i(
+            TAG,
+            "window READY $fromId -> $toId in ${since()} ms since pipeline start: ${rendered.durationMs} ms of mix, mix audible at outgoing src ${plan.exitPointMs} ms, " +
+                "window player must start at src ${"%.0f".format(prepared.triggerSourceMs(calibrator.startLatencyMs))} ms (${plan.kind}: ${plan.reason})",
+        )
         listener?.invoke(prepared)
     }
 
@@ -347,6 +435,8 @@ class DjEngine(
 
     private fun key(a: String, b: String) = "$a>$b"
 }
+
+private const val TAG = "engine"
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {

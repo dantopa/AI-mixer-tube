@@ -25,8 +25,11 @@ class CompositeAnalyzer(
             beats.grid(audio)
         } catch (e: Exception) {
             null // model missing / runtime error: keep the DSP result rather than failing the whole analysis
-        } ?: return analysis
-        return overlay(analysis, grid)
+        }
+        // Without a grid the DSP result is kept, but it must still carry THIS analyzer's id: the store treats a row whose
+        // analyzerId differs from the analyzer's id as stale and deletes it on sight, so an untouched "dsp-1" row would be
+        // re-analysed forever and the playing track would wait for an analysis that never sticks.
+        return if (grid == null) analysis.copy(analyzerId = id) else overlay(analysis, grid)
     }
 
     private fun overlay(a: TrackAnalysis, g: BeatGrid): TrackAnalysis {

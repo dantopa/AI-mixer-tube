@@ -133,6 +133,8 @@ import com.maxrave.simpmusic.expect.ui.persistPickedImage
 import com.maxrave.simpmusic.expect.ui.photoPickerResult
 import com.maxrave.simpmusic.extension.displayNameRes
 import com.maxrave.simpmusic.extension.greyScale
+import com.maxrave.simpmusic.expect.ui.DjNextSheet
+import com.maxrave.simpmusic.expect.ui.rememberDjModeEnabled
 import com.maxrave.simpmusic.ui.icon.AccessAlarm
 import com.maxrave.simpmusic.ui.icon.Add
 import com.maxrave.simpmusic.ui.icon.AddCircleOutline
@@ -147,6 +149,7 @@ import com.maxrave.simpmusic.ui.icon.DownloadForOfflineOutlined
 import com.maxrave.simpmusic.ui.icon.Downloading
 import com.maxrave.simpmusic.ui.icon.Edit
 import com.maxrave.simpmusic.ui.icon.FavoriteBorder
+import com.maxrave.simpmusic.ui.icon.GraphicEq
 import com.maxrave.simpmusic.ui.icon.KeyboardArrowDown
 import com.maxrave.simpmusic.ui.icon.KeyboardDoubleArrowDown
 import com.maxrave.simpmusic.ui.icon.KeyboardDoubleArrowUp
@@ -251,6 +254,7 @@ import simpmusic.composeapp.generated.resources.share
 import simpmusic.composeapp.generated.resources.share_url
 import simpmusic.composeapp.generated.resources.simpmusic_lyrics
 import simpmusic.composeapp.generated.resources.sleep_minutes
+import simpmusic.composeapp.generated.resources.ai_dj_next_row
 import simpmusic.composeapp.generated.resources.sleep_timer
 import simpmusic.composeapp.generated.resources.sleep_timer_end_of_song
 import simpmusic.composeapp.generated.resources.sleep_timer_off
@@ -1473,6 +1477,8 @@ fun NowPlayingBottomSheet(
     var sleepTimerWarning by remember { mutableStateOf(false) }
     var isBottomSheetVisible by rememberSaveable { mutableStateOf(false) }
     var changePlaybackSpeedPitch by remember { mutableStateOf(false) }
+    var djNext by remember { mutableStateOf(false) }
+    val djModeEnabled = rememberDjModeEnabled()
     val crossfadeEnabled by dataStoreManager.crossfadeEnabled.collectAsState(DataStoreManager.FALSE)
 
     LaunchedEffect(uiState) {
@@ -1500,6 +1506,10 @@ fun NowPlayingBottomSheet(
                 ),
             )
         }
+    }
+
+    if (djNext) {
+        DjNextSheet(onDismiss = { djNext = false }, onDone = { djNext = false; hideModalBottomSheet() })
     }
 
     if (addToAPlaylist) {
@@ -1952,6 +1962,15 @@ fun NowPlayingBottomSheet(
                             ) {
                                 changePlaybackSpeedPitch = true
                             }
+                        }
+                    }
+                    // AI DJ (Android, and only while DJ mode is on): the best follow-ups from the analysed library.
+                    if (setSleepTimerEnable && djModeEnabled) {
+                        ActionButton(
+                            icon = SimpIcons.GraphicEq,
+                            text = Res.string.ai_dj_next_row,
+                        ) {
+                            djNext = true
                         }
                     }
                     ActionButton(
