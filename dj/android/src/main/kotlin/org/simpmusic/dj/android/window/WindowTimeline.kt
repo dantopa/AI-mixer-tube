@@ -200,7 +200,10 @@ class WindowTimeline private constructor(
             if (plan.kind != PlanKind.BEAT_MATCHED && plan.kind != PlanKind.CUT) {
                 return Eligibility.Rejected("plan kind ${plan.kind}")
             }
-            if (plan.overlapMs <= 0) return Eligibility.Rejected("no overlap")
+            // A CUT is a beat-aligned hard switch on a downbeat: it has no overlap by design, but the window still
+            // makes it sample-accurate. Only a blend needs a positive overlap.
+            if (plan.kind == PlanKind.BEAT_MATCHED && plan.overlapMs <= 0) return Eligibility.Rejected("no overlap")
+            if (plan.overlapMs < 0) return Eligibility.Rejected("negative overlap")
             val settled = maxOf(plan.overlapMs, laneEnd(plan.outgoing), laneEnd(plan.incoming))
             val start = plan.preRollMs - WindowTuning.LEAD_IN_MS
             identity(plan.outgoing, start.toDouble())?.let { return Eligibility.Rejected("outgoing not plain at window start: $it") }
