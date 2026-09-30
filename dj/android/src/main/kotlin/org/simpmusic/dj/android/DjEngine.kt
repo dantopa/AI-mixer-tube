@@ -496,8 +496,8 @@ class DjEngine(
 
 private const val TAG = "engine"
 
-/** Time the pipeline needs (decode + render + player warm-up) between "now" and the earliest audible instant of a mix. */
-private const val EARLIEST_EXIT_AHEAD_MS = 45_000L
+/** Time the pipeline needs (decode + render + player warm-up; measured 9.4 s end to end on a Pixel 10 Pro, 2026-09-30) between "now" and the earliest audible instant of a mix. */
+private const val EARLIEST_EXIT_AHEAD_MS = 25_000L
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {

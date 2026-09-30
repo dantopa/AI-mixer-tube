@@ -55,6 +55,22 @@ internal class TrackContext(val analysis: TrackAnalysis) {
     val medianBeatMs: Double = medianInterval(beats)
     val gridBpm: Double = if (medianBeatMs > 0) 60000.0 / medianBeatMs else 0.0
 
+    /**
+     * Tempo from beats per unit of time over the whole grid. Unlike the median interval it is not pulled around by a
+     * tracker that inserts or drops beats, so the two disagreeing is a sign the grid is not to be trusted for tempo.
+     */
+    val avgBpm: Double = if (beats.size >= 2 && beats.last() > beats.first()) 60000.0 * (beats.size - 1) / (beats.last() - beats.first()) else 0.0
+
+    /**
+     * True when a tempo measured locally (bpm) is the same tempo the track has as a whole, allowing the half / double
+     * lattice: it must match the whole-grid average or the tempo field. Nothing to compare against counts as agreement.
+     */
+    fun localTempoAgrees(localBpm: Double): Boolean {
+        val refs = listOfNotNull(avgBpm.takeIf { it > 0 }, bpmValue)
+        if (refs.isEmpty() || localBpm <= 0) return true
+        return refs.any { ref -> listOf(1.0, 2.0, 0.5).any { abs(localBpm / ref / it - 1.0) < LOCAL_TEMPO_TOLERANCE } }
+    }
+
     val bpmValue: Double? = analysis.bpm?.value?.toDouble()?.takeIf { it.isFinite() && it in 30.0..320.0 }
     val bpmConf: Float = if (bpmValue != null) analysis.bpm?.confidence ?: 0f else 0f
 
@@ -222,3 +238,6 @@ internal class TrackContext(val analysis: TrackAnalysis) {
 internal fun Double.toLongClamped(): Long = if (this.isNaN()) 0L else this.coerceIn(-9e15, 9e15).roundToLong()
 
 internal fun <T> Confident<T>?.conf(): Float = this?.confidence ?: 0f
+
+/** How far (fraction) a local tempo may sit from the track's overall tempo before its beat grid is distrusted. */
+internal const val LOCAL_TEMPO_TOLERANCE = 0.06

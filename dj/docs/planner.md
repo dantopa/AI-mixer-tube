@@ -230,3 +230,17 @@ Tools: `PlanHistogram` and `MixAnywhereReport` in `dj/ml/src/test` (env `DJ_CACH
 * Rendered echo-out, real music: the tail is 5-15 dB under the outgoing track's level before the fade in the first
   second after T0 and falls ~10 dB/s (synthetic tracks: -40 dB -> -60 dB -> -75 dB per second). Whether that is
   audible enough *under* a loud incoming track is not verified by ear.
+
+
+### Tempo consistency gate (2026-09-30)
+
+A device log showed a BEAT_MATCHED plan whose incoming deck was stretched from a local tempo of 74 bpm while the same
+track's tempo field said 110, its beat count over its length said 103 and its median beat interval said 130. The tracker
+had dropped and doubled beats in the intro, and the planner had matched against that grid. `finishBeat` now measures the
+tempo the plan would actually stretch each deck by (the local fit's median interval) and requires it to match the track's
+overall tempo (`TrackContext.avgBpm`, beats per unit time, or the tempo field), allowing x1 / x2 / x0.5 within 6 %.
+Otherwise that pair fails with the numbers in `plan.reason` and the search moves on (usually ending in ECHO_OUT).
+On the 13 real tracks (156 pairs) BEAT_MATCHED drops 61 -> 31 and ECHO_OUT rises 87 -> 117; the tracks that lose their
+beat-matches are the ones whose grids disagree with themselves (tea_roots, waltz_tschaikovsky_op40, canon_in_d).
+Caveat on all the corpus numbers in this file: the corpus is mostly clean electronic music where median = average =
+field tempo. Pop / Latin / live recordings (the owner's library) look much messier.

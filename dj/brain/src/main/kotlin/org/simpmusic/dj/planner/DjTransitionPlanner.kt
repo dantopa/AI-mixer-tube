@@ -322,6 +322,14 @@ class DjTransitionPlanner : TransitionPlanner {
     ): Attempt {
         val out = c.out
         val inc = c.inc
+        // A beat-match stretches each deck by the tempo measured HERE. When that is not the tempo the track has overall
+        // (typical of an intro, or a tracker that drops / doubles beats), the "beats" being aligned are not the music's.
+        if (localOut.medianIbi > 0 && !out.localTempoAgrees(60000.0 / localOut.medianIbi)) {
+            return Attempt.fail("outgoing tempo at the exit (${fmt1(60000.0 / localOut.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(out.avgBpm)}, field ${out.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there")
+        }
+        if (localIn.medianIbi > 0 && !inc.localTempoAgrees(60000.0 / localIn.medianIbi)) {
+            return Attempt.fail("incoming tempo at the entry (${fmt1(60000.0 / localIn.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(inc.avgBpm)}, field ${inc.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there")
+        }
         val settings = c.settings
         val barsMode = c.barsMode
         val minUnits = c.minUnits
