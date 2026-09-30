@@ -132,6 +132,8 @@ class AnalysisPlumbingTest {
             assertTrue(s.enabled)
             assertFalse("Auto DJ is off by default", s.autoDj)
             assertEquals(EnergyArc.STEADY, s.autoDjArc)
+            assertTrue("simple mode is the default", repo.simpleMode.first())
+            assertFalse("simple mode: no echo-out by default", s.allowEchoOut)
             assertTrue("analyze on mobile data defaults to ON", repo.analyzeOnMetered.first())
             assertFalse("the library analysis is not running until asked", repo.libraryAnalysis.first())
         }
@@ -140,6 +142,7 @@ class AnalysisPlumbingTest {
     fun autoDjAndItsArcAreStoredAndTheOtherFieldsSurvive() =
         runBlocking {
             val repo = repo()
+            repo.setSimpleMode(false) // this test is about what is stored; simple mode only changes what is read
             repo.setEnabled(true)
             repo.setAutoDj(true)
             repo.setAutoDjArc(EnergyArc.WAVE)

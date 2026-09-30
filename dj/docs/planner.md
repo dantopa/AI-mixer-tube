@@ -258,3 +258,12 @@ Correction to the variety pick (third device log): it also varied the ENTRY, and
 (34 s in), so the listener never heard its intro. The pick now only varies the exit: entries stay within the first 15 % of
 the incoming track unless the best-scoring pair already enters later. Entry position over the 156 real pairs, per 10 %
 bucket: `112 28 0 1 7 0 0 0 0 0` (the 8 deeper ones are the best pair's own choice).
+
+### Simple mode and bass drop-out exits (2026-09-30)
+
+Owner feedback after a device test: the echo-out mix "sounded bad and drifted"; the wish is "keep the same base, or else a
+crossfade", leaving the outgoing track where its base stops. `DjSettings.allowEchoOut` (default true for the contract, false
+under simple mode) makes `buildEchoOut` fail, so incompatible pairs end in SIMPLE_CROSSFADE. `MixCandidates.exits` adds
+`bassDrop` (0..1: low band in the 4 s after the exit vs the 8 s before, for exits that had a base, >= 0.12 of the track's
+loudest hop) with weight 0.14 (boundary 0.29 -> 0.15). Corpus (156 pairs): exits that have a base and lose more than half
+of it right after: 26 -> 59 of 148. Simple mode (no echo, bend 6 %): BEAT_MATCHED 22, SIMPLE_CROSSFADE 134.

@@ -584,6 +584,8 @@
     <string name="ai_dj_why">Last planned transition</string>
     <string name="ai_dj_no_plan_yet">Nothing planned yet. Play a couple of songs.</string>
     <string name="ai_dj_analyzer_missing">The beat analyzer is not part of this build yet, so DJ mode falls back to the normal crossfade.</string>
+    <string name="ai_dj_simple_mode">Simple mode</string>
+    <string name="ai_dj_simple_mode_description">Keep the same base with a beat-matched mix at a small tempo change, or else the normal crossfade. No echo-out, pitch shifting or EQ swap. Turn off to use the advanced options below.</string>
     <string name="ai_dj_mix_anywhere">Mix anywhere in the song</string>
     <string name="ai_dj_mix_anywhere_description">Find the best moment in the current song to mix out (after about half of it, at least 25 s from now). Off: only near the end. Songs whose tempos cannot be matched get an echo-out instead of a plain crossfade.</string>
     <string name="ai_dj_analyze_on_metered">Analyze on mobile data</string>

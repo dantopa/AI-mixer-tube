@@ -28,7 +28,14 @@ class DjSettingsRepository(
     constructor(context: Context) : this(context.applicationContext.djDataStore)
 
     /** The settings the planner/engine consume. Values are clamped on read, so a corrupt file cannot crash playback. */
-    val settings: Flow<DjSettings> = store.data.map { it.toSettings() }
+    val settings: Flow<DjSettings> = store.data.map { prefs -> prefs.toSettings().let { if (prefs[SIMPLE_MODE] ?: DEFAULT_SIMPLE_MODE) it.simplified() else it } }
+
+    /** Simple mode (default ON): the plan is a beat-matched mix at a small tempo bend, or the app's plain crossfade. No echo-out, no pitch shifting, no EQ swap. */
+    val simpleMode: Flow<Boolean> = store.data.map { it[SIMPLE_MODE] ?: DEFAULT_SIMPLE_MODE }
+
+    suspend fun setSimpleMode(on: Boolean) {
+        store.edit { it[SIMPLE_MODE] = on }
+    }
 
     /** Whether the playing / next track's analysis may fetch a stream on a metered connection (default ON). The library warm-up never does. */
     val analyzeOnMetered: Flow<Boolean> = store.data.map { it[ANALYZE_ON_METERED] ?: DEFAULT_ANALYZE_ON_METERED }
@@ -98,6 +105,11 @@ class DjSettingsRepository(
         /** On by default: one track is about 4 MB, and without it the next track can never be analysed in time on mobile data. */
         const val DEFAULT_ANALYZE_ON_METERED = true
 
+        /** Simple mode on by default: the owner asked for "keep the same base, or else crossfade". */
+        const val DEFAULT_SIMPLE_MODE = true
+        /** Largest tempo bend simple mode allows; a phase-vocoder stretch beyond a few percent smears vocals and transients. */
+        const val SIMPLE_MODE_MAX_BEND = 0.06f
+
         const val MIN_OVERLAP_BARS = 2
         const val MAX_OVERLAP_BARS = 32
         const val MAX_TEMPO_BEND_LIMIT = 0.16f
@@ -113,7 +125,17 @@ class DjSettingsRepository(
         private val AUTO_DJ = booleanPreferencesKey("dj_auto_dj")
         private val AUTO_DJ_ARC = stringPreferencesKey("dj_auto_dj_arc")
         private val MIX_POINT = stringPreferencesKey("dj_mix_point")
+        private val SIMPLE_MODE = booleanPreferencesKey("dj_simple_mode")
         private val LIBRARY_ANALYSIS = booleanPreferencesKey("dj_library_analysis")
         private val ANALYZE_ON_METERED = booleanPreferencesKey("dj_analyze_on_metered")
     }
 }
+
+/** The simple-mode view of the settings: nothing but a modest beat-match, or a crossfade. Stored values are untouched. */
+internal fun DjSettings.simplified(): DjSettings =
+    copy(
+        allowEchoOut = false,
+        allowKeyShift = false,
+        bassSwap = false,
+        maxTempoBend = minOf(maxTempoBend, DjSettingsRepository.SIMPLE_MODE_MAX_BEND),
+    )

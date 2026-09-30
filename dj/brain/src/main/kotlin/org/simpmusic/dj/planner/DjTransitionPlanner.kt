@@ -525,6 +525,7 @@ class DjTransitionPlanner : TransitionPlanner {
      * enters at [entryPick] at native tempo and full level. No tempo automation: the decks are never beat-matched.
      */
     private fun buildEchoOut(c: Ctx, exitPick: Pick, entryPick: Pick, why: String, cand: ExitCand? = null, score: Double = 0.0): Attempt {
+        if (!c.settings.allowEchoOut) return Attempt.fail("echo-out is off")
         val out = c.out
         val inc = c.inc
         val e = exitPick.timeMs

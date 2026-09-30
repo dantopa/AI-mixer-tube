@@ -191,6 +191,8 @@ data class DjSettings(
     val maxTempoBend: Float = 0.08f,
     /** Allow shifting pitch by up to ±[maxPitchShift] semitones to reach a compatible key. */
     val allowKeyShift: Boolean = true,
+    /** Allow the echo-out fallback for tempo-incompatible pairs. Off: those pairs get the app's plain crossfade. */
+    val allowEchoOut: Boolean = true,
     val maxPitchShift: Int = 2,
     /** Bass swap (low-cut hand-over) on the transition. */
     val bassSwap: Boolean = true,

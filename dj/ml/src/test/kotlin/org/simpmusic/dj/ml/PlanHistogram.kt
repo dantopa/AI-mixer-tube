@@ -42,6 +42,30 @@ class PlanHistogram {
             if (p.kind.name == "SIMPLE_CROSSFADE") reasons.merge(p.reason.substringAfter("): ").take(90), 1, Int::plus)
         }
         println("PLANHIST pairs=$pairs kinds=$kinds")
+        // how often the chosen exit is a real bass drop-out: low band in the 4 s after vs the 8 s before
+        var withBass = 0
+        var dropped = 0
+        for ((ia, a) in ana) for ((ib, b) in ana) {
+            if (ia == ib) continue
+            val p = planner.plan(a, b, settings)
+            if (p.kind.name == "SIMPLE_CROSSFADE") continue
+            val hop = a.energyHopMs.toLong().coerceAtLeast(1)
+            val low = a.lowBandEnergy
+            if (low.isEmpty()) continue
+            fun mean(f: Long, t: Long): Float {
+                val i0 = (f / hop).toInt().coerceIn(0, low.size - 1)
+                val i1 = (t / hop).toInt().coerceIn(i0, low.size - 1)
+                return low.subList(i0, i1 + 1).average().toFloat()
+            }
+            val before = mean(p.exitPointMs - 8000, p.exitPointMs)
+            val after = mean(p.exitPointMs, p.exitPointMs + 4000)
+            if (before >= 0.12f) { withBass++; if (after / before < 0.5f) dropped++ }
+        }
+        println("PLANHIST exits with a base to lose: $withBass, of which the low band falls below half right after: $dropped")
+        val simple = DjSettings(enabled = true, allowEchoOut = false, allowKeyShift = false, bassSwap = false, maxTempoBend = 0.06f)
+        val sk = java.util.TreeMap<String, Int>()
+        for ((ia, a) in ana) for ((ib, b) in ana) { if (ia == ib) continue; sk.merge(planner.plan(a, b, simple).kind.name, 1, Int::plus) }
+        println("PLANHIST simple mode kinds=$sk")
         println("PLANHIST exit position in the outgoing track, share per 10% bucket: " + exitDeciles.joinToString(" ") { "%d".format(it) })
         println("PLANHIST entry position in the incoming track, per 10% bucket: " + entryDeciles.joinToString(" ") { "%d".format(it) })
         reasons.entries.sortedByDescending { it.value }.forEach { println("PLANHIST crossfade reason x${it.value}: ${it.key}") }

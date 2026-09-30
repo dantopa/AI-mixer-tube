@@ -105,6 +105,17 @@ class PlannerAnywhereTest {
     }
 
     @Test
+    fun withEchoOutOffIncompatibleTemposGetAPlainCrossfade() {
+        val from = ana(120f, "a", longTrack)
+        val to = ana(150f, "b")
+        for (s in listOf(anywhere, atEnd)) {
+            val p = planner.plan(from, to, s.copy(allowEchoOut = false))
+            assertEquals(PlanKind.SIMPLE_CROSSFADE, p.kind, p.reason)
+            assertEquals(null, p.echoOut)
+        }
+    }
+
+    @Test
     fun incompatibleTemposGetAnEchoOutNeverACut() {
         val from = ana(120f, "a", longTrack)
         val to = ana(150f, "b")

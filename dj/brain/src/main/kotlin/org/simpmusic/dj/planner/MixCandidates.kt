@@ -12,7 +12,13 @@ import kotlin.math.min
  */
 internal object MixScoring {
     /** The exit sits at a natural section boundary of the outgoing track (end of a BODY/DROP, start of a BREAKDOWN/OUTRO). */
-    const val W_EXIT_BOUNDARY = 0.29
+    const val W_EXIT_BOUNDARY = 0.15
+    /** The low band (kick / bass) falls away right after the exit: the outgoing track has stopped carrying the base, so the next one can take over without a clash. */
+    const val W_BASS_DROP = 0.14
+    /** Window (ms) after the exit over which the low band is compared with the REGION_MS before it. */
+    const val BASS_AFTER_MS = 4_000L
+    /** A low band below this (of the track's own loudest hop) before the exit means there was no base to lose. */
+    const val BASS_MIN_BEFORE = 0.12f
     /** How much of the outgoing track has played (never butcher a song; mildly prefer later). */
     const val W_PLAYED = 0.02
     /** Exits in the last part of the track (the outro zone) lose up to this much: the owner asked for mixes anywhere, not always at the end. */
@@ -54,6 +60,8 @@ internal class ExitCand(
     val energyBefore: Float?,
     val lowBefore: Float?,
     val inBreakdown: Boolean,
+    /** 0..1: how completely the low band falls away after this exit (0 = keeps going, 1 = gone). */
+    val bassDrop: Double = 0.0,
 ) {
     val timeMs: Long get() = pick.timeMs
 }
@@ -124,6 +132,8 @@ internal object MixCandidates {
             val before = out.meanOver(out.energy, e - MixScoring.REGION_MS, e)
             val after = out.meanOver(out.energy, e, e + MixScoring.REGION_MS)
             val lowBefore = out.meanOver(out.lowBand, e - MixScoring.REGION_MS, e)
+            val lowAfterOut = out.meanOver(out.lowBand, e, e + MixScoring.BASS_AFTER_MS)
+            val bassDrop = if (lowBefore != null && lowAfterOut != null && lowBefore >= MixScoring.BASS_MIN_BEFORE) ((1.0 - lowAfterOut / lowBefore) / 0.6).coerceIn(0.0, 1.0) else 0.0
             var sectionScore: Double? = null
             var viaOutro = false
             var inBreakdown = false
@@ -164,7 +174,7 @@ internal object MixCandidates {
             val minP = minPlayedFraction.toDouble()
             val playedScore = 0.5 + 0.5 * ((played - minP) / max(0.05, 0.85 - minP)).coerceIn(0.0, 1.0)
             val room = ((out.audibleEndMs - e) / max(1.0, overlapWantedMs + 4000.0)).coerceIn(0.0, 1.0)
-            list += ExitCand(DjTransitionPlanner.Pick(e, p.levelName, viaOutro), levelScore(p.levelName), boundary, playedScore, room, before, lowBefore, inBreakdown)
+            list += ExitCand(DjTransitionPlanner.Pick(e, p.levelName, viaOutro), levelScore(p.levelName), boundary, playedScore, room, before, lowBefore, inBreakdown, bassDrop)
         }
         return list
     }
@@ -245,7 +255,7 @@ internal object MixCandidates {
         val kind = if (n.isBreakdownStart && e.inBreakdown) 1.0 else n.kindScore
         val level = 0.5 * (e.levelScore + n.levelScore)
         val outroZone = MixScoring.OUTRO_ZONE_PENALTY * max(0.0, (e.playedFraction - MixScoring.OUTRO_ZONE_FROM) / (1.0 - MixScoring.OUTRO_ZONE_FROM)).coerceAtMost(1.0)
-        return -outroZone + MixScoring.W_EXIT_BOUNDARY * e.boundary +
+        return -outroZone + MixScoring.W_BASS_DROP * e.bassDrop + MixScoring.W_EXIT_BOUNDARY * e.boundary +
             MixScoring.W_PLAYED * e.playedFraction +
             MixScoring.W_ROOM_OUT * e.roomScore +
             MixScoring.W_ENERGY * energyTerm +

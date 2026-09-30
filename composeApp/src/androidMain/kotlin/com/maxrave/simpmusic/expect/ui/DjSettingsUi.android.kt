@@ -33,6 +33,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered_description
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere
+import simpmusic.composeapp.generated.resources.ai_dj_simple_mode
+import simpmusic.composeapp.generated.resources.ai_dj_simple_mode_description
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere_description
 import simpmusic.composeapp.generated.resources.ai_dj_arc_build
 import simpmusic.composeapp.generated.resources.ai_dj_arc_cool_down
@@ -105,6 +107,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
     val autoDj = koinInject<AutoDjController>()
 
     val settings by repo.settings.collectAsStateWithLifecycle(DjSettings())
+    val simpleMode by repo.simpleMode.collectAsStateWithLifecycle(DjSettingsRepository.DEFAULT_SIMPLE_MODE)
     val analyzeOnMetered by repo.analyzeOnMetered.collectAsStateWithLifecycle(DjSettingsRepository.DEFAULT_ANALYZE_ON_METERED)
     val debug by hooks.debug.collectAsStateWithLifecycle()
     val scheduling by scheduler.state.collectAsStateWithLifecycle()
@@ -167,6 +170,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
         AnimatedVisibility(visible = settings.enabled) {
             Column {
                 SettingItem(
+                    title = stringResource(Res.string.ai_dj_simple_mode),
+                    subtitle = stringResource(Res.string.ai_dj_simple_mode_description),
+                    smallSubtitle = true,
+                    switch = (simpleMode to { on -> scope.launch { repo.setSimpleMode(on) }; Unit }),
+                    isEnable = notCasting,
+                )
+                SettingItem(
                     title = overlapTitle,
                     subtitle =
                         if (castRemote) {
@@ -204,7 +214,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             "±${(settings.maxTempoBend * 100).roundToInt()}% · " + stringResource(Res.string.ai_dj_max_tempo_bend_description)
                         },
                     smallSubtitle = true,
-                    isEnable = notCasting,
+                    isEnable = notCasting && !simpleMode,
                     onClick = {
                         viewModel.setAlertData(
                             SettingAlertState(
@@ -233,7 +243,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         },
                     smallSubtitle = true,
                     switch = (settings.allowKeyShift to { on -> scope.launch { repo.setAllowKeyShift(on) }; Unit }),
-                    isEnable = notCasting,
+                    isEnable = notCasting && !simpleMode,
                 )
                 SettingItem(
                     title = stringResource(Res.string.ai_dj_bass_swap),
@@ -245,7 +255,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         },
                     smallSubtitle = true,
                     switch = (settings.bassSwap to { on -> scope.launch { repo.setBassSwap(on) }; Unit }),
-                    isEnable = notCasting,
+                    isEnable = notCasting && !simpleMode,
                 )
                 SettingItem(
                     title = stringResource(Res.string.ai_dj_mix_anywhere),
