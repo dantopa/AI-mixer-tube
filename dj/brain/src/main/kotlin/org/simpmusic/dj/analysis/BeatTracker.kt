@@ -28,42 +28,26 @@ internal object BeatTracker {
     /** Extra delay between the flux peak's frame centre and the acoustic onset, calibrated on click/kick material. */
     var latencySec = 0.0
 
-    /** DP tightness: penalty per squared log-ratio of the beat spacing against the period. */
-    var tightness = 2000.0
+    /** DP tightness for steady grids (electronic, quantised) and for tracks whose tempo moves (live, rubato). */
+    var rigidTightness = 2000.0
+    var flexibleTightness = 150.0
 
-    fun track(raw: FloatArray, det: FloatArray, bpm: Double, firstPass: Boolean = true): BeatResult? {
+    /** Share of beats that must sit on one straight grid for the tempo to count as steady. */
+    var debug: ((String) -> Unit)? = null
+    var inlierThreshold = 0.8
+
+    fun track(raw: FloatArray, det: FloatArray, bpm: Double): BeatResult? {
         val n = det.size
         if (n < 200) return null
         val period0 = 60.0 * Grid.FPS / bpm
         val local = gaussianSmooth(det, 1.0)
-        val periods = DoubleArray(n) { period0 }
-        var beats = dp(local, periods)
+        // 1) rigid pass: if the result sits on one straight beat grid the tempo is steady and the grid wins
+        val rigid = pickBeats(local, period0, rigidTightness, snap = true)
+        debug?.invoke("rigid steady=${rigid?.second}")
+        // 2) otherwise let the tempo breathe (live drummer, rubato): low tightness and a drifting period
+        val chosen = if (rigid != null && rigid.second) rigid.first else (pickBeats(local, period0, flexibleTightness, snap = false)?.first ?: rigid?.first)
+        var beats = chosen ?: return null
         if (beats.size < 4) return null
-        if (firstPass) {
-            // Refine the period from the first pass: a constant one when the tempo is steady, a slowly varying one
-            // (median filtered local IBIs, +-7 %) when it visibly drifts.
-            val ibis = DoubleArray(beats.size - 1) { (beats[it + 1] - beats[it]).toDouble() }
-            val globalIbi = median(ibis.copyOf())
-            if (globalIbi > 0 && abs(globalIbi / period0 - 1) < 0.08) {
-                val w = 12
-                val smooth = DoubleArray(ibis.size) { i ->
-                    val a = max(0, i - w); val b = min(ibis.size, i + w + 1)
-                    median(ibis.copyOfRange(a, b))
-                }
-                var drifting = false
-                for (v in smooth) if (abs(v / globalIbi - 1) > 0.03) { drifting = true; break }
-                for (t in 0 until n) {
-                    if (!drifting) { periods[t] = globalIbi; continue }
-                    val bi = lowerBound(beats, t)
-                    val idx = (bi - 1).coerceIn(0, smooth.size - 1)
-                    periods[t] = smooth[idx].coerceIn(globalIbi * 0.93, globalIbi * 1.07)
-                }
-                val second = dp(local, periods)
-                if (second.size >= 4) beats = second
-            }
-        }
-        // Steady tempo: lock every beat to one global grid (fixes phase walks through drum-less passages).
-        snapToGrid(local, beats)?.let { beats = it }
         // sub-frame refinement on the raw envelope
         val t = DoubleArray(beats.size)
         for (i in beats.indices) {
@@ -111,6 +95,37 @@ internal object BeatTracker {
     }
 
 
+    /** DP beat tracking with a first pass and a period-refined second pass. Returns (beat frames, steadyGrid). */
+    private fun pickBeats(local: FloatArray, period0: Double, alpha: Double, snap: Boolean): Pair<IntArray, Boolean>? {
+        val n = local.size
+        val periods = DoubleArray(n) { period0 }
+        var beats = dp(local, periods, alpha)
+        if (beats.size < 4) return null
+        // Refine the period from the first pass: a constant one when the tempo is steady, a slowly varying one
+        // (median filtered local IBIs, +-7 %) when it visibly drifts.
+        val ibis = DoubleArray(beats.size - 1) { (beats[it + 1] - beats[it]).toDouble() }
+        val globalIbi = median(ibis.copyOf())
+        if (globalIbi > 0 && abs(globalIbi / period0 - 1) < 0.08) {
+            val w = 12
+            val smooth = DoubleArray(ibis.size) { i ->
+                val a = max(0, i - w); val b = min(ibis.size, i + w + 1)
+                median(ibis.copyOfRange(a, b))
+            }
+            var drifting = false
+            for (v in smooth) if (abs(v / globalIbi - 1) > 0.03) { drifting = true; break }
+            for (t in 0 until n) {
+                if (!drifting) { periods[t] = globalIbi; continue }
+                val bi = lowerBound(beats, t)
+                val idx = (bi - 1).coerceIn(0, smooth.size - 1)
+                periods[t] = smooth[idx].coerceIn(globalIbi * 0.93, globalIbi * 1.07)
+            }
+            val second = dp(local, periods, alpha)
+            if (second.size >= 4) beats = second
+        }
+        if (snap) snapToGrid(local, beats)?.let { return it to true }
+        return beats to false
+    }
+
     /**
      * When >= 80 % of the tracked beats sit within 12 % of a single straight beat grid the tempo is steady: rebuild
      * the beat list from that grid, each point snapped to the strongest onset within +-15 % of the period (or left on
@@ -123,7 +138,10 @@ internal object BeatTracker {
         val ibis = DoubleArray(nb - 1) { t[it + 1] - t[it] }
         val period = median(ibis)
         if (period < 5) return null
-        val k = IntArray(nb) { ((t[it] - t[0]) / period).roundToInt() }
+        // beat numbers by cumulative rounding of each interval (a global division would drift when the integer-frame
+        // median period is not exactly the true one)
+        val k = IntArray(nb)
+        for (i in 1 until nb) k[i] = k[i - 1] + max(1, (ibis[i - 1] / period).roundToInt())
         val step = max(1, nb / 4)
         val slopes = ArrayList<Double>()
         for (i in 0 until nb - step) if (k[i + step] != k[i]) slopes.add((t[i + step] - t[i]) / (k[i + step] - k[i]))
@@ -132,7 +150,8 @@ internal object BeatTracker {
         val icpt = median(DoubleArray(nb) { t[it] - slope * k[it] })
         var inl = 0
         for (i in 0 until nb) if (abs(t[i] - (icpt + slope * k[i])) < 0.12 * slope) inl++
-        if (inl < 0.8 * nb) return null
+        debug?.invoke("steady-grid inliers=${"%.3f".format(inl.toDouble() / nb)}")
+        if (inl < inlierThreshold * nb) return null
         val firstK = k[0]; val lastK = k[nb - 1]
         val out = IntArray(lastK - firstK + 1)
         val peaks = FloatArray(out.size)
@@ -150,7 +169,7 @@ internal object BeatTracker {
         return out
     }
 
-    private fun dp(local: FloatArray, periods: DoubleArray): IntArray {
+    private fun dp(local: FloatArray, periods: DoubleArray, tightness: Double): IntArray {
         val n = local.size
         val score = DoubleArray(n)
         val prev = IntArray(n) { -1 }

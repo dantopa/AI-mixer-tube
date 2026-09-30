@@ -25,6 +25,7 @@ class RealMusicCheck {
         val out = System.getenv("DJ_OUT")?.let { File(it).apply { mkdirs() } }
         val only = System.getenv("DJ_ONLY")?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
         val analyzer = DspTrackAnalyzer()
+        BeatTracker.debug = { println("   [tracker] $it") }
         val files = dir.listFiles { f -> f.extension == "wav" }!!.sortedBy { it.name }
             .filter { only == null || only.any { o -> it.name.contains(o) } }
         for (f in files) {
@@ -41,7 +42,7 @@ class RealMusicCheck {
             val beats = a.beatTimesMs?.value
             if (beats != null && beats.size > 8) {
                 val chk = gridVsOnsets(audio, beats)
-                println("   grid-vs-onset: median offset ${"%.1f".format(chk.first)} ms, within 25 ms: ${"%.0f".format(chk.second * 100)} %")
+                println("   grid-vs-onset (strongest 40% attacks): median onset-minus-beat ${"%.1f".format(chk.first)} ms, within 25 ms: ${"%.0f".format(chk.second * 100)} %")
                 if (out != null) writeClicks(File(out, f.nameWithoutExtension + "_clicks.wav"), audio, a)
             }
         }
@@ -107,15 +108,17 @@ class RealMusicCheck {
         }
         val rise = DoubleArray(n)
         for (i in 4 until n) rise[i] = max(0.0, Math.sqrt(env[i]) - Math.sqrt(env[i - 4]))
-        val offs = ArrayList<Double>()
+        // per beat: where does the strongest energy rise within +-60 ms sit, and how strong is it?
+        val peaks = ArrayList<Pair<Double, Double>>() // (strength, offset ms)
         for (b in beatsMs) {
-            var best = -1; var bv = 0.0
+            var best = Int.MIN_VALUE; var bv = 0.0
             for (d in -60..60) { val i = b + d; if (i in 0 until n && rise[i] > bv) { bv = rise[i]; best = d } }
-            if (best != Int.MIN_VALUE && bv > 0) offs.add(best.toDouble())
+            if (best != Int.MIN_VALUE) peaks.add(bv to best.toDouble())
         }
-        if (offs.isEmpty()) return 0.0 to 0.0
-        offs.sort()
-        return offs[offs.size / 2] to offs.count { abs(it) <= 25 }.toDouble() / beatsMs.size
+        if (peaks.isEmpty()) return 0.0 to 0.0
+        // only beats with a clear physical attack (top 40 % by strength) say anything about timing
+        val strong = peaks.sortedByDescending { it.first }.take(max(1, peaks.size * 2 / 5)).map { it.second }.sorted()
+        return strong[strong.size / 2] to strong.count { abs(it) <= 25 }.toDouble() / strong.size
     }
 
     private fun writeClicks(file: File, audio: PcmAudio, a: TrackAnalysis) {

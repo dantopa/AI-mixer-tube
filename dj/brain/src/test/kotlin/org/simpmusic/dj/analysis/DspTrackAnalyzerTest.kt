@@ -63,6 +63,8 @@ class DspTrackAnalyzerTest {
             assertTrue(e.beatMedianErr < 15, "median beat error ${e.beatMedianErr} (bpm=$bpm first=$first swing=$swing)")
             assertTrue(e.beatWithin40 > 0.95, "within 40 ms: ${e.beatWithin40} (bpm=$bpm first=$first swing=$swing)")
             assertTrue(e.downbeatRecall >= 0.9 && e.downbeatPrecision >= 0.9, "downbeats rec=${e.downbeatRecall} prec=${e.downbeatPrecision} (bpm=$bpm first=$first swing=$swing)")
+            assertTrue(e.sectionBoundaryHit >= 0.75, "sections ${e.sectionBoundaryHit} (bpm=$bpm first=$first swing=$swing)")
+            assertTrue(e.keyCorrect, "key (bpm=$bpm first=$first swing=$swing)")
         }
     }
 
