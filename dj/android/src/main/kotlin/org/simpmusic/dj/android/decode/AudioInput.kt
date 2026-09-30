@@ -12,7 +12,12 @@ import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.ContentMetadata
+import android.os.SystemClock
+import org.simpmusic.dj.android.log.DjLog
+import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** A source of compressed audio that a [MediaExtractor] can be pointed at. */
 interface AudioInput {
@@ -31,11 +36,62 @@ class ResolvedAudio(
     val origin: AudioOrigin,
 )
 
-/** Streams `http(s)` audio directly through the platform's own network stack. */
+/**
+ * `http(s)` audio, fetched here with bounded timeouts and then decoded from memory. Pointing [MediaExtractor] at the URL
+ * made IT do the network reads, with no timeout we control: one stalled connection blocked the single analysis thread
+ * for good, every later track sat "queued" and the chip counted seconds forever. A track is ~2 MB, so a bounded
+ * download costs nothing. A 4xx answer falls back to the old direct path (some hosts refuse a non-player request).
+ */
 class UrlAudioInput(private val url: String) : AudioInput {
-    override fun applyTo(extractor: MediaExtractor) = extractor.setDataSource(url, emptyMap())
+    override fun applyTo(extractor: MediaExtractor) {
+        val bytes =
+            try {
+                download()
+            } catch (e: HttpRejected) {
+                DjLog.w("decode", "host answered HTTP ${e.code} to a plain download; using the platform's own stream reader for this one")
+                extractor.setDataSource(url, emptyMap())
+                return
+            }
+        org.simpmusic.dj.android.diag.BytesAudioInput(bytes).applyTo(extractor)
+    }
+
+    private fun download(): ByteArray {
+        val t0 = SystemClock.elapsedRealtime()
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.connectTimeout = CONNECT_TIMEOUT_MS
+        conn.readTimeout = READ_TIMEOUT_MS
+        try {
+            val code = conn.responseCode
+            if (code in 400..499) throw HttpRejected(code)
+            if (code !in 200..299) throw IOException("HTTP $code fetching the audio")
+            val out = ByteArrayOutputStream(conn.contentLength.takeIf { it > 0 } ?: (1 shl 20))
+            val buf = ByteArray(64 * 1024)
+            conn.inputStream.use { input ->
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                    if (out.size() > MAX_BYTES) throw IOException("audio larger than ${MAX_BYTES / (1024 * 1024)} MB, refusing it")
+                    if (SystemClock.elapsedRealtime() - t0 > TOTAL_DEADLINE_MS) throw IOException("audio download took longer than ${TOTAL_DEADLINE_MS / 1000} s")
+                }
+            }
+            DjLog.i("decode", "downloaded ${out.size()} B in ${SystemClock.elapsedRealtime() - t0} ms")
+            return out.toByteArray()
+        } finally {
+            conn.disconnect()
+        }
+    }
 
     override fun describe(): String = "url"
+
+    private class HttpRejected(val code: Int) : IOException("HTTP $code")
+
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 10_000
+        const val READ_TIMEOUT_MS = 10_000
+        const val TOTAL_DEADLINE_MS = 90_000L
+        const val MAX_BYTES = 64 * 1024 * 1024
+    }
 }
 
 /** Random-access adapter from a media3 [Cache] entry to a platform [MediaDataSource]. */
