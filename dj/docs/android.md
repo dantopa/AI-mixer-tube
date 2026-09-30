@@ -214,7 +214,15 @@ Beat alignment *inside* the mix is sample exact because it is rendered.
   configurable start latency / seek latency / jitter / seek landing error: lock convergence from behind and ahead,
   gain sum of both cross-fades, ground-truth alignment at both hand-offs < 10 ms, calibrator learning, aborts in
   every phase, lock failure, unready incoming, exception containment, UI position mapping), `SchedulerTest`,
-  `DjEngineTest`, `AnalysisStoreTest`, `ResamplerTest`.
+  `DjEngineTest`, `AnalysisStoreTest`, `ResamplerTest`. Added with library analysis / recommendations / Auto DJ / the DJ log
+  (about 70 more, 122+ in total): `DjLogTest` (ring, rotation, header format, exception format, URL redaction),
+  `ResolverTest` (complete cache / partial cache falls back to the whole stream / network forbidden / no URL),
+  `SchedulerDiagnosticsTest` (per-track status mapping, an `Error` from the analyzer does not end the worker, preemption,
+  the metered rules), `LibraryAnalysisCoordinatorTest` (priority order, dedupe, cap, video / podcast / duration filters,
+  battery, metered, transition pause, one at a time, stop / resume, failures), `RecommendationTest` (ranking, shortlist
+  bound, exclusions, energy arc, service, await), `AutoDjControllerTest` (append vs radio insert, ahead threshold, repeats,
+  user "play next" respected, every guard, cold library, nothing fits, waiting for an analysis, switches, decision log,
+  prefetch), `AnalysisPlumbingTest` (composite analyzer id, candidate rules, settings backward compatibility).
 * `:media3:testDebugUnitTest` (existing `EchoAudioProcessorTest`, `PartitionedConvolverTest`) passes with the patches
   applied; `:media3:compileDebugKotlin`, `:composeApp:compileAndroidMain` compile.
 
@@ -359,6 +367,14 @@ step by step, outside the scheduler) and **Self-check**.
 
 "Waiting analysis" is diagnosed from `sched` (`nothing runnable: ... BATTERY_SAVER`, `waits for the network`, `FAILED`/`GIVING UP`
 with the exception and stack), `resolve` (no URL) and `codec` (`decode FAILED at stage=...`).
+
+The chip on Now Playing (one line under the top bar, all three styles, only while AI DJ mode is on, tap = the log) reads
+`DjDebugState.phase`: `waiting-analysis` -> "analysing next track... 12 s" / "blocked: battery saver" / "blocked: mobile data (...)" /
+"analysis failed"; `planning` / `decoding` / `rendering`; `ready` -> "ready, mix in 0:42 (124->128 BPM, 8A->9A)" counting down to
+the plan's exit point on the player's position; **`mixing` -> "DJ MIX: 124->128 BPM, 8A->9A, 0:12 left" in the accent colour**
+(the adapter's `hooks.onMixStarted` starts it, `consumed` ends it; the countdown is wall clock over the window's own timeline:
+`overlapMs - startRelMs`); `fallback` / `blocked` / `error` with the reason. It is rendered from strings in `strings.xml`
+(`dj_chip_*`, `ai_dj_status_*`); the only untranslatable text is the raw exception message and the engine's English reason.
 
 Bugs found by reading the pipeline while adding this (each one alone keeps "waiting analysis" on screen forever): a Beat This!
 model that fails to load threw an `Error` that ended the scheduler's worker loop; a composite analysis without a neural grid

@@ -5,15 +5,20 @@ import com.maxrave.domain.data.entities.SongEntity
 import com.maxrave.domain.data.model.browse.album.Track
 import com.maxrave.domain.repository.SongRepository
 import com.maxrave.domain.utils.toTrack
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.withContext
 
 /** [LibrarySource] over the domain [SongRepository] (liked, downloaded, most played and recent songs). */
 class DomainLibrarySource(
     private val songs: SongRepository,
     private val recentPool: Int = 300,
 ) : LibrarySource {
-    override suspend fun candidates(): List<LibraryCandidate> {
+    // Off the caller's thread: mapping a few thousand liked songs to tracks is not work for the main thread Auto DJ runs on.
+    override suspend fun candidates(): List<LibraryCandidate> = withContext(Dispatchers.Default) { loadCandidates() }
+
+    private suspend fun loadCandidates(): List<LibraryCandidate> {
         val liked = songs.getLikedSongs().first()
         val downloaded = songs.getDownloadedSongs().firstOrNull().orEmpty().filter { it.downloadState == DownloadState.STATE_DOWNLOADED }
         val mostPlayed = songs.getMostPlayedSongs().first()
