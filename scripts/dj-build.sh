@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the app with the AI DJ: applies the core patch series, then runs Gradle.
 #
-#   scripts/dj-build.sh                                 -> :androidApp:assembleDebug variant task (see below)
+#   scripts/dj-build.sh                                 -> :androidApp:assembleDebug
 #   scripts/dj-build.sh :djAndroid:testDebugUnitTest    -> any Gradle tasks/args
 #
 # ANDROID_HOME defaults to /opt/android-sdk and local.properties gets `sdk.dir` when missing (it is gitignored).
@@ -22,7 +22,7 @@ if [[ ! -f local.properties ]] || ! grep -q '^sdk.dir=' local.properties; then
 fi
 
 if [[ $# -eq 0 ]]; then
-  set -- :androidApp:assembleFullDebug
+  set -- :androidApp:assembleDebug
 fi
 
 exec ./gradlew "$@" -Dorg.gradle.workers.max="${GRADLE_WORKERS:-2}" --console=plain

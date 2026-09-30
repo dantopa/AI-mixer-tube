@@ -77,6 +77,14 @@ class TransitionController(
     private val userVolume: () -> Float,
     private val calibrator: LatencyCalibrator = LatencyCalibrator(),
     private val log: (String) -> Unit = {},
+    /**
+     * Constant offset between where OUR decode (MediaCodecPcmDecoder, the source of the window) places a sample
+     * and where ExoPlayer's timeline places the same sample: `ourPosition - exoPosition`, in ms. Container
+     * pre-skip / encoder-delay trimming may differ slightly between the two decode paths; on a device it can be
+     * measured once per codec by cross-correlating an ExoPlayer audio-processor tap against our decode. Unknown
+     * here, so 0 (see dj/docs/android.md, "not verified"). Positive = our timeline is ahead of ExoPlayer's.
+     */
+    private val decodeSkewMs: Double = 0.0,
 ) {
     enum class Phase { IDLE, LOCK_OUT, XFADE_OUT, WINDOW, LOCK_IN, XFADE_IN, SETTLE, DONE, ABORTED }
 
@@ -233,7 +241,7 @@ class TransitionController(
         val w = windowPositionMs()
         val ref = outEst.estimate(now, outgoing.positionMs())
         val follower = timeline.outgoingSourceOfWindow(w)
-        val err = follower - ref
+        val err = follower - ref - decodeSkewMs // window (our decode) vs live outgoing (ExoPlayer)
         when (val step = if (window.isPlaying) loop.update(now, err) else AlignmentLoop.Step.None) {
             is AlignmentLoop.Step.SeekBy -> {
                 window.seekTo(timeline.windowOfOutgoingSource(follower + step.deltaMs).toLong().coerceAtLeast(0L))
@@ -317,7 +325,7 @@ class TransitionController(
         val w = windowPositionMs()
         val ref = timeline.incomingSourceOfWindow(w)
         val follower = inEst.estimate(now, inc.positionMs())
-        val err = follower - ref
+        val err = follower - ref + decodeSkewMs // live incoming (ExoPlayer) vs window (our decode)
         when (val step = if (inc.isPlaying) loop.update(now, err) else AlignmentLoop.Step.None) {
             is AlignmentLoop.Step.SeekBy -> {
                 inc.seekTo((follower + step.deltaMs).toLong().coerceAtLeast(0L))
