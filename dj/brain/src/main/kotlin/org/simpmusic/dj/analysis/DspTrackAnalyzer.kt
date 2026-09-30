@@ -86,15 +86,15 @@ class DspTrackAnalyzer : TrackAnalyzer {
         var phraseConf = 0.0
         if (tempo != null && beat != null) {
             val conf = rhythmConfidence(tempo, beat, x.size / Grid.SR.toDouble())
-            bpm = Confident(beat.bpm.toFloat(), conf.bpm.toFloat())
+            bpm = Confident(beat.bpm.toFloat(), unit(conf.bpm))
             val beatMs = beat.timesSec.map { (it * 1000.0).roundToInt() }
-            beatsC = Confident(beatMs, conf.beats.toFloat())
+            beatsC = Confident(beatMs, unit(conf.beats))
             val db = tm.stage("downbeats") { DownbeatAnalyzer.analyze(beat.timesSec, on, sp) }
             if (db != null) {
                 bpb = db.beatsPerBar
                 val idx = (db.phase until beat.timesSec.size step db.beatsPerBar).toList()
                 val dconf = (db.phaseConfidence * min(1.0, conf.beats + 0.15) * (0.6 + 0.4 * db.meterConfidence))
-                downC = Confident(idx, dconf.coerceIn(0.0, 1.0).toFloat())
+                downC = Confident(idx, unit(dconf))
                 downTimes = DoubleArray(idx.size) { beat.timesSec[idx[it]] }
                 barSec = (beat.timesSec[idx.last()] - beat.timesSec[idx.first()]) / max(1, idx.size - 1)
                 val ph = tm.stage("phrases") { PhraseAnalyzer.analyze(beat.timesSec, idx.toIntArray(), db.features, on, sp) }
@@ -111,7 +111,7 @@ class DspTrackAnalyzer : TrackAnalyzer {
 
         // ---- key
         val keyRes = tm.stage("key") { KeyEstimator.estimate(sp, phraseTimes ?: DoubleArray(0), barSec, phraseConf) }
-        val key = keyRes?.let { Confident(it.key, it.confidence.toFloat()) }
+        val key = keyRes?.let { Confident(it.key, unit(it.confidence)) }
 
         // ---- sections
         val (aStart, aEnd) = activeRange(energy.rms, eNorm)
@@ -123,7 +123,7 @@ class DspTrackAnalyzer : TrackAnalyzer {
                 downbeatTimesSec = downTimes, phraseTimesSec = phraseTimes,
             )
         }
-        val sectionsC = sec?.let { Confident(it.sections, it.confidence.toFloat().coerceIn(0f, 1f)) }
+        val sectionsC = sec?.let { Confident(it.sections, unit(it.confidence)) }
         return base.copy(
             bpm = bpm, beatTimesMs = beatsC, downbeatBeatIndices = downC, beatsPerBar = bpb,
             phraseStartsMs = phrases, key = key, sections = sectionsC, timbre = timbre,
@@ -215,3 +215,6 @@ class DspTrackAnalyzer : TrackAnalyzer {
         private const val SILENCE_DB = -75f
     }
 }
+
+/** A confidence for the contract: NaN (degenerate audio, e.g. a rendered mix segment) means "no evidence", not a crash. */
+internal fun unit(x: Double): Float = if (x.isNaN()) 0f else x.coerceIn(0.0, 1.0).toFloat()

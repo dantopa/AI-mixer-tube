@@ -67,3 +67,13 @@ class DspPrimitivesTest {
         assertEquals(10000, peak)
     }
 }
+
+class ConfidenceSanitisingTest {
+    @kotlin.test.Test
+    fun nanAndOutOfRangeBecomeValidConfidences() {
+        kotlin.test.assertEquals(0f, unit(Double.NaN))
+        kotlin.test.assertEquals(0f, unit(-3.0))
+        kotlin.test.assertEquals(1f, unit(7.0))
+        kotlin.test.assertEquals(0.25f, unit(0.25))
+    }
+}
