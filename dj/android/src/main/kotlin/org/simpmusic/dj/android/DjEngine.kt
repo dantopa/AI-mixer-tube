@@ -162,7 +162,8 @@ class DjEngine(
     private var pipeline: Job? = null
     private var pipelineCancel: AtomicBoolean? = null
     private var ready: PreparedTransition? = null
-    private val consumedKeys = HashSet<String>()
+    /** The pair that was just executed or attempted: not retried while the player still sits on it. Cleared when another pair starts. */
+    private var consumedKey: String? = null
 
     init {
         windowDir.mkdirs()
@@ -177,10 +178,10 @@ class DjEngine(
     override fun log(message: String) = logger(message)
 
     override fun prepared(currentId: String, nextId: String): PreparedTransition? =
-        ready?.takeIf { it.fromId == currentId && it.toId == nextId && key(currentId, nextId) !in consumedKeys }
+        ready?.takeIf { it.fromId == currentId && it.toId == nextId && key(currentId, nextId) != consumedKey }
 
     override fun consumed(prepared: PreparedTransition, outcome: String) {
-        consumedKeys += key(prepared.fromId, prepared.toId)
+        consumedKey = key(prepared.fromId, prepared.toId)
         if (ready === prepared) ready = null
         deleteWindow(prepared)
         _debug.update { it.copy(phase = "idle", lastOutcome = outcome) }
@@ -192,7 +193,7 @@ class DjEngine(
         ready?.let { deleteWindow(it) }
         ready = null
         pairKey = null
-        consumedKeys.clear()
+        consumedKey = null
     }
 
     override fun onQueueContext(context: DjQueueContext) {
@@ -205,6 +206,8 @@ class DjEngine(
         if (context.blockedReason != null || next == null) {
             if (pairKey != null) cancelPipeline()
             pairKey = null
+            ready?.let { deleteWindow(it) }
+            ready = null
             _debug.update { it.copy(phase = "blocked", reason = context.blockedReason ?: "no next track", kind = null) }
             return
         }
@@ -215,7 +218,8 @@ class DjEngine(
             scheduler.request(next, AnalysisPriority.NEXT_UP)
         }
         val k = key(context.currentId, next)
-        if (k == pairKey || k in consumedKeys) return
+        if (k == pairKey || k == consumedKey) return
+        consumedKey = null
         cancelPipeline()
         ready?.let { deleteWindow(it) }
         ready = null

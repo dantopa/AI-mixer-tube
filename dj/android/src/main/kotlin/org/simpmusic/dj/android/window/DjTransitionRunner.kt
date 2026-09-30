@@ -40,6 +40,9 @@ interface DjPlayerPort {
      */
     fun commitToIncoming(seekSourceMs: Long, windowPlayer: ExoPlayer, uiPosition: () -> Long?): ExoPlayer?
 
+    /** The window player is about to be released: move the session delegate / overrides to the live incoming player. */
+    fun onWindowRetired()
+
     /** Ran to completion: the live incoming player is alone, audible, at full volume. Promote it. */
     fun onFinished()
 
@@ -212,6 +215,8 @@ class DjTransitionRunner(
             incomingPlayer = p
             return ExoDeck("live-in", p)
         }
+
+        override fun onWindowRetired() = port.onWindowRetired()
 
         override fun onFinished() = finish(failed = null, result = null)
 

@@ -20,6 +20,13 @@ interface TransitionHost {
     /** The controller gave up or failed by itself (not through [TransitionController.abort]); state is already cleaned up. */
     fun onFailed(reason: String, result: AbortResult)
 
+    /**
+     * The window is about to be paused and released (the live incoming deck carries the audio alone from here):
+     * the host must move anything that still points at the window player (MediaSession delegate) to the incoming
+     * player NOW, or it would watch a released player for the rest of the settle ramp.
+     */
+    fun onWindowRetired() {}
+
     /** Structured record of every hand-off for logs / the debug line. */
     fun onEvent(event: TransitionEvent) {}
 }
@@ -340,6 +347,7 @@ class TransitionController(
         window.volume = (vol * (1.0 - x)).toFloat()
         inc.volume = (vol * endGain * x).toFloat()
         if (x >= 1.0) {
+            host.onWindowRetired()
             window.pause()
             window.release()
             inc.volume = vol * endGain
