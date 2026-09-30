@@ -118,9 +118,9 @@ class DeckStretcher(
         this.source = source
         this.automation = automation
         anchor = sourceFrame
-        java.util.Arrays.fill(prevPhi, 0.0)
-        java.util.Arrays.fill(psi, 0.0)
-        for (c in 0 until channels) java.util.Arrays.fill(ring[c], 0f)
+        prevPhi.fill(0.0)
+        psi.fill(0.0)
+        for (c in 0 until channels) ring[c].fill(0f)
         val p0 = clampPitch(automation.pitchRatio(0.0))
         pitchNow = p0
         pitchRefreshAt = PITCH_BLOCK.toLong()
@@ -140,7 +140,7 @@ class DeckStretcher(
     fun sourceFrameOfNextOutput(): Double {
         check(started)
         while (floor(uPos).toLong() + 2 >= finalized) synthFrame()
-        val j = Math.floorDiv(floor(uPos).toLong(), hs.toLong())
+        val j = floor(uPos / hs).toLong()
         val a0 = aOf(j)
         val a1 = aOf(j + 1)
         val f = (uPos - j * hs) / hs

@@ -39,19 +39,29 @@ object OfflineMixRenderer {
      * @param leadMs wall-clock ms rendered before T0; null = exactly the plan's pre-roll (`-preRollMs`), which makes
      *   the first output sample plan time `-preRollMs`
      * @param tailMs wall-clock ms rendered after the last lane has settled ([settleMs]); by then the incoming deck
-     *   runs at native rate 1.0 (its rate lane ends at 1.0)
+     *   runs at native rate 1.0 (its rate lane ends at 1.0). Keep it >= [RELOCK_MS] to include [Window.handoffMs]
      * @param solo render only one deck (analysis / tests)
      * @param bypassMixer ignore volume and filter lanes (keep rate/pitch), decks at unity gain; the outgoing deck then
      *   plays until the window end instead of stopping when its fader closes
+     * @param outgoingEffect / incomingEffect / masterEffect optional [BlockEffect] hooks (not part of the plan)
      * @param masterLimiter apply the master soft-clip (identity below 0.95, never exceeds 1.0)
      */
+    /** A per-block audio effect hook (echo, reverb, ...): processes l/r in place, `count` frames from `offset`. */
+    fun interface BlockEffect {
+        fun process(l: FloatArray, r: FloatArray, offset: Int, count: Int)
+    }
+
     data class Options(
         val leadMs: Long? = null,
-        val tailMs: Long = 0L,
+        val tailMs: Long = DEFAULT_TAIL_MS,
         val solo: Solo? = null,
         val bypassMixer: Boolean = false,
         val masterLimiter: Boolean = true,
         val blockFrames: Int = 256,
+        /** Insert points for later effects: after each deck's filters and before its fader, and on the master sum. */
+        val outgoingEffect: BlockEffect? = null,
+        val incomingEffect: BlockEffect? = null,
+        val masterEffect: BlockEffect? = null,
     )
 
     /** Rendered transition window plus the wall-time <-> source-position mapping. */
@@ -65,6 +75,18 @@ object OfflineMixRenderer {
     ) {
         val sampleRate: Int get() = audio.sampleRate
         val frames: Int get() = audio.frames
+
+        /**
+         * Plan time from which the window's incoming audio IS the native (rate 1.0, unshifted) source, sample for sample:
+         * the incoming rate lane has settled at 1.0 and the vocoder's phases have re-locked onto the source
+         * ([RELOCK_MS]). A live incoming player can take over here without a tempo or waveform seam; if the window is
+         * cut earlier the hand-off is still phase-continuous but not waveform-identical.
+         */
+        val handoffMs: Double get() = plan.settleMs + RELOCK_MS
+        val handoffFrame: Int get() = frameOfPlanTime(handoffMs)
+
+        /** INCOMING track position (ms) at the hand-off point: where a live player must be seeked to. */
+        val handoffIncomingSourceMs: Double get() = incomingSourceMs(handoffMs)
 
         /** Output frame of T0. */
         val t0Frame: Int get() = (-startMs * sampleRate / 1000.0).roundToInt()
@@ -99,6 +121,7 @@ object OfflineMixRenderer {
         val n0 = (leadMs * sr / 1000.0).roundToInt()
         val startWall = -n0 * 1000.0 / sr
         val endWall = (plan.settleMs + max(0L, options.tailMs)).toDouble()
+        require(endWall <= MAX_WINDOW_MS && leadMs <= MAX_WINDOW_MS) { "transition window too long: lead $leadMs ms, end $endWall ms" }
         val total = n0 + ceil(endWall * sr / 1000.0).toInt()
 
         val outClock = DeckClock(plan.outgoing.rate, plan.exitPointMs.toDouble(), floor(startWall).toLong() - 2, ceil(endWall).toLong() + 2)
@@ -111,10 +134,10 @@ object OfflineMixRenderer {
         val outRunner = if (options.solo != Solo.INCOMING) {
             val silentAt = if (options.bypassMixer) null else plan.outgoing.volume.silentFromMs()
             val endFrame = if (silentAt == null) total else min(total, n0 + ceil(silentAt * sr / 1000.0).toInt()).coerceAtLeast(0)
-            Runner(sr, outgoing, outClock, plan.outgoing, startFrame = 0, startWallMs = startWall, endFrame = endFrame, outputStartWallMs = startWall, block = block)
+            Runner(sr, outgoing, outClock, plan.outgoing, startFrame = 0, startWallMs = startWall, endFrame = endFrame, outputStartWallMs = startWall, block = block, effect = options.outgoingEffect)
         } else null
         val inRunner = if (options.solo != Solo.OUTGOING) {
-            Runner(sr, incoming, inClock, plan.incoming, startFrame = n0, startWallMs = 0.0, endFrame = total, outputStartWallMs = startWall, block = block)
+            Runner(sr, incoming, inClock, plan.incoming, startFrame = n0, startWallMs = 0.0, endFrame = total, outputStartWallMs = startWall, block = block, effect = options.incomingEffect)
         } else null
 
         var g = 0
@@ -123,6 +146,14 @@ object OfflineMixRenderer {
             outRunner?.renderBlock(g, n, mixL, mixR, options.bypassMixer)
             inRunner?.renderBlock(g, n, mixL, mixR, options.bypassMixer)
             g += n
+        }
+        options.masterEffect?.let { fx ->
+            var i = 0
+            while (i < total) {
+                val n = min(block, total - i)
+                fx.process(mixL, mixR, i, n)
+                i += n
+            }
         }
         if (options.masterLimiter) {
             for (i in 0 until total) {
@@ -143,6 +174,13 @@ object OfflineMixRenderer {
 
     private const val KNEE = 0.95f
 
+    /** Time the vocoder needs after the rate lane settles to converge onto the source waveform (measured: -120 dB residual). */
+    const val RELOCK_MS = 300.0
+
+    /** Default tail: long enough to contain the hand-off point. */
+    const val DEFAULT_TAIL_MS = 500L
+    private const val MAX_WINDOW_MS = 30 * 60_000.0
+
     // ---------------------------------------------------------------------------------------------
 
     private class Runner(
@@ -155,6 +193,7 @@ object OfflineMixRenderer {
         val endFrame: Int,
         val outputStartWallMs: Double,
         block: Int,
+        val effect: BlockEffect? = null,
     ) : DeckStretcher.Automation {
         private val stretcher = DeckStretcher(2, sr)
         private val segStart = (segment.sourceStartMs * sr / 1000.0).roundToLong()
@@ -203,6 +242,7 @@ object OfflineMixRenderer {
                 val wall0 = outputStartWallMs + from * msPerFrame
                 if (useHp) hp.process(l, r, 0, n) { i -> lanes.lowCutHz.valueAt(wall0 + i * msPerFrame).toDouble() }
                 if (useLp) lp.process(l, r, 0, n) { i -> lanes.highCutHz.valueAt(wall0 + i * msPerFrame).toDouble() }
+                effect?.process(l, r, 0, n)
                 // channel fader: lane sampled every GAIN_STEP frames, linear in between
                 val knots = (n + GAIN_STEP - 1) / GAIN_STEP
                 for (k in 0..knots) gainKnots[k] = lanes.volume.valueAt(wall0 + min(k * GAIN_STEP, n) * msPerFrame)

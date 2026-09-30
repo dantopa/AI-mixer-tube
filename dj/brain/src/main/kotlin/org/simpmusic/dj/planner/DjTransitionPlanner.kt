@@ -103,7 +103,8 @@ class DjTransitionPlanner : TransitionPlanner {
         val fullAfterOut = desiredUnits * unitWall * tempo.rateOut + margin
         val minAfterOut = minUnits * unitWall * tempo.rateOut + margin
         val outroStart = out.outro()?.range?.startMs
-        val exitPick = pickExit(out, out.audibleEndMs, fullAfterOut, minAfterOut, rampMin, outroStart)
+        val preferAfterOut = softFloor * unitWall * tempo.rateOut + margin
+        val exitPick = pickExit(out, out.audibleEndMs, fullAfterOut, minAfterOut, rampMin, outroStart, preferAfterOut)
             ?: return simplePlan(out, inc, fromId, toId, settings, "no exit point with enough room before the end of the outgoing track")
         val minAfterIn = minUnits * unitWall * tempo.rateIn + margin
         val entryPick = pickEntry(inc, inc.firstAudibleMs, minAfterIn)
@@ -344,14 +345,32 @@ class DjTransitionPlanner : TransitionPlanner {
      * Exit: the start of the outro if trusted, else the last phrase boundary that leaves room for the overlap; falls
      * back from phrase starts to downbeats to beats.
      */
-    internal fun pickExit(c: TrackContext, endEff: Long, fullAfter: Double, minAfter: Double, before: Double, outroStart: Long?): Pick? {
+    internal fun pickExit(c: TrackContext, endEff: Long, fullAfter: Double, minAfter: Double, before: Double, outroStart: Long?, preferAfter: Double = minAfter): Pick? {
         val levels = listOf("phrase" to c.phraseTimes, "downbeat" to c.downbeatTimes.takeIf { c.barsTrusted }, "beat" to c.beats)
         for ((name, arr) in levels) {
             if (arr == null || arr.isEmpty()) continue
             if (outroStart != null) {
+                // 1. the outro start itself (first grid point at or just after it) if it leaves a workable overlap
                 val tol = (c.medianBeatMs * c.beatsPerBar * 0.25).toLong()
-                val cand = arr.firstOrNull { it >= outroStart - tol && it >= before && endEff - it >= minAfter }
-                if (cand != null) return Pick(cand, name, true)
+                arr.firstOrNull { it >= outroStart - tol && it >= before && endEff - it >= preferAfter }?.let { return Pick(it, name, true) }
+                // 2. otherwise, around the start of the outro: the candidate that allows the longest overlap (up to the wanted one),
+                // ties broken by closeness to the outro start. Looking one phrase earlier lets a short outro whose
+                // next phrase start is too close to the end still get its full overlap.
+                val window = (c.medianBeatMs * PHRASE_BEATS).toLong()
+                var best: Long? = null
+                var bestRoom = -1.0
+                var bestDist = Long.MAX_VALUE
+                for (cand in arr) {
+                    if (cand < outroStart - window || cand < before) continue
+                    val room = (endEff - cand).toDouble()
+                    if (room < minAfter) continue
+                    val usable = min(room, fullAfter)
+                    val dist = abs(cand - outroStart)
+                    if (usable > bestRoom + 1.0 || (abs(usable - bestRoom) <= 1.0 && dist < bestDist)) {
+                        best = cand; bestRoom = usable; bestDist = dist
+                    }
+                }
+                if (best != null) return Pick(best, name, true)
             }
             arr.lastOrNull { it >= before && endEff - it >= fullAfter }?.let { return Pick(it, name, false) }
             arr.lastOrNull { it >= before && endEff - it >= minAfter }?.let { return Pick(it, name, false) }
@@ -465,8 +484,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BASS_WORTH = 0.15f
         private const val RATE_EPS = 2e-5
         private const val UNIT_EPS = 0.03
+        private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
-        private const val CUT_FADE_OUT_MS = 12L
-        private const val CUT_FADE_IN_MS = 6L
+        private const val CUT_FADE_OUT_MS = 10L
+        private const val CUT_FADE_IN_MS = 1L
     }
 }

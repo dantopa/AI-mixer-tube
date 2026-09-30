@@ -19,7 +19,7 @@ class PlannerTest {
     private fun ana(bpm: Float, id: String, key: MusicalKey = MusicalKey(9, Mode.MINOR)) = FakeAnalysis.fromTruth(band(bpm, key).truth, id)
 
     /** Max |wall time of outgoing lattice beat - wall time of incoming lattice beat| over the overlap, in ms. */
-    fun lockErrorMs(plan: TransitionPlan, from: TrackAnalysis, to: TrackAnalysis, strideOut: Int = 1, strideIn: Int = 1): Double {
+    fun lockErrorMs(plan: TransitionPlan, from: TrackAnalysis, to: TrackAnalysis, strideOut: Int = 1, strideIn: Int = 1, minBeats: Int = 8): Double {
         val outBeats = from.beatTimesMs!!.value
         val inBeats = to.beatTimesMs!!.value
         val co = DeckClock.outgoing(plan)
@@ -35,7 +35,38 @@ class PlannerTest {
             worst = maxOf(worst, abs(to1 - ti))
             k++
         }
-        assertTrue(k >= 8, "expected a few lattice beats inside the overlap, got $k")
+        assertTrue(k >= minBeats, "expected a few lattice beats inside the overlap, got $k")
+        return worst
+    }
+
+
+    /** Least-squares ideal grid (time = c + p * index) through ALL beats of an analysis: the fixture's own jitter averages out. */
+    private fun idealGrid(a: TrackAnalysis): Pair<Double, Double> {
+        val b = a.beatTimesMs!!.value
+        val n = b.size
+        var sx = 0.0; var sy = 0.0; var sxx = 0.0; var sxy = 0.0
+        for (i in 0 until n) { sx += i; sy += b[i]; sxx += i.toDouble() * i; sxy += i.toDouble() * b[i] }
+        val p = (n * sxy - sx * sy) / (n * sxx - sx * sx)
+        return (sy - p * sx) / n to p
+    }
+
+    /** Phase-lock error measured on the ideal (unquantised) grids, so it isolates the planner from fixture noise. */
+    fun lockErrorIdealMs(plan: TransitionPlan, from: TrackAnalysis, to: TrackAnalysis, strideOut: Int, strideIn: Int): Double {
+        val (co, po) = idealGrid(from)
+        val (ci, pi) = idealGrid(to)
+        val clockO = DeckClock.outgoing(plan)
+        val clockI = DeckClock.incoming(plan)
+        val i0 = Math.round((plan.exitPointMs - co) / po).toInt()
+        val j0 = Math.round((plan.entryPointMs - ci) / pi).toInt()
+        var worst = 0.0
+        var k = 0
+        while (true) {
+            val tOut = clockO.wallAt(co + po * (i0 + strideOut * k))
+            if (tOut > plan.overlapMs) break
+            val tIn = clockI.wallAt(ci + pi * (j0 + strideIn * k))
+            worst = maxOf(worst, abs(tOut - tIn))
+            k++
+        }
         return worst
     }
 
@@ -402,6 +433,65 @@ class PlannerTest {
         }
         println("fuzz: beatMatched=$beatMatched cut=$cuts simple=$simple")
         assertTrue(beatMatched > 20, "fuzz never produced a beat-matched plan ($beatMatched)")
+    }
+
+
+    private fun gridTruth(rnd: java.util.Random, bpm: Float, bars: Int, withSections: Boolean): SyntheticTracks.Truth {
+        val beatMs = 60000.0 / bpm
+        val first = rnd.nextInt(0, 800)
+        val n = bars * 4
+        val beats = List(n) { (first + it * beatMs + rnd.nextGaussian() * 0.6).toInt() }
+        val downs = List(bars) { it * 4 }
+        val secs = if (!withSections) emptyList() else {
+            val introBars = listOf(4, 8, 16)[rnd.nextInt(3)]
+            val outroBars = listOf(4, 8, 16)[rnd.nextInt(3)]
+            fun t(bar: Int) = (first + bar * 4 * beatMs).toLong()
+            listOf(
+                Section(TimeRange(t(0), t(introBars)), SectionKind.INTRO, 0.4f),
+                Section(TimeRange(t(introBars), t(bars - outroBars)), SectionKind.BODY, 0.9f),
+                Section(TimeRange(t(bars - outroBars), t(bars)), SectionKind.OUTRO, 0.5f),
+            )
+        }
+        return SyntheticTracks.Truth(bpm, MusicalKey(rnd.nextInt(12), Mode.values()[rnd.nextInt(2)]), beats, downs, secs, (first + n * beatMs).toLong() + 1500)
+    }
+
+    @Test
+    fun realisticFuzzKeepsPhaseLockedAndInsideTheFiles() {
+        val rnd = java.util.Random(7)
+        var matched = 0
+        var worstLock = 0.0
+        val kinds = HashMap<PlanKind, Int>()
+        repeat(500) { iter ->
+            val bpmA = 70f + rnd.nextFloat() * 110f
+            val bpmB = when (rnd.nextInt(4)) { 0 -> bpmA * 2f * (0.97f + rnd.nextFloat() * 0.06f); 1 -> bpmA / 2f * (0.97f + rnd.nextFloat() * 0.06f); else -> bpmA * (0.9f + rnd.nextFloat() * 0.2f) }
+            val ta = gridTruth(rnd, bpmA, rnd.nextInt(40, 140), rnd.nextBoolean())
+            val tb = gridTruth(rnd, bpmB.coerceIn(60f, 200f), rnd.nextInt(40, 140), rnd.nextBoolean())
+            val a = FakeAnalysis.fromTruth(ta, "a$iter", confidence = 0.6f + rnd.nextFloat() * 0.4f)
+            val b = FakeAnalysis.fromTruth(tb, "b$iter", confidence = 0.6f + rnd.nextFloat() * 0.4f)
+            val s = DjSettings(enabled = true, overlapBars = rnd.nextInt(1, 20), maxTempoBend = 0.03f + rnd.nextFloat() * 0.1f,
+                allowKeyShift = rnd.nextBoolean(), maxPitchShift = rnd.nextInt(0, 4), bassSwap = rnd.nextBoolean(), minConfidence = 0.3f)
+            val plan = planner.plan(a, b, s)
+            kinds.merge(plan.kind, 1, Int::plus)
+            assertWithinFiles(plan, a, b)
+            if (plan.kind == PlanKind.BEAT_MATCHED) {
+                matched++
+                // bends within limits, tempo reached before T0 and constant over the overlap
+                for (d in listOf(plan.outgoing, plan.incoming)) assertTrue(abs(d.rate.valueAt(plan.overlapMs / 2) - 1f) <= s.maxTempoBend + 1e-3f, plan.reason)
+                assertEquals(plan.outgoing.rate.valueAt(0), plan.outgoing.rate.valueAt(plan.overlapMs), plan.reason)
+                assertEquals(plan.incoming.rate.valueAt(0), plan.incoming.rate.valueAt(plan.overlapMs), plan.reason)
+                assertTrue(plan.outgoing.rate.endMs <= 0, "outgoing tempo must settle before T0: ${plan.reason}")
+                assertTrue(plan.incoming.rate.startMs >= 0)
+                assertEquals(0f, plan.outgoing.volume.valueAt(plan.overlapMs))
+                // phase lock, on whichever lattice the planner chose
+                val err = listOf(1 to 1, 1 to 2, 2 to 1).minOf { (so, si) ->
+                    lockErrorIdealMs(plan, a, b, so, si)
+                }
+                worstLock = maxOf(worstLock, err)
+                assertTrue(err < 2.0, "phase lock $err ms: ${plan.reason}") // exit and entry are whole ms: up to 1 ms of that is rounding
+            }
+        }
+        println("realistic fuzz: $kinds, worst phase-lock error ${"%.3f".format(worstLock)} ms over $matched beat-matched plans")
+        assertTrue(matched > 250)
     }
 
     private fun randomAnalysis(rnd: java.util.Random, id: String): TrackAnalysis {

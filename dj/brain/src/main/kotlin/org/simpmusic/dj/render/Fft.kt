@@ -6,7 +6,7 @@ import kotlin.math.sin
 
 /** In-place radix-2 complex FFT on split real/imag double arrays. Preallocated tables, no allocation per call. */
 class Fft(val size: Int) {
-    private val levels: Int = Integer.numberOfTrailingZeros(size)
+    private val levels: Int = size.countTrailingZeroBits()
     private val cosTable = DoubleArray(size / 2)
     private val sinTable = DoubleArray(size / 2)
     private val rev = IntArray(size)
@@ -17,7 +17,12 @@ class Fft(val size: Int) {
             cosTable[i] = cos(2.0 * PI * i / size)
             sinTable[i] = sin(2.0 * PI * i / size)
         }
-        for (i in 0 until size) rev[i] = Integer.reverse(i) ushr (32 - levels)
+        for (i in 0 until size) {
+            var r = 0
+            var v = i
+            for (b in 0 until levels) { r = (r shl 1) or (v and 1); v = v shr 1 }
+            rev[i] = r
+        }
     }
 
     /** Forward transform (e^{-i...}); unnormalised. */

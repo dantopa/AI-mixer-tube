@@ -22,8 +22,8 @@ class RbjBiquad(private val channels: Int = 2) {
     private val z2 = DoubleArray(channels)
 
     fun reset() {
-        java.util.Arrays.fill(z1, 0.0)
-        java.util.Arrays.fill(z2, 0.0)
+        z1.fill(0.0)
+        z2.fill(0.0)
     }
 
     fun setLowpass(freqHz: Double, sampleRate: Int, q: Double = BUTTERWORTH_Q) = set(freqHz, sampleRate, q, false)

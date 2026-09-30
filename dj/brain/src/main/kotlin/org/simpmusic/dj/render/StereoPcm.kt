@@ -25,7 +25,8 @@ class StereoPcm(val left: FloatArray, val right: FloatArray, val sampleRate: Int
 /**
  * A stretch of a track's audio. [pcm] holds the source audio from [sourceStartMs] (on the SOURCE track timeline)
  * onwards, so a caller can decode just the part a transition needs while plan times stay in source-track time.
- * Reads outside the segment return silence.
+ * Reads outside the segment return silence. `sourceStartMs` is mapped to the nearest frame (round(ms * sampleRate / 1000)),
+ * so a cut made on that frame is exact; a cut that is a frame off shifts the deck by at most 0.03 ms.
  */
 class AudioSegment(val pcm: StereoPcm, val sourceStartMs: Long = 0L) {
     val sourceEndMs: Long get() = sourceStartMs + pcm.durationMs
