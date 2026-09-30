@@ -145,8 +145,13 @@ class MediaCodecPcmDecoder {
             if (cancel.isCancelled()) throw java.util.concurrent.CancellationException("decode cancelled")
 
             if (!inputDone) {
-                val inIdx = codec.dequeueInputBuffer(TIMEOUT_US)
-                if (inIdx >= 0) {
+                // Keep the codec fed: queue every input slot that is free before waiting for output. Feeding ONE packet and then
+                // waiting for its output made each of a track's ~10 000 Opus packets pay the full round trip (27 s for a 215 s
+                // track on a Pixel 10 Pro, 2026-09-30); with the pipeline full the output is already waiting.
+                var fed = 0
+                while (!inputDone && fed < MAX_FEED_PER_LOOP) {
+                    val inIdx = codec.dequeueInputBuffer(if (fed == 0) TIMEOUT_US else 0L)
+                    if (inIdx < 0) break
                     val buf = codec.getInputBuffer(inIdx)!!
                     val size = extractor.readSampleData(buf, 0)
                     val t = extractor.sampleTime
@@ -160,6 +165,7 @@ class MediaCodecPcmDecoder {
                         stats.inputBytes += size
                         extractor.advance()
                     }
+                    fed++
                 }
             }
 
@@ -255,6 +261,9 @@ class MediaCodecPcmDecoder {
     private companion object {
         const val TAG = "codec"
         const val TIMEOUT_US = 10_000L
+
+        /** Input packets queued per loop pass (the codec only accepts as many as it has free slots). */
+        const val MAX_FEED_PER_LOOP = 8
         const val PAD_US = 200_000L
         const val STALL_LIMIT = 300 // * TIMEOUT_US = 3 s
         const val NO_PROGRESS_NS = 30_000_000_000L
