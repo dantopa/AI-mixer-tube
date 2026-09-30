@@ -929,4 +929,17 @@
     <string name="login_sync_failed">Something went wrong. Please try again.</string>
     <string name="modified_build_title">Unofficial app</string>
     <string name="modified_build_message">You are using an unofficial copy of SimpMusic that was modified or repackaged by someone else. It cannot be used. Download the official version from simpmusic.org.</string>
+    <string name="dj_mix_sheet_title">AI DJ mix</string>
+    <string name="dj_mix_analysing">Analysing the tracks…</string>
+    <string name="dj_mix_kind_beat_matched">Beat-matched</string>
+    <string name="dj_mix_kind_cut">Beat cut</string>
+    <string name="dj_mix_kind_crossfade">Crossfade</string>
+    <string name="dj_mix_phase_ready">Mix ready</string>
+    <string name="dj_mix_phase_lead_in">Mix starts in %1$s s</string>
+    <string name="dj_mix_phase_mixing">Mixing · %1$s</string>
+    <string name="dj_mix_phase_settling">Settling in</string>
+    <string name="dj_mix_overlap">Overlap %1$s s</string>
+    <string name="dj_mix_legend_fader">Fader</string>
+    <string name="dj_mix_legend_cut">EQ cut</string>
+    <string name="dj_mix_close">Close</string>
 </resources>
