@@ -29,15 +29,59 @@ class CompositeAnalyzer(
         return overlay(analysis, grid)
     }
 
-    private fun overlay(a: TrackAnalysis, g: BeatGrid): TrackAnalysis = a.copy(
-        analyzerId = id,
-        analyzedAtEpochMs = clock(),
-        bpm = g.bpm?.let { Confident(it, g.bpmConfidence) },
-        beatTimesMs = Confident(g.beatTimesMs, g.beatConfidence),
-        downbeatBeatIndices = if (g.downbeatBeatIndices.isEmpty()) null else Confident(g.downbeatBeatIndices, g.downbeatConfidence),
-        beatsPerBar = g.beatsPerBar,
-        phraseStartsMs = g.phraseStartsMs,
-    )
+    private fun overlay(a: TrackAnalysis, g: BeatGrid): TrackAnalysis {
+        val snapped = TransientSnap.refine(g.beatTimesMs, g.phraseStartsMs, a.beatTimesMs)
+        return a.copy(
+            analyzerId = id,
+            analyzedAtEpochMs = clock(),
+            bpm = g.bpm?.let { Confident(it, g.bpmConfidence) },
+            beatTimesMs = Confident(snapped.beatTimesMs, g.beatConfidence),
+            downbeatBeatIndices = if (g.downbeatBeatIndices.isEmpty()) null else Confident(g.downbeatBeatIndices, g.downbeatConfidence),
+            beatsPerBar = g.beatsPerBar,
+            phraseStartsMs = snapped.phraseStartsMs,
+        )
+    }
+}
+
+/**
+ * Beat This! decides WHICH beats exist and where the downbeats are, but it marks the perceived pulse in the
+ * annotation convention of its training data, which sits 2-22 ms away from the physical kick transient depending on the
+ * track (measured on the real corpus). The DSP analyzer pins its beats to the onset envelope instead. When the DSP grid is
+ * trustworthy and agrees with the neural one, each neural beat takes the time of its DSP twin, so two decks line up on
+ * their transients rather than on annotation convention. Otherwise the neural times are kept untouched.
+ */
+internal object TransientSnap {
+    class Result(val beatTimesMs: List<Int>, val phraseStartsMs: List<Long>)
+
+    private const val MAX_SNAP_MS = 35
+    private const val MIN_DSP_CONFIDENCE = 0.6f
+    private const val MIN_AGREEMENT = 0.8
+
+    fun refine(neural: List<Int>, phrases: List<Long>, dsp: Confident<List<Int>>?): Result {
+        val keep = Result(neural, phrases)
+        if (dsp == null || dsp.confidence < MIN_DSP_CONFIDENCE || dsp.value.size < 8 || neural.isEmpty()) return keep
+        val d = dsp.value
+        val twin = IntArray(neural.size) { Int.MIN_VALUE }
+        var j = 0
+        var matched = 0
+        for (i in neural.indices) {
+            while (j + 1 < d.size && abs(d[j + 1] - neural[i]) <= abs(d[j] - neural[i])) j++
+            if (abs(d[j] - neural[i]) <= MAX_SNAP_MS) { twin[i] = d[j]; matched++ }
+        }
+        if (matched.toDouble() / neural.size < MIN_AGREEMENT) return keep
+        val shifts = neural.indices.filter { twin[it] != Int.MIN_VALUE }.map { twin[it] - neural[it] }.sorted()
+        val median = shifts[shifts.size / 2]
+        val refined = neural.indices.map { if (twin[it] != Int.MIN_VALUE) twin[it] else neural[it] + median }
+        // phrase starts ride on beats: move each by the shift of the beat it sits on
+        val phr = phrases.map { p ->
+            val k = neural.indices.minByOrNull { abs(neural[it] - p) }
+            if (k != null && abs(neural[k] - p) <= 20) refined[k].toLong() + (p - neural[k]) else p
+        }
+        return Result(refined, phr)
+    }
+
+    private fun abs(x: Int) = if (x < 0) -x else x
+    private fun abs(x: Long) = if (x < 0) -x else x
 }
 
 /**
