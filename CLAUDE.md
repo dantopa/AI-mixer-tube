@@ -134,6 +134,8 @@ Service modules:
 #### 8. **dj/** & **dj/android/** (`:djAndroid`) - AI DJ (fork addition)
 - `dj/` is a standalone pure-JVM Gradle build (`:brain`, package `org.simpmusic.dj`: analysis/plan contract, recommender, planner, renderer) consumed by the app through `includeBuild("dj")` (coordinates `org.simpmusic.dj:brain`).
 - `dj/android` is the Android module `:djAndroid`: MediaCodec decoding, analysis store/scheduler, settings, and the **transition-window engine**: the mix is pre-rendered to a WAV, played by a third ExoPlayer, and entered/left through phase-locked 100 ms linear cross-fades. Full design, hook points and what could not be verified on a device: `dj/docs/android.md`.
+- `dj/ml` (`org.simpmusic.dj:ml`) is the neural beat tracker: **Beat This!** (MIT, ISMIR 2024) exported to ONNX, pure-Kotlin mel front-end and post-processing, `CompositeAnalyzer` overlaying its beats/downbeats on the DSP analysis, and `TransientSnap` moving each neural beat to the DSP analyzer's onset-locked time when both grids agree (the neural grid sits 2-22 ms off the physical kick, depending on the track). On Android it runs through `onnxruntime-android`; the quantised model (`beat_this_int8mm.onnx`, 23.7 MB) is read from `dj/android/src/main/assets/` and is **gitignored, never committed**. Rebuild it with `dj/ml/tools/*.py` (`dj/docs/ml.md`). Without it the app falls back to DSP-only analysis, and on real music that rarely reaches the planner's confidence bar (measured on 13 real tracks: 14 of 156 pairs beat-matched with DSP only, 40 beat-matched + 70 cuts with Beat This!).
+- Research and measured trade-offs for going further (stems, embeddings, LLM planner, generative beds) are in `dj/docs/ai-landscape.md`; analysis and planner design in `dj/docs/analysis.md` and `dj/docs/planner.md`. A `CUT` plan is a beat-aligned hard switch with no overlap and is window-eligible. Alignment on real music is NOT verified by ear or on a device.
 - It hooks `CrossfadeExoPlayerAdapter` through a **patch series applied to the `core` submodule** (`patches/core/*.patch`, `scripts/apply-core-patches.sh`, `scripts/dj-build.sh`), because this fork cannot push to `maxrave-dev/core`. Run the apply script (or `dj-build.sh`) before building; never commit a bumped `core` gitlink that points at an unpushed commit.
 
 ## 🛠️ Key Technologies
@@ -917,6 +919,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-09-26
+**Last updated**: 2026-09-30
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors
