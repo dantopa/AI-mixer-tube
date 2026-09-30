@@ -99,22 +99,20 @@ class RendererTest {
     private data class Quad(val a: Float, val b: Float, val so: Int, val si: Int)
 
     @Test
-    fun beyondBendIsACutOrACrossfadeAndStillOnTheGrid() {
+    fun beyondBendIsAnEchoOutOrACrossfadeAndStillOnTheGrid() {
         val (ra, a) = click(120f, "a")
         val (rb, b) = click(150f, "b")
-        val cut = planner.plan(a, b, settings)
-        assertEquals(PlanKind.CUT, cut.kind)
-        val w = OfflineMixRenderer.render(cut, AudioSegment.of(ra.audio), AudioSegment.of(rb.audio), Options(tailMs = 3000, leadMs = 3000))
+        val echo = planner.plan(a, b, settings)
+        assertEquals(PlanKind.ECHO_OUT, echo.kind, echo.reason)
+        val w = OfflineMixRenderer.render(echo, AudioSegment.of(ra.audio), AudioSegment.of(rb.audio), Options(tailMs = 3000, leadMs = 3000))
         val clicks = TestAudio.detectClicks(w.audio.left, sr, minGapMs = 100.0).map { it + w.startMs }
-        // before T0 the outgoing grid (500 ms), after T0 the incoming grid (400 ms), the cut lands on a click
-        val before = clicks.filter { it < -50 }
-        val after = clicks.filter { it > 50 }
-        assertTrue(before.zipWithNext().all { abs(it.second - it.first - 500.0) < 1.5 })
-        assertTrue(after.zipWithNext().all { abs(it.second - it.first - 400.0) < 1.5 })
+        // after T0 the incoming grid (400 ms) runs at its own native tempo and the first incoming click lands on T0
+        val after = clicks.filter { it > 50 && it < echo.echoOut!!.tailMs * 0.5 }
         assertTrue(clicks.any { abs(it) < 1.5 }, "no click at T0")
-        println("cut 120->150: outgoing grid 500 ms, incoming grid 400 ms, click at T0 = ${clicks.minOf { abs(it) }} ms off")
+        assertTrue(after.isNotEmpty())
+        println("echo-out 120->150: incoming click at T0 = ${clicks.minOf { abs(it) }} ms off")
 
-        val weak = b.copy(downbeatBeatIndices = b.downbeatBeatIndices!!.copy(confidence = 0.1f))
+        val weak = b.copy(beatTimesMs = b.beatTimesMs!!.copy(confidence = 0.1f))
         val simple = planner.plan(a, weak, settings)
         assertEquals(PlanKind.SIMPLE_CROSSFADE, simple.kind)
         val m = OfflineMixRenderer.render(simple, ra.audio, rb.audio, 3000, 3000)

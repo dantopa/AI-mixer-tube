@@ -19,14 +19,35 @@ device runs (pre-render the window, then play it as one stream).
 * Per deck the signal path is: stretch/pitch -> low-cut (high-pass, `lowCutHz`) -> high-cut (low-pass, `highCutHz`) ->
   fader (`volume`, linear amplitude) -> sum -> master soft clip (identity below 0.95, never above 1.0).
   Ease applies to the segment that ENDS at the keyframe; the lanes hold their first/last value outside their keys.
+* **Echo-out send (ECHO_OUT plans only, `plan.echoOut`).** The outgoing deck gets an aux send: a beat-synced feedback delay
+  (`BeatEcho`) is fed from the stretched signal **before** the deck's filters and fader (send lane `echoOut.send`, like a
+  send ahead of the channel EQ, so the repeats carry the full signal while the dry signal thins out under the rising
+  high-pass) and its wet return (lane `echoOut.wet`) is added **after** the fader, so the tail keeps ringing once the
+  fader is 0. The deck's source stops when its fader and its send are both closed; the delay is then fed silence until
+  `echoOut.tailMs`. `settleMs` includes the tail. (The first version of this design put the send after the filters; the
+  rising high-pass then removed most of what the delay could repeat: measured 12-18 dB quieter tails.)
 * `overlapMs` = wall time from T0 until the outgoing fader is 0. `plan.settleMs` = time after which every lane is
   constant (for BEAT_MATCHED that is the end of the incoming deck's tempo ramp back to 1.0).
 
 ## 2. Planner
 
-`DjTransitionPlanner().plan(from, to, settings)` is a pure function. It never throws (an exception anywhere ends in a
+`DjTransitionPlanner().plan(from, to, settings, constraints = PlanConstraints())` is a pure function. It never throws (an exception anywhere ends in a
 SIMPLE_CROSSFADE with the error in `reason`), and the fuzz tests throw 4000 random garbage analyses (unsorted, negative,
 NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 realistic ones at it.
+
+### Contract additions (2026-09-30, all additive and backward compatible)
+
+* `DjSettings.mixPoint: MixPoint = ANYWHERE` (`AT_END` = the earlier behaviour) and
+  `DjSettings.minPlayedFraction: Float = 0.55f`. Stored settings without the fields decode to the defaults.
+* `PlanConstraints(earliestExitMs: Long = 0)`, passed as a 4th argument: `TransitionPlanner.plan(from, to, settings,
+  constraints)`. The interface keeps the 3-argument method abstract and gives the 4-argument one a default that ignores
+  the constraints, so existing implementers and callers compile unchanged; `DjTransitionPlanner` implements both.
+  `earliestExitMs` bounds the OUTGOING source position the plan may touch: `exitPointMs` **and** the start of any
+  pre-roll ramp (`exitPointMs + preRollMs`) are both >= it. The engine should pass "playback position + time to decode
+  and render the window (>= 40 s)".
+* `PlanKind.ECHO_OUT` and `TransitionPlan.echoOut: EchoOutSpec? = null` (`delayMs`, `feedback`, `send`, `wet`, `tailMs`,
+  `highpassHz`, `dampHz`, `pingPong`). `PlanKind.CUT` stays in the enum (stored plans still parse) but **the planner
+  never emits it any more**. `settleMs` counts the echo tail.
 
 ### Decision flow
 
@@ -37,15 +58,17 @@ NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 reali
    equivalence, e.g. 87 -> 174 needs no stretch at all). Both decks are bent by half the log-difference:
    `rateOut = sqrt(Lo/Li)`, `rateIn = sqrt(Li/Lo)` (geometric split). Why: it minimises the larger of the two stretches,
    so the tolerated total difference is (1+bend)^2 (8% per deck = 16.6% total), and neither track is "the" stretched one.
-   The option with the smallest bend wins, 1:1 on ties. If even that exceeds `maxTempoBend` on a deck: CUT (both grids
-   *and* downbeats trusted) else SIMPLE_CROSSFADE. Periods are refined by a least-squares fit of the local grid around the
+   The option with the smallest bend wins, 1:1 on ties. The "bridge" (both decks ramp towards each other, meeting in the
+   middle) is this same split: each deck bends by half the log difference, so it closes gaps up to (1+bend)^2 and never
+   stretches further than that. If even that exceeds `maxTempoBend` on a deck: **ECHO_OUT** (never a cut). Periods are refined by a least-squares fit of the local grid around the
    chosen points (not the global bpm), and a grid whose fit residual exceeds 12% of a beat is rejected as irregular.
-3. **Exit (outgoing).** Grid points in this order: phrase starts, downbeats, beats. If sections are trusted and there is an
+3. **Mix point.** With `mixPoint = ANYWHERE` (default) steps 3-4 are replaced by the pair search of section "Mix anywhere"
+   below; `AT_END` keeps the classic pick described here. **Exit (outgoing, AT_END).** Grid points in this order: phrase starts, downbeats, beats. If sections are trusted and there is an
    OUTRO: the first grid point at/after the outro start that leaves at least a 2-bar overlap, else the point (up to a
    phrase earlier) that allows the longest overlap. Without an outro: the last point that leaves room for
    `overlapBars` at the mix tempo + a 400 ms margin, else the last with room for one bar. Never before the room needed for
    the tempo pre-roll. "End of the audio" is the last audible energy hop, not the file length (trailing silence).
-4. **Entry (incoming).** The first phrase start (else downbeat, else beat) at or after the first audible energy hop
+   **Entry (incoming, AT_END).** The first phrase start (else downbeat, else beat) at or after the first audible energy hop
    (leading silence is skipped, half a beat of tolerance).
 5. **Overlap.** `overlapBars` bars at the mix tempo (a bar is `beatsPerBar` lattice steps; if the two tracks disagree on
    beats per bar or downbeats are untrusted the unit is one beat and the minimum is 4 beats). Clamped by: audio left in
@@ -59,6 +82,53 @@ NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 reali
 7. **Lanes** (below), **confidence** = min of the facts actually relied on (beats, bpm, downbeats if bars are used,
    sections if the exit/clamp came from them, key if it drove a decision, grid regularity). Below `minConfidence`
    -> SIMPLE_CROSSFADE.
+
+### Mix anywhere (`MixPoint.ANYWHERE`)
+
+The owner's point: a mix does not have to happen at the end of the song. The planner searches pairs (exit on the
+outgoing track, entry on the incoming one) across the whole tracks and scores them; the classic end-of-track pick is
+always one candidate, so it stays reachable.
+
+* **Exit candidates**: every phrase start (else every downbeat, else every 8th beat) of the outgoing track inside
+  `[max(earliestExitMs, minPlayed, 4 beats + 250 ms), audibleEnd - 1 bar - 400 ms]`, where
+  `minPlayed = min(minPlayedFraction * audibleEnd, 75 s)`; at most 40 (evenly thinned).
+* **Entry candidates**: every phrase start (else downbeat, else every 16th beat) from the first audible sound to 60 % of
+  the incoming track, with room for the overlap; at most 24. Intro start, first body, drops and breakdown ends are
+  all phrase starts, so all of them are candidates.
+* **Pair score** = weighted sum of terms in 0..1 (weights in one place, `MixScoring`): exit at a natural section
+  boundary of the outgoing track (0.24: start of an OUTRO 1.0, start of a BREAKDOWN 0.95, end of a BODY/DROP 0.9; without
+  trusted sections the energy curve: a fall from the 8 s before to the 8 s after), how much of the track has played
+  (0.12), room left for the overlap (0.02), energy continuity between the outgoing exit region and the incoming entry
+  region plus entry >= exit level (0.20, the `energy` curve), the same on the low band (0.06, the kick / bass), entry
+  kind (0.16: intro start 0.9, body / drop start 1.0, breakdown start 0.4 unless the outgoing exit is inside a
+  breakdown too, energy rise when there are no sections), grid level (0.06: phrase > downbeat > beat), how much of the
+  incoming track is left (0.08, the tie-breaker among near-equal candidates), tempo bend (0.06, beat-matched pairs
+  only). Ties break on exit then entry time: the same input always gives the same plan.
+* **Search order**: (1) the 14 best-scoring pairs whose LOCAL tempos are compatible are tried as BEAT_MATCHED (local
+  grid fit, irregular-window halving of the overlap, drift and confidence checks, the pre-roll must start at or after
+  `earliestExitMs`); the first that works wins. (2) Otherwise the 8 best-scoring pairs are tried as ECHO_OUT. (3) Otherwise
+  the classic AT_END logic (which also honours `earliestExitMs`), and finally a SIMPLE_CROSSFADE whose reason says why.
+  A crossfade whose natural start is before `earliestExitMs` is shortened to what is left of the track.
+* **No trusted beat grid on either track** (or one below `minConfidence`) is still a SIMPLE_CROSSFADE, never an echo.
+
+### Echo-out (`PlanKind.ECHO_OUT`)
+
+For tempos that cannot be matched (beyond the bend, or no candidate pair locks): the classic DJ echo-out. Nothing is
+stretched: both decks run at native rate 1.0, no pitch shift (the tail is high-passed and short; a key clash is only
+noted in the reason).
+
+| lane | outgoing | incoming |
+|---|---|---|
+| volume | equal-power `cos` over the last bar before T0 (`dryFadeMs` = one bar, 1.5-4.8 s), **0 at T0** | 0 -> 1 in 2 ms at T0 (de-click), constant 1; a louder incoming deck starts at the matched gain and glides to 1.0 at `tailMs` |
+| lowCut | exponential 20 Hz -> 700 Hz over the same bar (the dry signal thins out, its bass is gone at T0) | off |
+| echoOut.send | 0 -> 1 over half a beat, held, closes over the last quarter beat before T0 | - |
+| echoOut.wet | 1.0, then a smoothstep fade to 0 over the last bar (or half the tail) ending at `tailMs` | - |
+
+Delay = 3/4 of the outgoing beat when that lies in 200-750 ms, else 1/2, 1/4, 1 beat; feedback 0.6; the loop has a
+280 Hz high-pass (repeats never carry bass, so they do not fight the incoming kick) and a 6 kHz damping low-pass, both
+gain <= 1, so it is stable; ping-pong (left/right alternate). Tail = 3 bars clamped to 3.5-8 s. Exit and entry come from the
+pair search (or, for AT_END, from the classic pick); `overlapMs = 0`. Confidence = min of the beat grid confidences (and
+sections when the exit came from an outro), checked against `minConfidence`.
 
 ### Lane shapes (BEAT_MATCHED)
 
@@ -82,8 +152,8 @@ NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 reali
 
 ### Other plan kinds
 
-* `CUT`: tempos incompatible, both grids trusted. Exit on a downbeat/phrase (same picker), entry on the first downbeat,
-  10 ms fade-out ending at T0, 1 ms fade-in (any longer eats the incoming kick). `overlapMs = 0`. Never cuts on a plain beat.
+* `CUT`: **deprecated, no longer planned** (a bare beat-aligned cut was judged unacceptable: the listener hears no blend
+  at all). The enum value stays for compatibility; executors keep handling it. Tempo-incompatible pairs get `ECHO_OUT`.
 * `SIMPLE_CROSSFADE`: equal-power, `fallbackCrossfadeMs` clamped to the audible end of the outgoing file and the length
   of the incoming one; exit = audible end - fade, entry = first audible hop (0 if < 100 ms). Rates 1.0, no filters,
   `confidence = 1` (it relies on no musical fact; `reason` says why we fell back).
@@ -120,7 +190,11 @@ NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 reali
   rate (44.1/48 kHz); `AudioSegment.sourceStartMs` lets you pass pre-cut audio while plan times stay in track time.
   First output sample = plan time `-preRollMs` (default lead), the window ends `settleMs + tailMs` after T0 (default
   tail 500 ms), `Window.handoffMs` is where the audio equals the native incoming source. `Window` also exposes
-  `outgoingSourceMs(t)`, `incomingSourceMs(t)` and their inverses. Effect hooks (`BlockEffect`) per deck and on the master.
+  `outgoingSourceMs(t)`, `incomingSourceMs(t)` and their inverses. Effect hooks (`BlockEffect`) per deck and on the master. An `echoOut` on the plan is executed by the renderer itself
+  (`BeatEcho`, see section 1): nothing to pass in `Options`; with `bypassMixer` the echo is skipped.
+* `BeatEcho`: two fixed ring buffers (no allocation while processing), ping-pong or per-channel feedback, one-pole
+  high-pass and low-pass inside the loop; `processWet` is the aux form, `process` the insert form (`in + wet`) for the
+  `BlockEffect` hooks.
 * Real-time factor for a 56 s window (24-bar overlap): 0.027 single-threaded on the dev CPU.
 
 ## 4. Measured (tests print these; see `dj/brain/src/test`)
@@ -135,3 +209,24 @@ NaN, empty grids, absurd durations, null facts, hostile settings) plus 500 reali
 * full mix of the synthetic band tracks: peak 0.82-0.83 (no clipping), mix never more than 2.05 dB below the weaker
   deck's own level (limit 4 dB), tail vs native source: 0.0 ms lag, -120 dB residual, pre-cut segments identical to
   whole tracks.
+
+### Real music: mix anywhere and echo-out (13 tracks, 156 ordered pairs, Beat This! analyses; 2026-09-30)
+
+Tools: `PlanHistogram` and `MixAnywhereReport` in `dj/ml/src/test` (env `DJ_CACHE`, `BEAT_THIS_CORPUS`, `DJ_OUT`).
+
+| | BEAT_MATCHED | CUT | ECHO_OUT | SIMPLE_CROSSFADE |
+|---|---|---|---|---|
+| before (end-of-track planner) | 46 | 70 | - | 40 |
+| AT_END now | 46 | - | 77 | 33 |
+| ANYWHERE now (default) | 61 | - | 87 | 8 |
+
+* Exit position as a share of the outgoing track, pairs per 10 % bucket. Before: 70 %: 3, 80 %: 28, 90 %: 125 (all
+  at the end). ANYWHERE: 40 %: 16, 50 %: 10, 60 %: 22, 70 %: 17, 80 %: 17, 90 %: 74; beat-matched median 0.78
+  (min 0.45), echo-out median 0.91. The 8 crossfades that remain are analyses below `minConfidence` (0.48 < 0.5) or a
+  beat grid that is irregular around every candidate.
+* With `earliestExitMs = 130 s` the plans move later (exits 45-99 %) and 17 pairs end in a crossfade because the track has
+  no acceptable exit left (or, twice, no echo-out point) - always with the reason in `plan.reason`.
+* Determinism: the whole matrix planned twice is identical.
+* Rendered echo-out, real music: the tail is 5-15 dB under the outgoing track's level before the fade in the first
+  second after T0 and falls ~10 dB/s (synthetic tracks: -40 dB -> -60 dB -> -75 dB per second). Whether that is
+  audible enough *under* a loud incoming track is not verified by ear.

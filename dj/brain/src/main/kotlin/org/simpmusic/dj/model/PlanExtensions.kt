@@ -11,6 +11,8 @@ val TransitionPlan.settleMs: Long
         for (d in listOf(outgoing, incoming)) {
             for (c in listOf(d.rate, d.pitchSemitones, d.volume, d.lowCutHz, d.highCutHz)) m = max(m, c.endMs)
         }
+        // an echo tail is audible outgoing material: the mix is not settled until it has rung out
+        echoOut?.let { e -> m = max(m, max(e.tailMs, max(e.send.endMs, e.wet.endMs))) }
         return m
     }
 

@@ -83,9 +83,43 @@ enum class PlanKind {
     BEAT_MATCHED,
     /** Plain equal-power overlap when we do not trust the analysis. Same as the app's existing crossfade. */
     SIMPLE_CROSSFADE,
-    /** Straight cut on a downbeat (used when tempos are incompatible but both grids are trusted). */
+    /**
+     * Straight cut on a downbeat. DEPRECATED: the planner no longer emits it (a bare cut was judged unacceptable);
+     * kept so stored plans and old executors keep parsing.
+     */
     CUT,
+    /**
+     * Classic DJ echo-out for tracks whose tempos cannot be matched: the outgoing deck's dry signal fades over about a
+     * bar under a rising high-pass while a beat-synced feedback delay ([TransitionPlan.echoOut]) rings out over the
+     * incoming deck, which enters at its own phrase start at native tempo. No tempo automation.
+     */
+    ECHO_OUT,
 }
+
+/**
+ * Beat-synced feedback delay thrown on the OUTGOING deck: an aux send taken from the deck BEFORE its filters and fader
+ * (so the repeats carry the full signal while the dry signal thins out), returned AFTER the fader so the tail survives
+ * the fader going to 0. All times are plan time (ms relative to T0).
+ */
+@Serializable
+data class EchoOutSpec(
+    /** Delay time (ms): 3/4 or 1/2 of the outgoing beat. */
+    val delayMs: Float,
+    /** Feedback gain per repeat (< 1). */
+    val feedback: Float,
+    /** Send level into the delay (0..1) over plan time. */
+    val send: ParamCurve,
+    /** Wet return level (linear amplitude) over plan time; reaches 0 at [tailMs]. */
+    val wet: ParamCurve,
+    /** Time after T0 at which the echo is inaudible for good. Counts as settling time. */
+    val tailMs: Long,
+    /** High-pass inside the feedback loop (Hz): repeats never carry bass. */
+    val highpassHz: Float = 280f,
+    /** High-cut (damping) inside the loop (Hz). */
+    val dampHz: Float = 6000f,
+    /** Alternate repeats between left and right. */
+    val pingPong: Boolean = true,
+)
 
 /**
  * Timeline of a transition. Let T0 be the wall-clock instant the incoming deck starts playing
@@ -115,6 +149,8 @@ data class TransitionPlan(
     val reason: String,
     /** Effective BPM during the overlap when BEAT_MATCHED; null otherwise. */
     val mixBpm: Float? = null,
+    /** Present for [PlanKind.ECHO_OUT]: the delay executed on the outgoing deck. Null otherwise. */
+    val echoOut: EchoOutSpec? = null,
 ) {
     /** Earliest wall-clock time (relative to T0) at which any lane starts moving. Negative if there is a pre-roll ramp. */
     val preRollMs: Long
@@ -124,6 +160,26 @@ data class TransitionPlan(
             outgoing.lowCutHz.startMs, outgoing.highCutHz.startMs,
         )
 }
+
+/** Where in the outgoing track the mix may happen. */
+@Serializable
+enum class MixPoint {
+    /** Anywhere the planner finds a good exit/entry pair (the default). */
+    ANYWHERE,
+    /** Near the outro / last phrase of the outgoing track, at the first phrase of the incoming one. */
+    AT_END,
+}
+
+/** Constraints from the caller's playback state (the plan must be executable in the future). */
+@Serializable
+data class PlanConstraints(
+    /**
+     * Earliest position (ms on the OUTGOING source timeline) the plan may touch: `exitPointMs` and the start of any
+     * pre-roll ramp (`exitPointMs + preRollMs`) are both >= this. Typically current playback position plus the time
+     * needed to decode and render the window (>= 40 s).
+     */
+    val earliestExitMs: Long = 0L,
+)
 
 /** Knobs the user (or the app) controls. */
 @Serializable
@@ -149,6 +205,10 @@ data class DjSettings(
     val autoDj: Boolean = false,
     /** Auto DJ: how energy should move from one track to the next over the session. */
     val autoDjArc: EnergyArc = EnergyArc.STEADY,
+    /** Where the mix may happen. [MixPoint.AT_END] is the pre-2026-09-30 behaviour. */
+    val mixPoint: MixPoint = MixPoint.ANYWHERE,
+    /** With [MixPoint.ANYWHERE]: the outgoing track must have played at least min(this fraction of its length, 75 s). */
+    val minPlayedFraction: Float = 0.55f,
 )
 
 /** Shape of the energy over an Auto DJ session; feeds [org.simpmusic.dj.recommend.RecommendContext.energyTrend]. */
