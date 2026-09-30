@@ -12,13 +12,16 @@ import kotlin.math.min
  */
 internal object MixScoring {
     /** The exit sits at a natural section boundary of the outgoing track (end of a BODY/DROP, start of a BREAKDOWN/OUTRO). */
-    const val W_EXIT_BOUNDARY = 0.24
+    const val W_EXIT_BOUNDARY = 0.29
     /** How much of the outgoing track has played (never butcher a song; mildly prefer later). */
-    const val W_PLAYED = 0.12
+    const val W_PLAYED = 0.02
+    /** Exits in the last part of the track (the outro zone) lose up to this much: the owner asked for mixes anywhere, not always at the end. */
+    const val OUTRO_ZONE_PENALTY = 0.10
+    const val OUTRO_ZONE_FROM = 0.88
     /** Enough audio left after the exit for the overlap (not absurdly late). */
     const val W_ROOM_OUT = 0.02
     /** Energy continuity between the outgoing exit region and the incoming entry region (broadband), and entry >= exit. */
-    const val W_ENERGY = 0.20
+    const val W_ENERGY = 0.25
     /** Same for the low band (kick / bass presence). */
     const val W_LOW = 0.06
     /** The incoming entry is a phrase start where something happens (intro start, first body, drop), not a breakdown. */
@@ -241,7 +244,8 @@ internal object MixCandidates {
         val lowTerm = if (lo != null && li != null) 1.0 - min(1.0, abs(lo - li) / 0.5) else 0.5
         val kind = if (n.isBreakdownStart && e.inBreakdown) 1.0 else n.kindScore
         val level = 0.5 * (e.levelScore + n.levelScore)
-        return MixScoring.W_EXIT_BOUNDARY * e.boundary +
+        val outroZone = MixScoring.OUTRO_ZONE_PENALTY * max(0.0, (e.playedFraction - MixScoring.OUTRO_ZONE_FROM) / (1.0 - MixScoring.OUTRO_ZONE_FROM)).coerceAtMost(1.0)
+        return -outroZone + MixScoring.W_EXIT_BOUNDARY * e.boundary +
             MixScoring.W_PLAYED * e.playedFraction +
             MixScoring.W_ROOM_OUT * e.roomScore +
             MixScoring.W_ENERGY * energyTerm +

@@ -244,3 +244,12 @@ On the 13 real tracks (156 pairs) BEAT_MATCHED drops 61 -> 31 and ECHO_OUT rises
 beat-matches are the ones whose grids disagree with themselves (tea_roots, waltz_tschaikovsky_op40, canon_in_d).
 Caveat on all the corpus numbers in this file: the corpus is mostly clean electronic music where median = average =
 field tempo. Pop / Latin / live recordings (the owner's library) look much messier.
+
+### Mixes were still landing at the outro (2026-09-30, second device log)
+
+Two device logs in a row planned exits at 94 % and 97 % of the outgoing track although `mixPoint` was ANYWHERE. The
+scoring had a deliberate late bias (`W_PLAYED` 0.12, "mildly prefer later") and an outro-boundary term, and the top
+pair always won. Changes: `W_PLAYED` 0.12 -> 0.02 (weight moved to the boundary and energy terms), an outro-zone
+penalty (up to 0.10 for exits past 88 % played), and a seeded variety pick among pairs within 0.05 of the best score
+(same pair -> same plan). Exit position, 156 real pairs, per 10 % bucket: before `... 3 71` (>=90 %: 71) ->
+now `0 0 3 11 36 25 34 6 0 41` (>=90 %: 41). Still a heuristic: whether a mid-song exit sounds better is not verified by ear.

@@ -255,6 +255,17 @@ class DjTransitionPlanner : TransitionPlanner {
         }
         val order = compareByDescending<Cand> { it.pair.score }.thenBy { it.pair.exit.timeMs }.thenBy { it.pair.entry.timeMs }
         all.sortWith(order)
+        // Variety: the score cannot tell candidates within a few hundredths apart, and always taking the top one puts
+        // most mixes at the outro. Among the near-best pick one, seeded by the pair (so a pair always plans the same
+        // way), and try it first; everything else keeps its score order as the fallback.
+        if (all.size > 1) {
+            val bestScore = all[0].pair.score
+            val near = all.indexOfFirst { it.pair.score < bestScore - VARIETY_BAND }.let { if (it < 0) all.size else it }
+            if (near > 1) {
+                val pick = ((c.fromId + ">" + c.toId).hashCode() and Int.MAX_VALUE) % near
+                if (pick > 0) all.add(0, all.removeAt(pick))
+            }
+        }
 
         var lastFail: String? = null
         // 1. beat-matched, on the best-scoring pairs whose local tempos are compatible
@@ -843,6 +854,9 @@ class DjTransitionPlanner : TransitionPlanner {
 
     companion object {
         private const val MARGIN_MS = 400.0
+
+        /** Pair scores this close to the best count as equally good (see the variety pick in planAnywhere). */
+        private const val VARIETY_BAND = 0.05
         private const val FADE_STEPS = 24
         private const val IRREGULAR_RMS = 0.12
         private const val BASS_WORTH = 0.15f
