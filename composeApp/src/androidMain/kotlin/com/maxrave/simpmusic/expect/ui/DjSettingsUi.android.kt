@@ -57,6 +57,7 @@ import simpmusic.composeapp.generated.resources.ai_dj_library_pause_battery_save
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_low_battery
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_metered
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_transition
+import simpmusic.composeapp.generated.resources.ai_dj_library_nothing_to_do
 import simpmusic.composeapp.generated.resources.ai_dj_library_progress
 import simpmusic.composeapp.generated.resources.ai_dj_log
 import simpmusic.composeapp.generated.resources.ai_dj_log_description
@@ -319,7 +320,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                 )
                 SettingItem(
                     title = if (library.running) stringResource(Res.string.ai_dj_library_pause) else stringResource(Res.string.ai_dj_library_analyse),
-                    subtitle = "",
+                    // Without this the button looked like it bounced: with nothing left to analyse it finishes at once and flips back.
+                    subtitle =
+                        when {
+                            library.running -> stringResource(Res.string.ai_dj_library_progress, library.analysed, library.total)
+                            library.finished && library.analysed >= library.total -> stringResource(Res.string.ai_dj_library_nothing_to_do, library.total)
+                            else -> ""
+                        },
                     smallSubtitle = true,
                     onClick = {
                         if (library.running) {

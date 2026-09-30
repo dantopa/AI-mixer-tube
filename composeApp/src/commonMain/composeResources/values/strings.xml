@@ -644,6 +644,7 @@
     <string name="ai_dj_arc_cool_down">Cool down</string>
     <string name="ai_dj_arc_wave">Wave</string>
     <string name="ai_dj_library_progress">Library analysed: %1$d of %2$d</string>
+    <string name="ai_dj_library_nothing_to_do">Nothing to analyse: all %1$d eligible songs (liked, downloaded, most played and recently played) are already done.</string>
     <string name="ai_dj_library_analyse">Analyse my library</string>
     <string name="ai_dj_library_pause">Pause library analysis</string>
     <string name="ai_dj_library_description">Analyses your liked, downloaded and most played songs in the background, one at a time, on Wi-Fi while charging or above 50% battery.</string>

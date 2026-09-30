@@ -38,7 +38,7 @@ class DjRuntime(
         started = true
         scope.launch {
             delay(startDelayMs)
-            DjLog.i("boot", "DJ runtime starting: settings=${settings.value}")
+            DjLog.i("boot", "DJ runtime starting: build=${org.simpmusic.dj.android.diag.DjBuild.ID} settings=${settings.value}")
             prefetcher.start()
             controller.start()
             if (repository.libraryAnalysis.first()) {
@@ -47,6 +47,8 @@ class DjRuntime(
             }
             settings.map { it.enabled }.distinctUntilChanged().collect { on ->
                 DjLog.i("boot", "AI DJ mode ${if (on) "ON" else "OFF"}")
+                // the watchdog only runs while the DJ is on, so a user who does not use it pays nothing
+                if (on) org.simpmusic.dj.android.diag.MainStallWatchdog.start() else org.simpmusic.dj.android.diag.MainStallWatchdog.stop()
                 if (on) diagnostics.runSelfCheck()
             }
         }
