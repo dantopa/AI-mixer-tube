@@ -131,6 +131,11 @@ Service modules:
 - Selected via the `isFullBuild` Gradle property (same pattern as crashlytics) in `core/media/media3/build.gradle.kts` and `composeApp/build.gradle.kts` androidMain
 - Playback handoff lives in `core/media/media3` (`cast/CastHandoffManager.kt` + `cast/CastStreamResolver.kt`): the session player is `CastPlayer.Builder().setLocalPlayer(forwardingPlayer).build()`; while remote, `CrossfadeExoPlayerAdapter` routes transport/getters to the receiver and pushes a resolved-URL queue window (googlevideo URLs resolved up-front via `StreamRepository`); crossfade/EQ/precache are force-disabled while casting
 
+#### 8. **dj/** & **dj/android/** (`:djAndroid`) - AI DJ (fork addition)
+- `dj/` is a standalone pure-JVM Gradle build (`:brain`, package `org.simpmusic.dj`: analysis/plan contract, recommender, planner, renderer) consumed by the app through `includeBuild("dj")` (coordinates `org.simpmusic.dj:brain`).
+- `dj/android` is the Android module `:djAndroid`: MediaCodec decoding, analysis store/scheduler, settings, and the **transition-window engine**: the mix is pre-rendered to a WAV, played by a third ExoPlayer, and entered/left through phase-locked 100 ms linear cross-fades. Full design, hook points and what could not be verified on a device: `dj/docs/android.md`.
+- It hooks `CrossfadeExoPlayerAdapter` through a **patch series applied to the `core` submodule** (`patches/core/*.patch`, `scripts/apply-core-patches.sh`, `scripts/dj-build.sh`), because this fork cannot push to `maxrave-dev/core`. Run the apply script (or `dj-build.sh`) before building; never commit a bumped `core` gitlink that points at an unpushed commit.
+
 ## 🛠️ Key Technologies
 
 ### Android/Mobile

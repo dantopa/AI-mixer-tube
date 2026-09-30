@@ -93,6 +93,9 @@ kotlin {
             api(projects.media3)
             api(projects.media3Ui)
 
+            // AI DJ settings UI (Android only; the DJ itself is wired in through core/media3)
+            implementation(projects.djAndroid)
+
             // Google Cast (gated: real SDK for full builds, no-op stub for FOSS builds)
             if (isFullBuild) {
                 implementation(projects.cast)

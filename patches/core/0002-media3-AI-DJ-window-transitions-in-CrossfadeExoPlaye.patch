@@ -1,0 +1,462 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 01:08:48 +0000
+Subject: [PATCH 2/2] media3: AI DJ window transitions in
+ CrossfadeExoPlayerAdapter (behind DjHooks, off by default)
+
+Hooks only; all logic lives in :djAndroid.
+- ctor param dj: DjHooks? (Koin getOrNull); with dj == null or DJ mode off every path is the original one
+- 50 ms poll: keeps the (current, next) DJ context fresh, starts a prepared window when the outgoing SOURCE
+  position reaches the plan's trigger, holds the plain crossfade back while a window is ready/running
+- DjPlayerPort: window player = createExoPlayerInstance(), commit flips the queue (precached player parked at
+  the takeover position, listener moved, session delegate = window), finish reuses finalizeCrossfade
+- djAbortInternal() at every crossfade-cancel site (commit/seek/cleanup/load/release/cast) so pause, seek, skip,
+  queue change and release during a window commit the incoming track at its mapped position
+- with DJ on, the plain crossfade is the DJ fallback and uses DjSettings.fallbackCrossfadeMs
+- media3 depends on :djAndroid; Media3ServiceModule loads djModule next to the media service module
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LjDCXJJeuBALofdjqC8qgu
+
+diff --git a/media/media3/build.gradle.kts b/media/media3/build.gradle.kts
+index 0321cb0..913d292 100644
+--- a/media/media3/build.gradle.kts
++++ b/media/media3/build.gradle.kts
+@@ -54,6 +54,9 @@ dependencies {
+     implementation(projects.common)
+     implementation(projects.domain)
+ 
++    // AI DJ: window-transition engine (analysis scheduler, controller, Koin module).
++    implementation(projects.djAndroid)
++
+     // Koin
+     implementation(platform(libs.koin.bom))
+     implementation(libs.koin.core)
+diff --git a/media/media3/src/main/java/com/maxrave/media3/di/Media3ServiceModule.kt b/media/media3/src/main/java/com/maxrave/media3/di/Media3ServiceModule.kt
+index d00d051..e879837 100644
+--- a/media/media3/src/main/java/com/maxrave/media3/di/Media3ServiceModule.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/di/Media3ServiceModule.kt
+@@ -87,6 +87,8 @@ import org.koin.core.qualifier.named
+ import org.koin.dsl.module
+ import org.simpmusic.cast.initCast
+ import org.simpmusic.cast.wrapWithCastPlayer
++import org.simpmusic.dj.android.DjHooks
++import org.simpmusic.dj.android.di.djModule
+ import java.net.Proxy
+ import kotlin.time.Duration.Companion.seconds
+ 
+@@ -193,6 +195,7 @@ private val mediaServiceModule =
+                 mediaSourceFactory = get(),
+                 audioAttributes = get(),
+                 streamRepository = get(),
++                dj = getOrNull<DjHooks>(),
+             )
+         }
+ 
+@@ -548,7 +551,8 @@ private fun provideCoilBitmapLoader(
+ 
+ @OptIn(UnstableApi::class)
+ fun loadMediaService() {
+-    loadKoinModules(mediaServiceModule)
++    // djModule first: the adapter definition resolves DjHooks (getOrNull) when it is created.
++    loadKoinModules(listOf(djModule, mediaServiceModule))
+ }
+ 
+ @OptIn(UnstableApi::class)
+diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+index f810fd5..b0322f8 100644
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -40,6 +40,12 @@ import com.maxrave.media3.audio.EqualizerCurve
+ import com.maxrave.media3.audio.SleepFadeAudioProcessor
+ import com.maxrave.media3.exoplayer.CrossfadeExoPlayerAdapter.Companion.SPEED_PITCH_STEP
+ import com.maxrave.media3.service.mediasourcefactory.MergingMediaSourceFactory
++import org.simpmusic.dj.android.DjHooks
++import org.simpmusic.dj.android.DjQueueContext
++import org.simpmusic.dj.android.window.AbortResult
++import org.simpmusic.dj.android.window.DjPlayerPort
++import org.simpmusic.dj.android.window.DjTransitionRunner
++import androidx.media3.exoplayer.SeekParameters
+ import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Job
+@@ -82,6 +88,8 @@ internal class CrossfadeExoPlayerAdapter(
+     private val mediaSourceFactory: MergingMediaSourceFactory,
+     private val audioAttributes: AudioAttributes,
+     private val streamRepository: StreamRepository,
++    /** AI DJ (window transitions). Null or disabled: every path below is the original one. */
++    private val dj: DjHooks? = null,
+ ) : MediaPlayerInterface {
+     // ========== Internal State Enum (same as GstreamerPlayerAdapter) ==========
+ 
+@@ -108,7 +116,7 @@ internal class CrossfadeExoPlayerAdapter(
+         }
+         coroutineScope.launch {
+             dataStoreManager.crossfadeDuration.collect { duration ->
+-                crossfadeDurationMs = duration
++                storedCrossfadeDurationMs = duration
+                 Logger.d(TAG, "Crossfade duration: $crossfadeDurationMs ms")
+             }
+         }
+@@ -136,6 +144,10 @@ internal class CrossfadeExoPlayerAdapter(
+ 
+     private val listeners = mutableListOf<MediaPlayerListener>()
+ 
++    init {
++        dj?.setOnPrepared { prepared -> coroutineScope.launch { djOnPrepared(prepared) } }
++    }
++
+     @Volatile
+     private var currentPlayer: ExoPlayer? = null
+ 
+@@ -317,7 +329,18 @@ internal class CrossfadeExoPlayerAdapter(
+     override var crossfadeSuppressed: Boolean = false
+ 
+     @Volatile
+-    private var crossfadeDurationMs = 5000
++    private var storedCrossfadeDurationMs = 5000
++
++    /** With DJ mode on, the plain crossfade is only the DJ's fallback and uses the DJ's own fallback length. */
++    private val crossfadeDurationMs: Int
++        get() {
++            val d = dj
++            return if (d != null && d.isEnabled) d.fallbackCrossfadeMs.toInt() else storedCrossfadeDurationMs
++        }
++
++    /** The crossfade path runs when the user enabled it OR DJ mode is on (it is the DJ's fallback transition). */
++    private val crossfadeActive: Boolean
++        get() = crossfadeEnabled || dj?.isEnabled == true
+ 
+     @Volatile
+     private var djCrossfadeEnabled = true
+@@ -457,6 +480,7 @@ internal class CrossfadeExoPlayerAdapter(
+             Logger.w(TAG, "Cast session active on ${deviceName ?: "unknown device"} — local playback suspended")
+             coroutineScope.launch {
+                 // Kill anything that makes local noise or wastes battery while remote.
++                djAbortInternal()
+                 crossfadeJob?.cancel()
+                 crossfadeJob = null
+                 currentPlayerFilter?.enabled = false
+@@ -743,6 +767,7 @@ internal class CrossfadeExoPlayerAdapter(
+             val shouldPlay = internalPlayWhenReady
+ 
+             // Cancel any ongoing crossfade
++            djAbortInternal()
+             if (isCrossfading) {
+                 Logger.d(TAG, "seekTo: Cancelling crossfade")
+                 crossfadeJob?.cancel()
+@@ -1422,6 +1447,9 @@ internal class CrossfadeExoPlayerAdapter(
+         positionUpdateJob?.cancel()
+ 
+         // Cancel crossfade
++        djAbortInternal()
++        djDiscardPrepared()
++        dj?.setOnPrepared(null)
+         crossfadeJob?.cancel()
+         secondaryPlayer?.release()
+         secondaryPlayer = null
+@@ -1592,6 +1620,7 @@ internal class CrossfadeExoPlayerAdapter(
+                     // === CAREFUL ORDER for ForwardingPlayer integration ===
+ 
+                     // 1. Remove our active listener from old player
++                    djAbortInternal()
+                     cleanupPlayerListenerInternal()
+                     stopPositionUpdates()
+                     crossfadeJob?.cancel()
+@@ -1660,7 +1689,7 @@ internal class CrossfadeExoPlayerAdapter(
+ 
+                     // Eagerly load audio metadata for auto crossfade calculations
+                     // so it's available when position updates check the trigger threshold
+-                    if (crossfadeEnabled && crossfadeDurationMs == DataStoreManager.CROSSFADE_DURATION_AUTO) {
++                    if (crossfadeActive && crossfadeDurationMs == DataStoreManager.CROSSFADE_DURATION_AUTO) {
+                         loadAudioMetaIfNeeded(videoId)
+                     }
+ 
+@@ -1908,6 +1937,7 @@ internal class CrossfadeExoPlayerAdapter(
+         cleanupPlayerListenerInternal()
+ 
+         // Cancel any ongoing crossfade
++        djAbortInternal()
+         crossfadeJob?.cancel()
+         crossfadeJob = null
+         setCrossfading(false)
+@@ -1932,6 +1962,7 @@ internal class CrossfadeExoPlayerAdapter(
+      * decides what to do next (pause in place, advance to A+2, go to previous, ...).
+      */
+     private fun commitIncomingAsCurrentInternal() {
++        djAbortInternal()
+         crossfadeJob?.cancel()
+         crossfadeJob = null
+         stopPositionUpdates()
+@@ -2021,7 +2052,8 @@ internal class CrossfadeExoPlayerAdapter(
+         if (isCastActive) return
+         // Check if crossfade should be used
+         val shouldCrossfade =
+-            crossfadeEnabled &&
++            crossfadeActive &&
++            !djHoldsCrossfade(cachedPosition) &&
+                 !crossfadeSuppressed &&
+                 hasNextMediaItem() &&
+                 !isCrossfading &&
+@@ -2861,6 +2893,235 @@ internal class CrossfadeExoPlayerAdapter(
+         triggerPrecachingInternal()
+     }
+ 
++    // ========== DJ mode (window transitions) ==========
++    // All logic lives in :djAndroid (DjEngine, DjTransitionRunner, TransitionController). This section is only the
++    // adapter's side of the seam: the guards, the DjPlayerPort, and the synchronous abort hooks. With `dj == null`
++    // or DJ disabled none of it does anything.
++
++    @Volatile
++    private var djRunner: DjTransitionRunner? = null
++    private var djLastContext: DjQueueContext? = null
++
++    /** Why DJ mode must sit this transition out, or null. Mirrors (and adds to) the crossfade guards. */
++    private fun djBlockedReason(): String? =
++        when {
++            isCastActive -> "casting"
++            crossfadeSuppressed -> "listen together"
++            internalRepeatMode == PlayerConstants.REPEAT_MODE_ONE -> "repeat one"
++            isCurrentTrackVideo() || isNextTrackVideo() -> "video"
++            internalPlaybackSpeed != 1f || internalPlaybackPitch != 1f -> "playback speed/pitch"
++            isWithinAlbum() -> "album"
++            else -> null
++        }
++
++    /** Called from the 50 ms poll: keeps the engine's (current, next) context fresh and starts a prepared window when due. */
++    private fun djPollTick(
++        player: ExoPlayer,
++        positionMs: Long,
++    ) {
++        val hooks = dj ?: return
++        if (!hooks.isEnabled) return
++        val currentId = playlist.getOrNull(localCurrentMediaItemIndex)?.mediaId ?: return
++        if (!isCrossfading) {
++            val nextId = if (hasNextMediaItem()) playlist.getOrNull(getNextMediaItemIndex())?.mediaId?.takeIf { it != currentId } else null
++            val ctx = DjQueueContext(currentId, nextId, djBlockedReason())
++            if (ctx != djLastContext) {
++                djLastContext = ctx
++                hooks.onQueueContext(ctx)
++                // A window prepared for another pair is dead weight.
++                djRunner?.takeIf { !it.isRunning && (it.prepared.fromId != currentId || it.prepared.toId != nextId) }?.let { djDiscardPrepared() }
++            }
++            // Blocked (cast, repeat one, video...): a window prepared earlier must not hold the plain crossfade back.
++            if (ctx.blockedReason != null) djDiscardPrepared()
++            val runner = djRunner ?: return
++            if (!runner.isRunning && !runner.prepared.holdsCrossfadeAt(positionMs)) {
++                // The outgoing track is already past the window's start: too late, the plain crossfade takes over.
++                hooks.consumed(runner.prepared, "missed the trigger")
++                djDiscardPrepared()
++                return
++            }
++            if (ctx.blockedReason == null && !runner.isRunning && !runner.isDone && player.isPlaying && runner.isWindowReady &&
++                runner.prepared.isTriggeredAt(positionMs, hooks.calibrator.startLatencyMs)
++            ) {
++                currentPlayer?.skipSilenceEnabled = false
++                if (!runner.start()) {
++                    hooks.consumed(runner.prepared, "start refused")
++                    djDiscardPrepared()
++                }
++            }
++        }
++    }
++
++    /** True while a plain crossfade must wait: a DJ window is ready (or running) for this pair and its moment has not passed. */
++    private fun djHoldsCrossfade(positionMs: Long): Boolean {
++        val hooks = dj ?: return false
++        if (!hooks.isEnabled) return false
++        val runner = djRunner ?: return false
++        return runner.isRunning || (!runner.isDone && runner.prepared.holdsCrossfadeAt(positionMs))
++    }
++
++    private fun djUiPositionMs(): Long? = djRunner?.takeIf { it.isRunning }?.uiPositionMs()
++
++    private fun djOnPrepared(prepared: org.simpmusic.dj.android.PreparedTransition) {
++        val hooks = dj ?: return
++        if (isCrossfading || isCastActive) return
++        djDiscardPrepared()
++        val runner = DjTransitionRunner(djPort, prepared, hooks, coroutineScope)
++        if (runner.prepareWindow()) djRunner = runner else hooks.consumed(prepared, "window player setup failed")
++    }
++
++    private fun djDiscardPrepared() {
++        val r = djRunner ?: return
++        if (r.isRunning) return
++        djRunner = null
++        r.discard()
++    }
++
++    /**
++     * Ends a running DJ transition SYNCHRONOUSLY, before the caller cancels the crossfade job / releases players.
++     * Afterwards the adapter is in exactly the state a cancelled crossfade leaves: incoming = [secondaryPlayer],
++     * ForwardingPlayer delegate on it. Before the commit point nothing had changed, so there is nothing to adopt.
++     */
++    private fun djAbortInternal() {
++        val runner = djRunner ?: return
++        if (!runner.isRunning) return
++        djRunner = null
++        val result = runner.abort()
++        dj?.consumed(runner.prepared, "interrupted")
++        djRestoreAfterAbort(result)
++    }
++
++    private fun djRestoreAfterAbort(result: AbortResult?) {
++        forwardingPlayer.positionOverride = null
++        forwardingPlayer.overrideSeekHandler = null
++        currentPlayer?.skipSilenceEnabled = internalSkipSilence
++        if (result != null && result.committed) {
++            val next = secondaryPlayer ?: return
++            forwardingPlayer.swapDelegate(next)
++            next.skipSilenceEnabled = internalSkipSilence
++            if (!result.incomingPlaying && internalPlayWhenReady) next.playWhenReady = true
++        }
++    }
++
++    private val djPort =
++        object : DjPlayerPort {
++            override fun currentPlayer(): ExoPlayer? = this@CrossfadeExoPlayerAdapter.currentPlayer
++
++            override fun userVolume(): Float = internalVolume
++
++            override fun createWindowPlayer(): ExoPlayer {
++                val pwf = createExoPlayerInstance()
++                pwf.filter.enabled = false
++                pwf.player.skipSilenceEnabled = false
++                return pwf.player
++            }
++
++            override fun incomingMetadata(): MediaItem? = playlist.getOrNull(getNextMediaItemIndex())?.toMedia3MediaItem()
++
++            override fun commitToIncoming(
++                seekSourceMs: Long,
++                windowPlayer: ExoPlayer,
++                uiPosition: () -> Long?,
++            ): ExoPlayer? {
++                if (isCrossfading || isCastActive || !hasNextMediaItem()) return null
++                val nextIndex = getNextMediaItemIndex()
++                val nextItem = playlist.getOrNull(nextIndex) ?: return null
++                val prepared = djRunner?.prepared
++                if (nextItem.mediaId != prepared?.toId) return null
++
++                val cached = precachedPlayers.remove(nextItem.mediaId)
++                val nextPlayer: ExoPlayer
++                val nextFilter: CrossfadeFilterAudioProcessor?
++                if (cached != null) {
++                    nextPlayer = cached.player
++                    nextFilter = cached.filter
++                } else {
++                    val pwf = createExoPlayerInstance()
++                    nextPlayer = pwf.player
++                    nextFilter = pwf.filter
++                    nextPlayer.setMediaItem(nextItem.toMedia3MediaItem())
++                    nextPlayer.prepare()
++                }
++                // Parked silently at the source position it must hold when it takes over from the window.
++                nextPlayer.setSeekParameters(SeekParameters.EXACT)
++                nextPlayer.skipSilenceEnabled = false
++                nextPlayer.volume = 0f
++                nextPlayer.playWhenReady = false
++                nextPlayer.seekTo(seekSourceMs)
++
++                secondaryPlayer = nextPlayer
++                secondaryPlayerFilter = nextFilter
++                setupPlayerListenerInternal(nextPlayer)
++
++                forwardingPlayer.positionOverride =
++                    DelegatingForwardingPlayer.SessionPositionOverride(
++                        position = { uiPosition() ?: prepared?.plan?.entryPointMs ?: 0L },
++                        duration = { nextPlayer.duration.takeIf { it > 0 } ?: prepared?.toDurationMs ?: 0L },
++                    )
++                forwardingPlayer.overrideSeekHandler = { ms -> seekTo(ms) }
++                forwardingPlayer.swapDelegate(windowPlayer)
++
++                requestAudioFocusInternal()
++                forwardingPlayer.suppressPlaybackEnded = false
++                crossfadeFromIndex = localCurrentMediaItemIndex
++                localCurrentMediaItemIndex = nextIndex
++                setCrossfading(true)
++                listeners.forEach {
++                    it.onMediaItemTransition(nextItem, PlayerConstants.MEDIA_ITEM_TRANSITION_REASON_AUTO)
++                }
++                forwardingPlayer.notifyMediaItemChanged()
++                return nextPlayer
++            }
++
++            override fun onWindowRetired() {
++                val next = secondaryPlayer ?: return
++                forwardingPlayer.positionOverride = null
++                forwardingPlayer.overrideSeekHandler = null
++                forwardingPlayer.swapDelegate(next)
++            }
++
++            override fun onFinished() {
++                val runner = djRunner ?: return
++                djRunner = null
++                val next = secondaryPlayer
++                forwardingPlayer.positionOverride = null
++                forwardingPlayer.overrideSeekHandler = null
++                if (next == null) return
++                forwardingPlayer.swapDelegate(next)
++                dj?.consumed(runner.prepared, "DJ mix done")
++                finalizeCrossfade(localCurrentMediaItemIndex, next)
++            }
++
++            override fun onFailed(
++                reason: String,
++                result: AbortResult,
++            ) {
++                val runner = djRunner
++                djRunner = null
++                if (runner != null) dj?.consumed(runner.prepared, "fallback: $reason")
++                Logger.w(TAG, "DJ transition failed ($reason), committed=${result.committed}")
++                djRestoreAfterAbort(result)
++                if (!result.committed) return
++                val next = secondaryPlayer ?: return
++                if (next.playerError != null) {
++                    // The incoming deck never came up: reload the track where the mix had got to.
++                    val index = localCurrentMediaItemIndex
++                    setCrossfading(false)
++                    crossfadeFromIndex = -1
++                    secondaryPlayer = null
++                    secondaryPlayerFilter = null
++                    next.release()
++                    loadAndPlayTrackInternal(index, result.incomingPositionMs ?: 0L, internalPlayWhenReady)
++                    return
++                }
++                finalizeCrossfade(localCurrentMediaItemIndex, next)
++            }
++
++            override fun log(message: String) {
++                Logger.d(TAG, message)
++            }
++        }
++
+     // ========== Internal: Position Updates ==========
+ 
+     /**
+@@ -2881,7 +3142,7 @@ internal class CrossfadeExoPlayerAdapter(
+                             ) {
+                                 // During crossfade, show the incoming track's timeline
+                                 val timelinePlayer = if (isCrossfading) secondaryPlayer ?: player else player
+-                                val pos = timelinePlayer.currentPosition
++                                val pos = djUiPositionMs() ?: timelinePlayer.currentPosition
+                                 val dur = timelinePlayer.duration
+                                 val buf = timelinePlayer.bufferedPosition
+ 
+@@ -2889,11 +3150,15 @@ internal class CrossfadeExoPlayerAdapter(
+                                 if (dur > 0) cachedDuration = dur
+                                 if (buf >= 0) cachedBufferedPosition = buf
+ 
++                                // AI DJ: keep the (current, next) context fresh and start a prepared window when due.
++                                djPollTick(player, pos)
++
+                                 // Check if should trigger crossfade.
+                                 // Add a preparation buffer (3s) so that if the next track
+                                 // is NOT precached, URL resolution + buffering time doesn't
+                                 // eat into the audible crossfade window.
+-                                if (crossfadeEnabled &&
++                                if (crossfadeActive &&
++                                    !djHoldsCrossfade(pos) &&
+                                     !crossfadeSuppressed &&
+                                     !isCrossfading &&
+                                     player.isPlaying &&

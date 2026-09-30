@@ -119,6 +119,9 @@ import com.maxrave.simpmusic.extension.bytesToMB
 import com.maxrave.simpmusic.extension.displayString
 import com.maxrave.simpmusic.extension.isTwoLetterCode
 import com.maxrave.simpmusic.extension.isValidProxyHost
+import com.maxrave.simpmusic.expect.ui.DjSettingsSection
+import com.maxrave.simpmusic.expect.ui.rememberDjFallbackSeconds
+import com.maxrave.simpmusic.expect.ui.rememberDjModeEnabled
 import com.maxrave.simpmusic.getPlatform
 import com.maxrave.simpmusic.ui.component.ActionButton
 import com.maxrave.simpmusic.ui.component.AmbientThemeGlow
@@ -224,6 +227,7 @@ import simpmusic.composeapp.generated.resources.content
 import simpmusic.composeapp.generated.resources.content_country
 import simpmusic.composeapp.generated.resources.contributor_email
 import simpmusic.composeapp.generated.resources.contributor_name
+import simpmusic.composeapp.generated.resources.ai_dj_crossfade_superseded
 import simpmusic.composeapp.generated.resources.crossfade
 import simpmusic.composeapp.generated.resources.crossfade_auto
 import simpmusic.composeapp.generated.resources.crossfade_description
@@ -1485,18 +1489,24 @@ fun SettingScreen(
         }
         // Crossfade Settings (all platforms)
         item(key = "crossfade_settings") {
+            // AI DJ mode (Android) supersedes the plain crossfade: the rows stay visible but greyed out, and
+            // the crossfade only runs as the DJ's fallback, at the DJ's own fallback length.
+            val djOn = rememberDjModeEnabled()
+            val djFallbackSeconds = rememberDjFallbackSeconds()
             Column {
                 SettingItem(
                     title = stringResource(Res.string.crossfade),
                     subtitle =
                         if (castState.isRemote) {
                             stringResource(Res.string.not_available_while_casting)
+                        } else if (djOn) {
+                            stringResource(Res.string.ai_dj_crossfade_superseded, djFallbackSeconds)
                         } else {
                             stringResource(Res.string.crossfade_description)
                         },
                     smallSubtitle = true,
                     switch = (crossfadeEnabled to { viewModel.setCrossfadeEnabled(it) }),
-                    isEnable = !castState.isRemote,
+                    isEnable = !castState.isRemote && !djOn,
                 )
                 AnimatedVisibility(visible = crossfadeEnabled) {
                     Column {
@@ -1510,7 +1520,7 @@ fun SettingScreen(
                                 } else {
                                     "${crossfadeDuration / 1000}s"
                                 },
-                            isEnable = !castState.isRemote,
+                            isEnable = !castState.isRemote && !djOn,
                             onClick = {
                                 viewModel.setAlertData(
                                     SettingAlertState(
@@ -1573,7 +1583,7 @@ fun SettingScreen(
                                 },
                             smallSubtitle = true,
                             switch = ((crossfadeDjMode) to { viewModel.setCrossfadeDjMode(it) }),
-                            isEnable = !castState.isRemote,
+                            isEnable = !castState.isRemote && !djOn,
                         )
                         SettingItem(
                             title = stringResource(Res.string.crossfade_skip_album),
@@ -1585,11 +1595,17 @@ fun SettingScreen(
                                 },
                             smallSubtitle = true,
                             switch = ((crossfadeSkipAlbum) to { viewModel.setCrossfadeSkipAlbum(it) }),
-                            isEnable = !castState.isRemote,
+                            isEnable = !castState.isRemote && !djOn,
                         )
 //                        }
                     }
                 }
+            }
+        }
+        // AI DJ mode: Android only (Media3 players); the desktop actual draws nothing.
+        if (getPlatform() == Platform.Android) {
+            item(key = "ai_dj_settings") {
+                DjSettingsSection(castRemote = castState.isRemote)
             }
         }
         // Deliberately not part of "storage" further down, which is Android-only: tracking and the
