@@ -22,6 +22,7 @@ data class DjMixStrings(
     val kindBeatMatched: String = "Beat-matched",
     val kindCut: String = "Beat cut",
     val kindCrossfade: String = "Crossfade",
+    val kindEchoOut: String = "Echo out",
     val phaseReady: String = "Mix ready",
     val phaseLeadInTemplate: String = "Mix starts in {0} s",
     val phaseMixingTemplate: String = "Mixing · {0}",
@@ -35,6 +36,7 @@ data class DjMixStrings(
         DjMixKind.BEAT_MATCHED -> kindBeatMatched
         DjMixKind.CUT -> kindCut
         DjMixKind.SIMPLE_CROSSFADE -> kindCrossfade
+        DjMixKind.ECHO_OUT -> kindEchoOut
         null -> analysing
     }
 

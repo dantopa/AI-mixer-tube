@@ -1,6 +1,7 @@
 package com.maxrave.simpmusic.expect.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
+import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
 import com.maxrave.simpmusic.ui.icon.GraphicEq
 import com.maxrave.simpmusic.ui.icon.SimpIcons
 import com.maxrave.simpmusic.ui.theme.typo
@@ -65,6 +67,7 @@ import simpmusic.composeapp.generated.resources.dj_chip_waiting
  * ("analysing next track… 12 s", "ready, mix in 0:42 (124→128 BPM, 8A→9A)", "mixing", "crossfade fallback: ..."). Tapping it
  * opens the DJ log. Reads the same [DjDebugState] the settings line reads.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 actual fun DjStatusChip(modifier: Modifier) {
     val settings = koinInject<DjSettingsRepository>()
@@ -75,7 +78,9 @@ actual fun DjStatusChip(modifier: Modifier) {
     val handler = koinInject<MediaPlayerHandler>()
     val debug by hooks.debug.collectAsStateWithLifecycle()
     val media by handler.simpleMediaState.collectAsStateWithLifecycle()
+    val mix by hooks.mixView.collectAsStateWithLifecycle()
     var showLog by remember { mutableStateOf(false) }
+    var showMix by remember { mutableStateOf(false) }
 
     val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
     val mixing = debug.isMixing
@@ -89,7 +94,8 @@ actual fun DjStatusChip(modifier: Modifier) {
     val text = chipText(debug, positionMs, nowMs)
 
     Surface(
-        modifier = modifier.clickable { showLog = true },
+        // Tap: the picture of the mix (both tracks overlapping) when there is one, else the log. Long-press: always the log.
+        modifier = modifier.combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
         shape = CircleShape,
         // Unmistakable while a mix is actually playing: the accent colour instead of the quiet dark pill.
         color = if (mixing) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
@@ -116,6 +122,8 @@ actual fun DjStatusChip(modifier: Modifier) {
         }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
+    // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.
+    if (showMix) DjMixSheet(data = mix, onDismiss = { showMix = false })
 }
 
 @Composable

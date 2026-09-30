@@ -123,12 +123,14 @@ class BrainIntegrationTest {
     }
 
     @Test
-    fun cutPlansRenderAndHandOffOnTheDownbeat() {
+    fun echoOutPlansRenderAndHandOffAtThePhraseStart() {
         val a = band(87f)
         val b = band(140f)
         val plan = planner.plan(a, b, settings)
-        assertTrue(plan.kind == PlanKind.CUT, "expected a CUT for 87 -> 140 BPM, got ${plan.kind}: ${plan.reason}")
-        assertTrue(WindowTimeline.check(plan) is Eligibility.Ok, "a CUT must be a window-eligible plan")
+        assertTrue(plan.kind == PlanKind.ECHO_OUT, "expected an ECHO_OUT for 87 -> 140 BPM (a bare cut is no longer planned), got ${plan.kind}: ${plan.reason}")
+        assertTrue(WindowTimeline.check(plan) is Eligibility.Ok, "an ECHO_OUT must be a window-eligible plan: ${WindowTimeline.check(plan)}")
+        val echo = plan.echoOut!!
+        assertTrue(WindowTimeline.build(plan).settledRelMs >= echo.tailMs, "the window must last until the echo has rung out")
         val tl = WindowTimeline.build(plan)
         val outR = tl.outgoingDecodeRange()
         val inR = tl.incomingDecodeRange()
@@ -143,8 +145,8 @@ class BrainIntegrationTest {
         val l = wav.channels[0]
         val before = (0 until t0).count { abs(l[it]) > 0.4f }
         val after = (t0 until wav.frames).count { abs(l[it]) > 0.4f }
-        println("cut window: $before loud samples before T0, $after after")
-        assertTrue(before > 0 && after > 0, "both decks must be heard around the cut")
+        println("echo-out window: $before loud samples before T0, $after after")
+        assertTrue(before > 0 && after > 0, "both decks must be heard around the echo-out")
         file.delete()
     }
 }

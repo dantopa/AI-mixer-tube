@@ -65,6 +65,7 @@ object DjMixViewBuilder {
         val kind = when (plan.kind) {
             PlanKind.BEAT_MATCHED -> DjMixKind.BEAT_MATCHED
             PlanKind.CUT -> DjMixKind.CUT
+            PlanKind.ECHO_OUT -> DjMixKind.ECHO_OUT
             PlanKind.SIMPLE_CROSSFADE -> DjMixKind.SIMPLE_CROSSFADE
         }
         return DjMixViewData(

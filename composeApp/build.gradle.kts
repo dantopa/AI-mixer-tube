@@ -110,6 +110,8 @@ kotlin {
             implementation(libs.zxing.core)
         }
         commonMain.dependencies {
+            // AI DJ mix picture: the plain-JVM data type of the mix view (org.simpmusic.dj.mixview), from the included `dj` build
+            implementation("org.simpmusic.dj:brain")
             implementation(libs.runtime)
             implementation(libs.foundation)
             implementation(libs.compose.material3)

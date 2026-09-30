@@ -1,7 +1,7 @@
 package org.simpmusic.dj.mixview
 
 /** What kind of transition the picture shows (mirror of the plan kind, kept here so the UI does not need the brain). */
-enum class DjMixKind { BEAT_MATCHED, CUT, SIMPLE_CROSSFADE }
+enum class DjMixKind { BEAT_MATCHED, CUT, SIMPLE_CROSSFADE, ECHO_OUT }
 
 /** Where the mix is, for the one-line status under the picture. */
 enum class DjMixPhase {

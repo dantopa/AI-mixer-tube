@@ -584,6 +584,8 @@
     <string name="ai_dj_why">Last planned transition</string>
     <string name="ai_dj_no_plan_yet">Nothing planned yet. Play a couple of songs.</string>
     <string name="ai_dj_analyzer_missing">The beat analyzer is not part of this build yet, so DJ mode falls back to the normal crossfade.</string>
+    <string name="ai_dj_mix_anywhere">Mix anywhere in the song</string>
+    <string name="ai_dj_mix_anywhere_description">Find the best moment in the current song to mix out (after about half of it, at least 45 s from now). Off: only near the end. Songs whose tempos cannot be matched get an echo-out instead of a plain crossfade.</string>
     <string name="ai_dj_analyze_on_metered">Analyze on mobile data</string>
     <string name="ai_dj_analyze_on_metered_description">Analyze the next song even on mobile data (about 4 MB per song). Off: only on Wi-Fi or from the cache.</string>
     <string name="ai_dj_log">DJ log</string>
@@ -1009,6 +1011,7 @@
     <string name="dj_mix_kind_beat_matched">Beat-matched</string>
     <string name="dj_mix_kind_cut">Beat cut</string>
     <string name="dj_mix_kind_crossfade">Crossfade</string>
+    <string name="dj_mix_kind_echo_out">Echo out</string>
     <string name="dj_mix_phase_ready">Mix ready</string>
     <string name="dj_mix_phase_lead_in">Mix starts in %1$s s</string>
     <string name="dj_mix_phase_mixing">Mixing · %1$s</string>

@@ -27,10 +27,13 @@ import org.simpmusic.dj.android.scheduler.DjAnalysisScheduler
 import org.simpmusic.dj.android.settings.DjSettingsRepository
 import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.EnergyArc
+import org.simpmusic.dj.model.MixPoint
 import simpmusic.composeapp.generated.resources.Res
 import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered_description
+import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere
+import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere_description
 import simpmusic.composeapp.generated.resources.ai_dj_arc_build
 import simpmusic.composeapp.generated.resources.ai_dj_arc_cool_down
 import simpmusic.composeapp.generated.resources.ai_dj_arc_steady
@@ -242,6 +245,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         },
                     smallSubtitle = true,
                     switch = (settings.bassSwap to { on -> scope.launch { repo.setBassSwap(on) }; Unit }),
+                    isEnable = notCasting,
+                )
+                SettingItem(
+                    title = stringResource(Res.string.ai_dj_mix_anywhere),
+                    subtitle = stringResource(Res.string.ai_dj_mix_anywhere_description),
+                    smallSubtitle = true,
+                    switch = ((settings.mixPoint == MixPoint.ANYWHERE) to { on -> scope.launch { repo.setMixAnywhere(on) }; Unit }),
                     isEnable = notCasting,
                 )
                 SettingItem(

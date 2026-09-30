@@ -13,6 +13,7 @@ import simpmusic.composeapp.generated.resources.dj_mix_close
 import simpmusic.composeapp.generated.resources.dj_mix_kind_beat_matched
 import simpmusic.composeapp.generated.resources.dj_mix_kind_crossfade
 import simpmusic.composeapp.generated.resources.dj_mix_kind_cut
+import simpmusic.composeapp.generated.resources.dj_mix_kind_echo_out
 import simpmusic.composeapp.generated.resources.dj_mix_legend_cut
 import simpmusic.composeapp.generated.resources.dj_mix_legend_fader
 import simpmusic.composeapp.generated.resources.dj_mix_overlap
@@ -32,6 +33,7 @@ fun rememberDjMixStrings(): DjMixStrings {
     val beat = stringResource(Res.string.dj_mix_kind_beat_matched)
     val cut = stringResource(Res.string.dj_mix_kind_cut)
     val xfade = stringResource(Res.string.dj_mix_kind_crossfade)
+    val echo = stringResource(Res.string.dj_mix_kind_echo_out)
     val ready = stringResource(Res.string.dj_mix_phase_ready)
     val leadIn = stringResource(Res.string.dj_mix_phase_lead_in, SLOT)
     val mixing = stringResource(Res.string.dj_mix_phase_mixing, SLOT)
@@ -40,9 +42,9 @@ fun rememberDjMixStrings(): DjMixStrings {
     val fader = stringResource(Res.string.dj_mix_legend_fader)
     val eqCut = stringResource(Res.string.dj_mix_legend_cut)
     val close = stringResource(Res.string.dj_mix_close)
-    return remember(sheetTitle, analysing, beat, cut, xfade, ready, leadIn, mixing, settling, overlap, fader, eqCut, close) {
+    return remember(sheetTitle, analysing, beat, cut, xfade, echo, ready, leadIn, mixing, settling, overlap, fader, eqCut, close) {
         DjMixStrings(
-            sheetTitle = sheetTitle, analysing = analysing, kindBeatMatched = beat, kindCut = cut, kindCrossfade = xfade,
+            sheetTitle = sheetTitle, analysing = analysing, kindBeatMatched = beat, kindCut = cut, kindCrossfade = xfade, kindEchoOut = echo,
             phaseReady = ready, phaseLeadInTemplate = leadIn, phaseMixingTemplate = mixing, phaseSettling = settling,
             overlapTemplate = overlap, legendFader = fader, legendCut = eqCut, close = close,
         )

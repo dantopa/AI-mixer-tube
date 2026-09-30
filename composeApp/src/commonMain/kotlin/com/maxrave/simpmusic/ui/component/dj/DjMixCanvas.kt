@@ -213,7 +213,7 @@ private class MixPainter(
     private fun DrawScope.zone(overlapText: String) {
         val kind = data.kind
         val x0 = x(0.0)
-        if (kind == DjMixKind.CUT || data.overlapEndMs <= 0) {
+        if (kind == DjMixKind.CUT || kind == DjMixKind.ECHO_OUT || data.overlapEndMs <= 0) {
             drawLine(
                 c.zone.copy(alpha = 0.9f), Offset(x0, topPad - 4 * dp1), Offset(x0, h - axisH),
                 strokeWidth = 2 * dp1, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6 * dp1, 4 * dp1)),

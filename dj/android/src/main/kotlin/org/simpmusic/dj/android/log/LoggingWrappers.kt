@@ -8,6 +8,7 @@ import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TransitionPlan
+import org.simpmusic.dj.model.PlanConstraints
 import org.simpmusic.dj.model.TransitionPlanner
 
 private fun conf(c: Confident<*>?): String = if (c == null) "none" else "c%.2f".format(c.confidence)
@@ -26,15 +27,20 @@ private fun rates(d: DeckPlan): String = "rate ${"%.3f".format(d.rate.keys.first
 
 /** Logs every planning call with its inputs and its result (tag `planner`). */
 class LoggingPlanner(private val delegate: TransitionPlanner) : TransitionPlanner {
-    override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan {
+    override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan = logged(from, to, settings, null)
+
+    override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan =
+        logged(from, to, settings, constraints)
+
+    private fun logged(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints?): TransitionPlan {
         val t0 = System.nanoTime()
-        DjLog.d(TAG, "plan inputs: from=${describe(from)} to=${describe(to)} settings[bars=${settings.overlapBars} bend=${settings.maxTempoBend} keyShift=${settings.allowKeyShift}/${settings.maxPitchShift} bassSwap=${settings.bassSwap} minConf=${settings.minConfidence}]")
+        DjLog.d(TAG, "plan inputs: from=${describe(from)} to=${describe(to)} settings[bars=${settings.overlapBars} bend=${settings.maxTempoBend} keyShift=${settings.allowKeyShift}/${settings.maxPitchShift} bassSwap=${settings.bassSwap} minConf=${settings.minConfidence} mixPoint=${settings.mixPoint} earliestExit=${constraints?.earliestExitMs}]")
         try {
-            val p = delegate.plan(from, to, settings)
+            val p = if (constraints == null) delegate.plan(from, to, settings) else delegate.plan(from, to, settings, constraints)
             DjLog.i(
                 TAG,
                 "plan ${p.fromId}->${p.toId} = ${p.kind} conf=${"%.2f".format(p.confidence)} in ${(System.nanoTime() - t0) / 1_000_000} ms: exit=${p.exitPointMs} entry=${p.entryPointMs} " +
-                    "overlap=${p.overlapMs} preRoll=${p.preRollMs} mixBpm=${p.mixBpm?.let { "%.1f".format(it) }} | out ${rates(p.outgoing)} | in ${rates(p.incoming)} | reason: ${p.reason}",
+                    "overlap=${p.overlapMs} preRoll=${p.preRollMs} mixBpm=${p.mixBpm?.let { "%.1f".format(it) }} echo=${p.echoOut?.let { "${it.delayMs.toInt()}ms fb=${it.feedback} tail=${it.tailMs}" }} | out ${rates(p.outgoing)} | in ${rates(p.incoming)} | reason: ${p.reason}",
             )
             return p
         } catch (e: Throwable) {

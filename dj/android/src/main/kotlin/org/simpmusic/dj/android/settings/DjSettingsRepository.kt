@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.EnergyArc
+import org.simpmusic.dj.model.MixPoint
 
 private val Context.djDataStore: DataStore<Preferences> by preferencesDataStore(name = "dj_settings")
 
@@ -45,6 +46,7 @@ class DjSettingsRepository(
             prefs[FALLBACK_CROSSFADE_MS] = next.fallbackCrossfadeMs
             prefs[AUTO_DJ] = next.autoDj
             prefs[AUTO_DJ_ARC] = next.autoDjArc.name
+            prefs[MIX_POINT] = next.mixPoint.name
         }
     }
 
@@ -59,6 +61,8 @@ class DjSettingsRepository(
     suspend fun setBassSwap(enabled: Boolean) = update { it.copy(bassSwap = enabled) }
 
     suspend fun setAutoDj(enabled: Boolean) = update { it.copy(autoDj = enabled) }
+
+    suspend fun setMixAnywhere(anywhere: Boolean) = update { it.copy(mixPoint = if (anywhere) MixPoint.ANYWHERE else MixPoint.AT_END) }
 
     suspend fun setAutoDjArc(arc: EnergyArc) = update { it.copy(autoDjArc = arc) }
 
@@ -86,6 +90,7 @@ class DjSettingsRepository(
             fallbackCrossfadeMs = (this[FALLBACK_CROSSFADE_MS] ?: d.fallbackCrossfadeMs).coerceIn(1000L, 30_000L),
             autoDj = this[AUTO_DJ] ?: d.autoDj,
             autoDjArc = this[AUTO_DJ_ARC]?.let { name -> EnergyArc.entries.firstOrNull { it.name == name } } ?: d.autoDjArc,
+            mixPoint = this[MIX_POINT]?.let { name -> MixPoint.entries.firstOrNull { it.name == name } } ?: d.mixPoint,
         )
     }
 
@@ -107,6 +112,7 @@ class DjSettingsRepository(
         private val FALLBACK_CROSSFADE_MS = longPreferencesKey("dj_fallback_crossfade_ms")
         private val AUTO_DJ = booleanPreferencesKey("dj_auto_dj")
         private val AUTO_DJ_ARC = stringPreferencesKey("dj_auto_dj_arc")
+        private val MIX_POINT = stringPreferencesKey("dj_mix_point")
         private val LIBRARY_ANALYSIS = booleanPreferencesKey("dj_library_analysis")
         private val ANALYZE_ON_METERED = booleanPreferencesKey("dj_analyze_on_metered")
     }

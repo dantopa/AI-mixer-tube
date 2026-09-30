@@ -1,0 +1,14 @@
+Subject: [PATCH] media3: tell the DJ engine the playback position (mix anywhere in the track)
+
+---
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -2958,6 +2958,8 @@
+     ) {
+         val hooks = dj ?: return
+         if (!hooks.isEnabled) return
++        // The planner may only touch what has not been played yet (mix anywhere in the track).
++        hooks.onPosition(positionMs)
+         val currentId = playlist.getOrNull(localCurrentMediaItemIndex)?.mediaId ?: return
+         if (currentId != djLastLoggedTrack) {
+             djLastLoggedTrack = currentId

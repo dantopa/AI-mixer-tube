@@ -138,6 +138,7 @@ val djModule =
         }
 
         single<DjHooks> {
+            val librarySource = get<LibrarySource>()
             val engine =
                 DjEngine(
                     scope = get(named(SERVICE_SCOPE)),
@@ -148,6 +149,7 @@ val djModule =
                     settingsFlow = get(named("djSettings")),
                     heavyDispatcher = get(RENDER_DISPATCHER),
                     windowDir = File(androidContext().cacheDir, "dj/windows"),
+                    titleOf = { id -> librarySource.find(id)?.title },
                 )
             // The library analysis, the recommender, Auto DJ and the diagnostics start with the engine (they idle while off).
             // A failure here must never take the player down with it: the transition engine works without any of this.

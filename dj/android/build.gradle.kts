@@ -58,6 +58,7 @@ dependencies {
     implementation(libs.media3.common)
 
     testImplementation(libs.junit)
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit:${libs.versions.kotlin.get()}") // the mix-view builder tests are shared with the standalone preview build, which uses kotlin.test
     testImplementation(testFixtures("org.simpmusic.dj:brain"))
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }

@@ -4,6 +4,7 @@ import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.ParamCurve
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TransitionPlan
+import org.simpmusic.dj.model.settleMs
 import kotlin.math.abs
 
 /** All the timing constants of the window design in one place (ms unless noted). */
@@ -183,7 +184,8 @@ class WindowTimeline private constructor(
 
         /** Builds the timeline for an eligible plan (call [check] first). */
         fun build(plan: TransitionPlan): WindowTimeline {
-            val settled = maxOf(plan.overlapMs, laneEnd(plan.outgoing), laneEnd(plan.incoming))
+            // settleMs also counts an echo-out tail, which is audible outgoing material.
+            val settled = plan.settleMs
             val start = plan.preRollMs - WindowTuning.LEAD_IN_MS
             val end = settled + WindowTuning.TAIL_MS
             return WindowTimeline(plan, start, settled, end)
@@ -197,14 +199,16 @@ class WindowTimeline private constructor(
          * existing crossfade.
          */
         fun check(plan: TransitionPlan): Eligibility {
-            if (plan.kind != PlanKind.BEAT_MATCHED && plan.kind != PlanKind.CUT) {
+            if (plan.kind != PlanKind.BEAT_MATCHED && plan.kind != PlanKind.CUT && plan.kind != PlanKind.ECHO_OUT) {
                 return Eligibility.Rejected("plan kind ${plan.kind}")
             }
+            // The renderer runs the delay itself, from the plan: without it an ECHO_OUT is a plain hard cut.
+            if (plan.kind == PlanKind.ECHO_OUT && plan.echoOut == null) return Eligibility.Rejected("echo-out plan without an echo spec")
             // A CUT is a beat-aligned hard switch on a downbeat: it has no overlap by design, but the window still
             // makes it sample-accurate. Only a blend needs a positive overlap.
             if (plan.kind == PlanKind.BEAT_MATCHED && plan.overlapMs <= 0) return Eligibility.Rejected("no overlap")
             if (plan.overlapMs < 0) return Eligibility.Rejected("negative overlap")
-            val settled = maxOf(plan.overlapMs, laneEnd(plan.outgoing), laneEnd(plan.incoming))
+            val settled = plan.settleMs
             val start = plan.preRollMs - WindowTuning.LEAD_IN_MS
             identity(plan.outgoing, start.toDouble())?.let { return Eligibility.Rejected("outgoing not plain at window start: $it") }
             val inc = plan.incoming
@@ -229,7 +233,5 @@ class WindowTimeline private constructor(
             return null
         }
 
-        private fun laneEnd(d: DeckPlan): Long =
-            maxOf(d.rate.endMs, d.pitchSemitones.endMs, d.volume.endMs, d.lowCutHz.endMs, d.highCutHz.endMs)
     }
 }

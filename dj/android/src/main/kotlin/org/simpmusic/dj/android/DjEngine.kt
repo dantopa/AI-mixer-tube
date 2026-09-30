@@ -23,12 +23,15 @@ import org.simpmusic.dj.android.render.TransitionWindowRenderer
 import org.simpmusic.dj.android.log.DjLog
 import org.simpmusic.dj.android.scheduler.AnalysisStatus
 import org.simpmusic.dj.android.scheduler.DjAnalysisScheduler
+import org.simpmusic.dj.android.mixview.DjMixViewBuilder
 import org.simpmusic.dj.android.window.Eligibility
 import org.simpmusic.dj.android.window.LatencyCalibrator
 import org.simpmusic.dj.android.window.WindowTimeline
+import org.simpmusic.dj.mixview.DjMixViewData
 import org.simpmusic.dj.model.AnalysisPriority
 import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.DjSettings
+import org.simpmusic.dj.model.PlanConstraints
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TransitionPlan
@@ -149,7 +152,14 @@ interface DjHooks {
     /** Called on the main thread when a window finished rendering for the pair the player is waiting on. */
     fun setOnPrepared(listener: ((PreparedTransition) -> Unit)?)
 
+    /** Playback position of the CURRENT track, from the adapter's 50 ms poll. The planner may not touch what is already gone. */
+    fun onPosition(positionMs: Long) {}
+
     val debug: StateFlow<DjDebugState>
+
+    /** The picture of the mix being prepared / played (null = nothing to show). */
+    val mixView: StateFlow<DjMixViewData?>
+        get() = MutableStateFlow(null)
 
     fun log(message: String)
 
@@ -174,9 +184,15 @@ class DjEngine(
     private val logger: (String) -> Unit = { DjLog.d("hook", it) },
     /** How long to wait for both analyses before giving up on this pair. */
     private val analysisWaitMs: Long = 10 * 60_000L,
+    /** Human title of a track for the mix picture; null = show the id. */
+    private val titleOf: suspend (String) -> String? = { null },
 ) : DjHooks {
     private val _debug = MutableStateFlow(DjDebugState())
     override val debug: StateFlow<DjDebugState> = _debug.asStateFlow()
+
+    private val _mixView = MutableStateFlow<DjMixViewData?>(null)
+    override val mixView: StateFlow<DjMixViewData?> = _mixView.asStateFlow()
+    private var mixTicker: Job? = null
 
     @Volatile
     private var listener: ((PreparedTransition) -> Unit)? = null
@@ -197,6 +213,12 @@ class DjEngine(
         scope.launch { settingsFlow.collect { s -> _debug.update { it.copy(enabled = s.enabled) } } }
     }
 
+    @Volatile private var playbackPositionMs: Long = 0L
+
+    override fun onPosition(positionMs: Long) {
+        playbackPositionMs = positionMs
+    }
+
     override fun setOnPrepared(listener: ((PreparedTransition) -> Unit)?) {
         this.listener = listener
     }
@@ -213,6 +235,7 @@ class DjEngine(
         consumedKey = key(prepared.fromId, prepared.toId)
         if (ready === prepared) ready = null
         deleteWindow(prepared)
+        stopMixView()
         _debug.update { it.copy(phase = "idle", lastOutcome = outcome, mixStartedAtEpochMs = null, mixDurationMs = null, mixAtMs = null) }
     }
 
@@ -220,6 +243,7 @@ class DjEngine(
         val plan = prepared.plan
         val total = plan.overlapMs - prepared.timeline.startRelMs
         DjLog.i(TAG, "MIX STARTED ${prepared.fromId} -> ${prepared.toId} (${plan.kind}), overlap ${plan.overlapMs} ms, window runs ${total} ms until the overlap is over")
+        startMixTicker(prepared)
         _debug.update { it.copy(phase = "mixing", kind = plan.kind, mixStartedAtEpochMs = System.currentTimeMillis(), mixDurationMs = total, mixAtMs = null) }
     }
 
@@ -230,6 +254,7 @@ class DjEngine(
         ready = null
         pairKey = null
         consumedKey = null
+        stopMixView()
     }
 
     private var lastLoggedContext: String? = null
@@ -251,6 +276,7 @@ class DjEngine(
             pairKey = null
             ready?.let { deleteWindow(it) }
             ready = null
+            _mixView.value = null
             _debug.update { it.copy(phase = "blocked", reason = context.blockedReason ?: "no next track", kind = null) }
             return
         }
@@ -281,6 +307,7 @@ class DjEngine(
                     throw e
                 } catch (e: Throwable) {
                     DjLog.e(TAG, "pipeline $fromId -> $toId FAILED", e)
+                    _mixView.value = null
                     _debug.update { it.copy(phase = "error", fromId = fromId, toId = toId, kind = null, reason = "${e.javaClass.simpleName}: ${e.message}") }
                 }
             }
@@ -291,6 +318,7 @@ class DjEngine(
         fun since() = (System.nanoTime() - tRun) / 1_000_000
         DjLog.i(TAG, "pipeline start $fromId -> $toId")
         _debug.update { DjDebugState(enabled = true, phase = "waiting-analysis", fromId = fromId, toId = toId, lastOutcome = it.lastOutcome) }
+        if (mixTicker?.isActive != true) _mixView.value = DjMixViewData.analysing()
         val pair =
             coroutineScope {
                 // While the analyses are pending, publish what is happening to each track once a second.
@@ -320,6 +348,7 @@ class DjEngine(
                 }
             } ?: run {
                 DjLog.w(TAG, "gave up waiting for analyses after ${since()} ms: $fromId=${scheduler.statusOf(fromId)} $toId=${scheduler.statusOf(toId)}")
+                _mixView.value = null
                 _debug.update { it.copy(phase = "waiting-analysis", reason = "analysis not available") }
                 return
             }
@@ -327,16 +356,21 @@ class DjEngine(
         DjLog.i(TAG, "both analyses ready after ${since()} ms")
         _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
         val settings = settingsFlow.value
-        val plan = withContext(heavyDispatcher) { planner.plan(from, to, settings) }
+        // The window needs the outgoing audio decoded and rendered before it plays, so the mix cannot start sooner than that.
+        val constraints = PlanConstraints(earliestExitMs = playbackPositionMs + EARLIEST_EXIT_AHEAD_MS)
+        DjLog.i(TAG, "planning with mixPoint=${settings.mixPoint}, earliest exit ${constraints.earliestExitMs} ms (position $playbackPositionMs ms)")
+        val plan = withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
         publishPlan(from, to, plan)
         if (plan.kind == PlanKind.SIMPLE_CROSSFADE) {
             DjLog.i(TAG, "plan is SIMPLE_CROSSFADE (${plan.reason}): the app's normal crossfade will do this transition")
+            _mixView.value = null
             _debug.update { it.copy(phase = "fallback") }
             return
         }
         val eligibility = WindowTimeline.check(plan)
         if (eligibility is Eligibility.Rejected) {
             DjLog.w(TAG, "window not possible for ${plan.kind}: ${eligibility.reason} (${plan.reason}) -> normal crossfade")
+            _mixView.value = null
             _debug.update { it.copy(phase = "fallback", kind = PlanKind.SIMPLE_CROSSFADE, reason = "window not possible: ${eligibility.reason} (${plan.reason})") }
             return
         }
@@ -344,6 +378,7 @@ class DjEngine(
         val bounds = checkBounds(timeline, from, to)
         if (bounds != null) {
             DjLog.w(TAG, "window bounds rejected: $bounds (${plan.reason}) -> normal crossfade")
+            _mixView.value = null
             _debug.update { it.copy(phase = "fallback", kind = PlanKind.SIMPLE_CROSSFADE, reason = "$bounds (${plan.reason})") }
             return
         }
@@ -385,6 +420,8 @@ class DjEngine(
         }
         val prepared = PreparedTransition(fromId, toId, plan, timeline, rendered, to.durationMs)
         ready = prepared
+        val titles = (runCatching { titleOf(fromId) }.getOrNull() ?: fromId) to (runCatching { titleOf(toId) }.getOrNull() ?: toId)
+        _mixView.value = runCatching { DjMixViewBuilder.build(plan, from, to, titles) }.onFailure { DjLog.w(TAG, "mix view could not be built: ${it.message}") }.getOrNull()
         _debug.update { it.copy(phase = "ready", mixAtMs = plan.exitPointMs) }
         DjLog.i(
             TAG,
@@ -419,6 +456,27 @@ class DjEngine(
         }
     }
 
+    private fun stopMixView() {
+        mixTicker?.cancel()
+        mixTicker = null
+        _mixView.value = null
+    }
+
+    /** ~10 Hz playhead from the wall clock since the adapter started the window (a picture, not a control: a few 10 ms of drift do not matter). */
+    private fun startMixTicker(prepared: PreparedTransition) {
+        mixTicker?.cancel()
+        val t0 = System.nanoTime()
+        mixTicker =
+            scope.launch {
+                while (isActive) {
+                    val windowMs = (System.nanoTime() - t0) / 1_000_000.0
+                    if (windowMs > prepared.timeline.windowMs) break
+                    _mixView.update { it?.withNow(prepared.timeline.planTimeOfWindow(windowMs)) }
+                    delay(100)
+                }
+            }
+    }
+
     private fun cancelPipeline() {
         pipelineCancel?.set(true)
         pipeline?.cancel()
@@ -437,6 +495,9 @@ class DjEngine(
 }
 
 private const val TAG = "engine"
+
+/** Time the pipeline needs (decode + render + player warm-up) between "now" and the earliest audible instant of a mix. */
+private const val EARLIEST_EXIT_AHEAD_MS = 45_000L
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {
