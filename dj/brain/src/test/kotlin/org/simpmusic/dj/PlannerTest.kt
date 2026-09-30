@@ -40,6 +40,93 @@ class PlannerTest {
     }
 
 
+
+    /** A hand-made grid: beat i at times(i); downbeats every 4th; phrases every 16 beats. */
+    private fun customAnalysis(id: String, n: Int, bpmField: Float, downConf: Float = 0.9f, time: (Int) -> Double): TrackAnalysis {
+        val beats = List(n) { time(it).toInt() }
+        val downs = List(n / 4) { it * 4 }
+        val dur = beats.last() + 1500L
+        return TrackAnalysis(
+            videoId = id, analyzerId = "custom", analyzedAtEpochMs = 0, durationMs = dur,
+            bpm = Confident(bpmField, 0.9f), beatTimesMs = Confident(beats, 0.9f), downbeatBeatIndices = Confident(downs, downConf),
+            beatsPerBar = 4, phraseStartsMs = downs.filter { it % 16 == 0 }.map { beats[it].toLong() }, key = null,
+            energyHopMs = 100, energy = List((dur / 100).toInt() + 1) { 0.6f }, lowBandEnergy = List((dur / 100).toInt() + 1) { 0.5f },
+            sections = null, vocals = null, loudnessDb = -14f,
+        )
+    }
+
+    @Test
+    fun tempoDecisionIsLocalNotGlobal() {
+        // 120 bpm for the first half, 126 bpm (+5%) for the second; the bpm field is the misleading global 120
+        val half = 100
+        val a = customAnalysis("a", 200, 120f) { if (it < half) it * 500.0 else half * 500.0 + (it - half) * (60000.0 / 126) }
+        val b = customAnalysis("b", 200, 126f) { it * (60000.0 / 126) + 200 }
+        val plan = planner.plan(a, b, settings)
+        println("local tempo: ${plan.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind)
+        assertTrue(plan.exitPointMs > half * 500 + 3000, "exit should be in the 126 bpm half")
+        // outgoing runs at 126 bpm where it is mixed, so no stretch is needed (a global 120 would demand x1.05)
+        assertEquals(1f, plan.outgoing.rate.valueAt(plan.overlapMs), 0.01f)
+        assertEquals(1f, plan.incoming.rate.valueAt(0), 0.01f)
+        // and the reverse: the incoming track has the change, entered in its slow first half
+        val plan2 = planner.plan(b, a, settings)
+        assertEquals(PlanKind.BEAT_MATCHED, plan2.kind)
+        // the incoming track is entered in its 120 bpm half: 126 -> 120 needs sqrt(120/126) = 0.976 on the outgoing deck
+        assertEquals(Math.sqrt(120.0 / 126.0), plan2.outgoing.rate.valueAt(plan2.overlapMs).toDouble(), 0.004)
+    }
+
+    @Test
+    fun aTempoRampInsideTheOverlapShortensItOrFallsBack() {
+        val steady = customAnalysis("b", 200, 120f) { it * 500.0 + 200 }
+        // outgoing slows down 12% over its last 64 beats: constant rates cannot follow that
+        val drifting = customAnalysis("a", 200, 120f) { i -> if (i < 130) i * 500.0 else 130 * 500.0 + (i - 130) * 500.0 + 0.5 * 500.0 * 0.12 / 70.0 * (i - 130.0) * (i - 130.0) }
+        val plan = planner.plan(drifting, steady, settings)
+        println("drift: ${plan.kind} ${plan.reason}")
+        val bar = 2000.0
+        assertTrue(plan.kind == PlanKind.SIMPLE_CROSSFADE || plan.overlapMs / bar < 8.0)
+        assertTrue(plan.reason.contains("drift") || plan.reason.contains("irregular") || plan.kind == PlanKind.BEAT_MATCHED)
+        if (plan.kind == PlanKind.BEAT_MATCHED) {
+            // whatever it kept must hold the 8 ms budget
+            val co = DeckClock.outgoing(plan)
+            val ci = DeckClock.incoming(plan)
+            val ob = drifting.beatTimesMs!!.value
+            val ib = steady.beatTimesMs!!.value
+            val i0 = ob.indices.minBy { abs(ob[it] - plan.exitPointMs) }
+            val j0 = ib.indices.minBy { abs(ib[it] - plan.entryPointMs) }
+            var worst = 0.0
+            var k = 0
+            while (i0 + k < ob.size && j0 + k < ib.size) {
+                val t = co.wallAt(ob[i0 + k].toDouble())
+                if (t > plan.overlapMs) break
+                worst = maxOf(worst, abs(t - ci.wallAt(ib[j0 + k].toDouble())))
+                k++
+            }
+            println("kept overlap worst slide: $worst ms")
+            assertTrue(worst < 10.0)
+        }
+        // a grid that wanders far more than that is refused with a clear reason
+        val wild = customAnalysis("w", 200, 120f) { i -> i * 500.0 + 120.0 * kotlin.math.sin(i * 0.9) + (if (i % 3 == 0) 90.0 else 0.0) }
+        val p2 = planner.plan(wild, steady, settings)
+        println("irregular: ${p2.kind} ${p2.reason}")
+        assertEquals(PlanKind.SIMPLE_CROSSFADE, p2.kind)
+        assertTrue(p2.reason.contains("irregular") || p2.reason.contains("drift"))
+    }
+
+    @Test
+    fun untrustedDownbeatsMeanBeatAlignmentAndAShorterOverlap() {
+        val a = customAnalysis("a", 260, 120f, downConf = 0.05f) { it * 500.0 + 100 }
+        val b = customAnalysis("b", 260, 122f, downConf = 0.05f) { it * (60000.0 / 122) + 100 }
+        val plan = planner.plan(a, b, settings.copy(overlapBars = 8))
+        println("no downbeats: ${plan.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind)
+        assertTrue(plan.reason.contains("no bar alignment claimed"))
+        assertTrue(plan.overlapMs <= 16.5 * 500.0, "overlap ${plan.overlapMs} should be capped at 4 bars")
+        assertTrue(!plan.reason.contains("phrase"), "phrase starts must not be used when downbeats are untrusted")
+        // and a CUT needs trusted downbeats
+        val far = customAnalysis("c", 260, 160f, downConf = 0.05f) { it * 375.0 + 100 }
+        assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(a, far, settings).kind)
+    }
+
     /** Least-squares ideal grid (time = c + p * index) through ALL beats of an analysis: the fixture's own jitter averages out. */
     private fun idealGrid(a: TrackAnalysis): Pair<Double, Double> {
         val b = a.beatTimesMs!!.value
@@ -213,10 +300,11 @@ class PlannerTest {
         assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(null, to, settings).kind)
         assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(from, null, settings).kind)
         assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(null, null, settings).kind)
-        assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(from.copy(bpm = null), to, settings).kind)
+        // the bpm field is informational: a grid alone is enough
+        assertEquals(PlanKind.BEAT_MATCHED, planner.plan(from.copy(bpm = null), to, settings).kind)
         assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(from.copy(beatTimesMs = null), to, settings).kind)
         // confidence gate
-        val mid = from.copy(bpm = from.bpm!!.copy(confidence = 0.6f))
+        val mid = from.copy(beatTimesMs = from.beatTimesMs!!.copy(confidence = 0.6f))
         assertEquals(PlanKind.BEAT_MATCHED, planner.plan(mid, to, settings.copy(minConfidence = 0.5f)).kind)
         assertEquals(PlanKind.SIMPLE_CROSSFADE, planner.plan(mid, to, settings.copy(minConfidence = 0.8f)).kind)
     }
