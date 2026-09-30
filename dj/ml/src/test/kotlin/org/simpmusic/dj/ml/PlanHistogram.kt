@@ -29,6 +29,7 @@ class PlanHistogram {
         val settings = DjSettings(enabled = true)
         val kinds = java.util.TreeMap<String, Int>()
         val exitDeciles = IntArray(10)
+        val entryDeciles = IntArray(10)
         val reasons = java.util.TreeMap<String, Int>()
         var pairs = 0
         for ((ia, a) in ana) for ((ib, b) in ana) {
@@ -37,10 +38,12 @@ class PlanHistogram {
             pairs++
             kinds.merge(p.kind.name, 1, Int::plus)
             if (a.durationMs > 0) exitDeciles[((10.0 * p.exitPointMs / a.durationMs).toInt()).coerceIn(0, 9)]++
+            if (b.durationMs > 0 && p.kind.name != "SIMPLE_CROSSFADE") entryDeciles[((10.0 * p.entryPointMs / b.durationMs).toInt()).coerceIn(0, 9)]++
             if (p.kind.name == "SIMPLE_CROSSFADE") reasons.merge(p.reason.substringAfter("): ").take(90), 1, Int::plus)
         }
         println("PLANHIST pairs=$pairs kinds=$kinds")
         println("PLANHIST exit position in the outgoing track, share per 10% bucket: " + exitDeciles.joinToString(" ") { "%d".format(it) })
+        println("PLANHIST entry position in the incoming track, per 10% bucket: " + entryDeciles.joinToString(" ") { "%d".format(it) })
         reasons.entries.sortedByDescending { it.value }.forEach { println("PLANHIST crossfade reason x${it.value}: ${it.key}") }
     }
 }

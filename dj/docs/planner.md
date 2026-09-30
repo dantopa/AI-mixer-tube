@@ -253,3 +253,8 @@ pair always won. Changes: `W_PLAYED` 0.12 -> 0.02 (weight moved to the boundary 
 penalty (up to 0.10 for exits past 88 % played), and a seeded variety pick among pairs within 0.05 of the best score
 (same pair -> same plan). Exit position, 156 real pairs, per 10 % bucket: before `... 3 71` (>=90 %: 71) ->
 now `0 0 3 11 36 25 34 6 0 41` (>=90 %: 41). Still a heuristic: whether a mid-song exit sounds better is not verified by ear.
+
+Correction to the variety pick (third device log): it also varied the ENTRY, and a plan entered the incoming track at 23 %
+(34 s in), so the listener never heard its intro. The pick now only varies the exit: entries stay within the first 15 % of
+the incoming track unless the best-scoring pair already enters later. Entry position over the 156 real pairs, per 10 %
+bucket: `112 28 0 1 7 0 0 0 0 0` (the 8 deeper ones are the best pair's own choice).

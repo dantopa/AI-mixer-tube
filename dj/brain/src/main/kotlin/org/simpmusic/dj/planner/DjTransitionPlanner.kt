@@ -261,8 +261,11 @@ class DjTransitionPlanner : TransitionPlanner {
         if (all.size > 1) {
             val bestScore = all[0].pair.score
             val near = all.indexOfFirst { it.pair.score < bestScore - VARIETY_BAND }.let { if (it < 0) all.size else it }
-            if (near > 1) {
-                val pick = ((c.fromId + ">" + c.toId).hashCode() and Int.MAX_VALUE) % near
+            // Only the EXIT varies: an entry deep inside the incoming track means the listener never hears how it starts.
+            val entryLimit = max(all[0].pair.entry.timeMs, (VARIETY_ENTRY_FRACTION * inc.durationMs).toLong())
+            val pool = (0 until near).filter { all[it].pair.entry.timeMs <= entryLimit }
+            if (pool.size > 1) {
+                val pick = pool[((c.fromId + ">" + c.toId).hashCode() and Int.MAX_VALUE) % pool.size]
                 if (pick > 0) all.add(0, all.removeAt(pick))
             }
         }
@@ -857,6 +860,9 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** Pair scores this close to the best count as equally good (see the variety pick in planAnywhere). */
         private const val VARIETY_BAND = 0.05
+
+        /** The variety pick never enters the incoming track later than this share of its length (unless the best pair already does). */
+        private const val VARIETY_ENTRY_FRACTION = 0.15
         private const val FADE_STEPS = 24
         private const val IRREGULAR_RMS = 0.12
         private const val BASS_WORTH = 0.15f
