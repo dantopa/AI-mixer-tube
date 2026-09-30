@@ -63,75 +63,67 @@ class DjTransitionPlanner : TransitionPlanner {
         val out = TrackContext(from)
         val inc = TrackContext(to)
 
-        // ---- gating on what a beat-matched mix needs ----
+        // ---- gating on what a beat-matched mix needs: a trusted beat grid. The bpm field is informational only ----
         val missing = ArrayList<String>()
         if (out.beatsConf < Trust.BEATS) missing += "outgoing beat grid (${fmt(out.beatsConf)} < ${Trust.BEATS})"
         if (inc.beatsConf < Trust.BEATS) missing += "incoming beat grid (${fmt(inc.beatsConf)} < ${Trust.BEATS})"
-        if (out.bpmConf < Trust.BPM) missing += "outgoing bpm (${fmt(out.bpmConf)} < ${Trust.BPM})"
-        if (inc.bpmConf < Trust.BPM) missing += "incoming bpm (${fmt(inc.bpmConf)} < ${Trust.BPM})"
         if (out.medianBeatMs <= 0.0 || inc.medianBeatMs <= 0.0) missing += "unusable beat spacing"
         if (out.durationMs < 4000 || inc.durationMs < 4000) missing += "track too short"
         if (missing.isNotEmpty()) {
             return simplePlan(out, inc, fromId, toId, settings, "not beat-matchable: " + missing.joinToString("; "))
         }
 
-        // The grid is authoritative for phase; the analysis bpm only has to agree with it (allowing half/double time).
-        var conf = minOf(out.beatsConf, inc.beatsConf, out.bpmConf, inc.bpmConf)
+        var conf = minOf(out.beatsConf, inc.beatsConf)
         val notes = ArrayList<String>()
         for ((ctx, name) in listOf(out to "outgoing", inc to "incoming")) {
-            val ratio = ctx.gridBpm / ctx.bpmValue!!
-            val ok = listOf(1.0, 2.0, 0.5).any { abs(ratio / it - 1.0) < 0.04 }
-            if (!ok) return simplePlan(out, inc, fromId, toId, settings, "$name bpm ${fmt1(ctx.bpmValue)} disagrees with its beat grid (${fmt1(ctx.gridBpm)})")
+            val bpm = ctx.bpmValue ?: continue
+            val ratio = ctx.gridBpm / bpm
+            if (listOf(1.0, 2.0, 0.5).none { abs(ratio / it - 1.0) < 0.08 }) {
+                notes += "$name bpm field ${fmt1(bpm)} differs from its grid ${fmt1(ctx.gridBpm)} (grid used)"
+            }
         }
-
-        val tempo = chooseTempo(out.medianBeatMs, inc.medianBeatMs, settings.maxTempoBend.toDouble())
-            ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
 
         val barsMode = out.barsTrusted && inc.barsTrusted && out.beatsPerBar == inc.beatsPerBar
-        if (!barsMode) notes += "downbeats untrusted: aligned on beats"
+        if (!barsMode) notes += "downbeats untrusted: aligned on beats only (no bar alignment claimed), overlap capped"
         else conf = min(conf, min(out.downbeatConf, inc.downbeatConf))
 
-        // ---- points on the timelines ----
-        val lattice = tempo.wallLatticeMs // wall period of one lattice step at the mix tempo
-        val unitWall = if (barsMode) out.beatsPerBar * lattice else lattice
-        val desiredUnits = if (barsMode) settings.overlapBars else settings.overlapBars * out.beatsPerBar
+        // The tempo that matters is the LOCAL one around the exit and entry points. Start from the tempo of the region
+        // where each mix happens, choose the points, then re-measure on the windows that actually overlap (twice at most).
+        val margin = MARGIN_MS
+        val roughOut = out.medianIbiIn(out.audibleEndMs - 60_000L, out.audibleEndMs).takeIf { it > 0 } ?: out.medianBeatMs
+        val roughIn = inc.medianIbiIn(inc.firstAudibleMs, inc.firstAudibleMs + 60_000L).takeIf { it > 0 } ?: inc.medianBeatMs
+        var tempo = chooseTempo(roughOut, roughIn, settings.maxTempoBend.toDouble())
+            ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
+        val desiredUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
         val minUnits = if (barsMode) 1 else 4
         val softFloor = if (barsMode) 2 else 8
-        val margin = MARGIN_MS
-
-        val rampMin = 4 * out.medianBeatMs + 250.0
-        val fullAfterOut = desiredUnits * unitWall * tempo.rateOut + margin
-        val minAfterOut = minUnits * unitWall * tempo.rateOut + margin
         val outroStart = out.outro()?.range?.startMs
-        val preferAfterOut = softFloor * unitWall * tempo.rateOut + margin
-        val exitPick = pickExit(out, out.audibleEndMs, fullAfterOut, minAfterOut, rampMin, outroStart, preferAfterOut)
-            ?: return simplePlan(out, inc, fromId, toId, settings, "no exit point with enough room before the end of the outgoing track")
-        val minAfterIn = minUnits * unitWall * tempo.rateIn + margin
-        val entryPick = pickEntry(inc, inc.firstAudibleMs, minAfterIn)
-            ?: return simplePlan(out, inc, fromId, toId, settings, "no entry point with enough audio in the incoming track")
-        if (exitPick.viaOutro) conf = min(conf, out.sectionsConf)
 
-        // ---- refine tempo on the local grids around the chosen points ----
-        val rough = desiredUnits * unitWall
-        val iOut = out.nearestBeatIndex(exitPick.timeMs)
-        val iIn = inc.nearestBeatIndex(entryPick.timeMs)
-        val outSpan = ceil(rough * tempo.rateOut / out.medianBeatMs).toInt() + 2
-        val inSpan = ceil(rough * tempo.rateIn / inc.medianBeatMs).toInt() + 2
-        val fitOut = out.fit(iOut, iOut + outSpan)
-        val fitIn = inc.fit(iIn, iIn + inSpan)
-        val periodOut = fitOut?.p?.takeIf { abs(it / out.medianBeatMs - 1.0) < 0.05 } ?: out.medianBeatMs
-        val periodIn = fitIn?.p?.takeIf { abs(it / inc.medianBeatMs - 1.0) < 0.05 } ?: inc.medianBeatMs
-        for ((fit, ctx, name) in listOf(Triple(fitOut, out, "outgoing"), Triple(fitIn, inc, "incoming"))) {
-            if (fit != null && fit.rms > IRREGULAR_RMS * ctx.medianBeatMs) {
-                return simplePlan(out, inc, fromId, toId, settings, "$name beat grid is irregular around the mix (rms ${fmt1(fit.rms)} ms)")
-            }
-            if (fit != null) conf = min(conf, (1.0 - 2.0 * fit.rms / ctx.medianBeatMs).toFloat().coerceIn(0f, 1f))
+        var loc: Located
+        var pass = 0
+        while (true) {
+            loc = locate(out, inc, tempo, barsMode, desiredUnits, minUnits, softFloor, margin, outroStart, settings)
+            loc.fail?.let { return simplePlan(out, inc, fromId, toId, settings, it) }
+            val t2 = loc.tempo ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
+            pass++
+            val settled = abs(t2.rateOut / tempo.rateOut - 1.0) < 0.02 && abs(t2.rateIn / tempo.rateIn - 1.0) < 0.02
+            tempo = t2
+            if (settled || pass >= 2) break
         }
-        val tempo2 = chooseTempo(periodOut, periodIn, settings.maxTempoBend.toDouble(), tempo.strideOut, tempo.strideIn)
-            ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
-        val exitMs = (fitOut?.timeAt(iOut) ?: exitPick.timeMs.toDouble()).roundToLong().coerceAtLeast(0L)
-        val entryMs = (fitIn?.timeAt(iIn) ?: entryPick.timeMs.toDouble()).roundToLong().coerceAtLeast(0L)
+        val tempo2 = tempo
+        val exitPick = loc.exitPick!!
+        val entryPick = loc.entryPick!!
+        val localOut = loc.localOut!!
+        val localIn = loc.localIn!!
+        val iOut = loc.iOut
+        val iIn = loc.iIn
+        if (exitPick.viaOutro) conf = min(conf, out.sectionsConf)
+        conf = min(conf, (1.0 - 2.0 * localOut.noiseRms / out.medianBeatMs).toFloat().coerceIn(0f, 1f))
+        conf = min(conf, (1.0 - 2.0 * localIn.noiseRms / inc.medianBeatMs).toFloat().coerceIn(0f, 1f))
+        val exitMs = localOut.timeAt(iOut).roundToLong().coerceAtLeast(0L)
+        val entryMs = localIn.timeAt(iIn).roundToLong().coerceAtLeast(0L)
         val w = tempo2.wallLatticeMs
+        val lattice = w
         val unit = if (barsMode) out.beatsPerBar * w else w
         val rateOut = tempo2.rateOut
         val rateIn = tempo2.rateIn
@@ -179,6 +171,26 @@ class DjTransitionPlanner : TransitionPlanner {
         if (units < minUnits) {
             return simplePlan(out, inc, fromId, toId, settings, "not enough audio for a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap (room out ${availOut / 1000.0}s, in ${availIn / 1000.0}s)")
         }
+        // ---- drift: constant rates must keep the two local tempo curves in phase across the overlap ----
+        val stepsPerUnit = if (barsMode) out.beatsPerBar else 1
+        val exitTrue = localOut.timeAt(iOut)
+        val entryTrue = localIn.timeAt(iIn)
+        fun lockError(u: Int): Double {
+            var worst = 0.0
+            for (k in 0..u * stepsPerUnit) {
+                val to = (localOut.timeAt(iOut + tempo2.strideOut * k) - exitTrue) / rateOut
+                val ti = (localIn.timeAt(iIn + tempo2.strideIn * k) - entryTrue) / rateIn
+                worst = max(worst, abs(to - ti))
+            }
+            return worst
+        }
+        val unitsBeforeDrift = units
+        var drift = lockError(units)
+        while (drift > MAX_DRIFT_MS && units > minUnits) { units--; drift = lockError(units) }
+        if (drift > MAX_DRIFT_MS) {
+            return simplePlan(out, inc, fromId, toId, settings, "tempo drifts: beats of the two tracks slide ${fmt1(drift)} ms apart even over a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap")
+        }
+        if (units < unitsBeforeDrift) notes += "overlap shortened from $unitsBeforeDrift to $units because the local tempo drifts"
         val overlapMs = (units * unit).roundToLong()
 
         if (conf < settings.minConfidence) {
@@ -272,6 +284,63 @@ class DjTransitionPlanner : TransitionPlanner {
         )
     }
 
+
+    internal class Located(
+        val fail: String? = null, val tempo: Tempo? = null, val exitPick: Pick? = null, val entryPick: Pick? = null,
+        val localOut: LocalGrid? = null, val localIn: LocalGrid? = null, val iOut: Int = 0, val iIn: Int = 0,
+    )
+
+    /** Picks exit and entry with the given tempo estimate, then measures the LOCAL tempo of both overlap windows. */
+    private fun locate(
+        out: TrackContext, inc: TrackContext, tempo: Tempo, barsMode: Boolean, desiredUnits: Int, minUnits: Int,
+        softFloor: Int, margin: Double, outroStart: Long?, settings: DjSettings,
+    ): Located {
+        val lattice = tempo.wallLatticeMs
+        val unitWall = if (barsMode) out.beatsPerBar * lattice else lattice
+        val rampMin = 4 * out.medianBeatMs + 250.0
+        val fullAfterOut = desiredUnits * unitWall * tempo.rateOut + margin
+        val minAfterOut = minUnits * unitWall * tempo.rateOut + margin
+        val preferAfterOut = softFloor * unitWall * tempo.rateOut + margin
+        // Try the best exit/entry first; if a window turns out irregular, step to the previous exit / next entry candidate.
+        var maxExit = Long.MAX_VALUE
+        var afterEntry = Long.MIN_VALUE
+        var lastFail = "no usable exit/entry point"
+        val minAfterIn = minUnits * unitWall * tempo.rateIn + margin
+        val rough = desiredUnits * unitWall
+        val ibiOut = tempo.wallLatticeMs * tempo.rateOut / tempo.strideOut
+        val ibiIn = tempo.wallLatticeMs * tempo.rateIn / tempo.strideIn
+        val spanOut = max(6, ceil(rough * tempo.rateOut / ibiOut).toInt() + 2)
+        val spanIn = max(6, ceil(rough * tempo.rateIn / ibiIn).toInt() + 2)
+        for (attempt in 0 until MAX_POINT_RETRIES) {
+            val exitPick = pickExit(out, out.audibleEndMs, fullAfterOut, minAfterOut, rampMin, outroStart, preferAfterOut, maxExit)
+                ?: return Located(fail = if (attempt == 0) "no exit point with enough room before the end of the outgoing track" else lastFail)
+            val entryPick = pickEntry(inc, inc.firstAudibleMs, minAfterIn, afterEntry)
+                ?: return Located(fail = if (attempt == 0) "no entry point with enough audio in the incoming track" else lastFail)
+            val iOut = out.nearestBeatIndex(exitPick.timeMs)
+            val iIn = inc.nearestBeatIndex(entryPick.timeMs)
+            val localOut = out.local(iOut - 4, iOut + spanOut)
+            val localIn = inc.local(iIn, iIn + spanIn + 4)
+            if (localOut == null) { lastFail = "too few beats around the exit point to measure the local tempo"; maxExit = exitPick.timeMs - 1; continue }
+            if (localIn == null) { lastFail = "too few beats around the entry point to measure the local tempo"; afterEntry = entryPick.timeMs; continue }
+            if (localOut.noiseRms > IRREGULAR_RMS * localOut.medianIbi) {
+                lastFail = "outgoing beat grid is irregular around the mix (rms ${fmt1(localOut.noiseRms)} ms of a ${fmt1(localOut.medianIbi)} ms beat)"
+                maxExit = exitPick.timeMs - 1; continue
+            }
+            if (localIn.noiseRms > IRREGULAR_RMS * localIn.medianIbi) {
+                lastFail = "incoming beat grid is irregular around the mix (rms ${fmt1(localIn.noiseRms)} ms of a ${fmt1(localIn.medianIbi)} ms beat)"
+                afterEntry = entryPick.timeMs; continue
+            }
+            val endOut = min(localOut.i0 + localOut.n - 1, iOut + spanOut)
+            val endIn = min(localIn.i0 + localIn.n - 1, iIn + spanIn)
+            val periodOut = localOut.meanPeriod(iOut, endOut)
+            val periodIn = localIn.meanPeriod(iIn, endIn)
+            if (periodOut <= 0.0 || periodIn <= 0.0) return Located(fail = "beat grid runs backwards around the mix")
+            val t2 = chooseTempo(periodOut, periodIn, settings.maxTempoBend.toDouble())
+            return Located(tempo = t2, exitPick = exitPick, entryPick = entryPick, localOut = localOut, localIn = localIn, iOut = iOut, iIn = iIn)
+        }
+        return Located(fail = lastFail)
+    }
+
     // ---------------------------------------------------------------------------------------------
     // tempo
 
@@ -345,9 +414,10 @@ class DjTransitionPlanner : TransitionPlanner {
      * Exit: the start of the outro if trusted, else the last phrase boundary that leaves room for the overlap; falls
      * back from phrase starts to downbeats to beats.
      */
-    internal fun pickExit(c: TrackContext, endEff: Long, fullAfter: Double, minAfter: Double, before: Double, outroStart: Long?, preferAfter: Double = minAfter): Pick? {
+    internal fun pickExit(c: TrackContext, endEff: Long, fullAfter: Double, minAfter: Double, before: Double, outroStart: Long?, preferAfter: Double = minAfter, maxTime: Long = Long.MAX_VALUE): Pick? {
         val levels = listOf("phrase" to c.phraseTimes, "downbeat" to c.downbeatTimes.takeIf { c.barsTrusted }, "beat" to c.beats)
-        for ((name, arr) in levels) {
+        for ((name, all) in levels) {
+            val arr = all?.filter { it <= maxTime }?.toLongArray()
             if (arr == null || arr.isEmpty()) continue
             if (outroStart != null) {
                 // 1. the outro start itself (first grid point at or just after it) if it leaves a workable overlap
@@ -379,12 +449,13 @@ class DjTransitionPlanner : TransitionPlanner {
     }
 
     /** Entry: the first phrase start (else downbeat, else beat) at or after the first audible sound. */
-    internal fun pickEntry(c: TrackContext, firstAudible: Long, minAfter: Double): Pick? {
+    internal fun pickEntry(c: TrackContext, firstAudible: Long, minAfter: Double, afterTime: Long = Long.MIN_VALUE): Pick? {
         val tol = (c.medianBeatMs * 0.5).toLong()
         val levels = listOf("phrase" to c.phraseTimes, "downbeat" to c.downbeatTimes.takeIf { c.barsTrusted }, "beat" to c.beats)
-        for ((name, arr) in levels) {
-            if (arr == null || arr.isEmpty()) continue
-            val cand = arr.firstOrNull { it >= firstAudible - tol && c.durationMs - it >= minAfter }
+        for ((name, all) in levels) {
+            val arr = all ?: continue
+            if (arr.isEmpty()) continue
+            val cand = arr.firstOrNull { it > afterTime && it >= firstAudible - tol && c.durationMs - it >= minAfter }
             if (cand != null) return Pick(cand, name, false)
         }
         return null
@@ -484,6 +555,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BASS_WORTH = 0.15f
         private const val RATE_EPS = 2e-5
         private const val UNIT_EPS = 0.03
+        private const val MAX_DRIFT_MS = 8.0
+        private const val MAX_POINT_RETRIES = 6
+        private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
         private const val CUT_FADE_OUT_MS = 10L

@@ -39,13 +39,65 @@ class RealMixExperimentMl {
                 for ((i, x) in m) for ((j, y) in m) if (i != j) {
                     val p = planner.plan(x, y, settings)
                     kinds.merge(p.kind, 1, Int::plus)
-                    if (p.kind != PlanKind.BEAT_MATCHED) why.merge(p.reason.take(80), 1, Int::plus)
+                    if (p.kind != PlanKind.BEAT_MATCHED) why.merge(p.reason.take(150), 1, Int::plus)
                 }
                 println("$name plan kinds: $kinds")
-                why.entries.sortedByDescending { it.value }.take(5).forEach { println("   ${it.value}x ${it.key}") }
+                why.entries.sortedByDescending { it.value }.take(14).forEach { println("   ${it.value}x ${it.key}") }
             }
             tally("DSP only     ", a)
             tally("DSP+BeatThis ", b)
+
+            // Render / grade beat-matched mixes built from the DSP+BeatThis analyses (regularity of the re-analysed overlap).
+            val outDir = System.getenv("DJ_OUT")?.let(::File)
+            val wavs = HashMap<String, WavIo.Wav>()
+            fun wav(id: String) = wavs.getOrPut(id) { WavIo.read(corpus.resolve("audio").resolve(id + "_44100.wav")) }
+            fun stereo(w: WavIo.Wav) = org.simpmusic.dj.render.StereoPcm.fromChannels(w.channels, w.sampleRate)
+            val matched = ArrayList<Triple<String, String, TransitionPlan>>()
+            for ((i, x) in b) for ((j, y) in b) if (i != j) planner.plan(x, y, settings).let { if (it.kind == PlanKind.BEAT_MATCHED) matched += Triple(i, j, it) }
+            fun render(plan: TransitionPlan, i: String, j: String): org.simpmusic.dj.render.OfflineMixRenderer.Window {
+                val lead = maxOf(8000L, -plan.preRollMs)
+                return org.simpmusic.dj.render.OfflineMixRenderer.render(plan, org.simpmusic.dj.render.AudioSegment(stereo(wav(i))), org.simpmusic.dj.render.AudioSegment(stereo(wav(j))),
+                    org.simpmusic.dj.render.OfflineMixRenderer.Options(leadMs = lead, tailMs = 8000L))
+            }
+            fun cv(win: org.simpmusic.dj.render.OfflineMixRenderer.Window, plan: TransitionPlan): Double {
+                val sr = win.audio.sampleRate
+                val mono = FloatArray(win.frames) { (win.audio.left[it] + win.audio.right[it]) * 0.5f }
+                val lead = maxOf(8000L, -plan.preRollMs)
+                val from = (lead * sr / 1000).toInt().coerceIn(0, mono.size - 1)
+                val to = ((lead + plan.overlapMs) * sr / 1000).toInt().coerceIn(from + 1, mono.size)
+                val beats = try { dsp.analyze("mix", PcmAudio(mono.copyOfRange(from, to), sr)).beatTimesMs?.value } catch (e: Exception) { null } ?: return 9.0
+                if (beats.size < 6) return 9.0
+                val ibi = beats.zipWithNext { p, q -> (q - p).toDouble() }
+                val m = ibi.average()
+                return kotlin.math.sqrt(ibi.sumOf { (it - m) * (it - m) } / ibi.size) / m
+            }
+            val sample = matched.filterIndexed { k, _ -> k % maxOf(1, matched.size / 12) == 0 }.take(12)
+            var better = 0
+            var worse = 0
+            for ((i, j, plan) in sample) {
+                val dj = render(plan, i, j)
+                val xf = planner.plan(b[i], b[j], settings.copy(minConfidence = 1.1f))
+                val xw = render(xf, i, j)
+                val c1 = cv(dj, plan)
+                val c2 = cv(xw, xf)
+                if (c1 < c2) better++ else worse++
+                println("REG %-22s -> %-22s DJ cv=%.3f xfade cv=%.3f".format(i.take(22), j.take(22), c1, c2))
+            }
+            println("REGULARITY (DSP+BeatThis matched sample): DJ better=$better worse=$worse of ${sample.size}")
+            if (outDir != null) {
+                outDir.mkdirs()
+                val seen = HashSet<String>()
+                var n = 0
+                for ((i, j, plan) in matched) {
+                    if (n >= 6) break
+                    if (!seen.add(i) && matched.size > 12) continue
+                    val win = render(plan, i, j)
+                    val f = File(outDir, "${i}__${j}__dj.wav")
+                    WavIo.write(f, WavIo.Wav(arrayOf(win.audio.left, win.audio.right), win.audio.sampleRate))
+                    println("MIX ${f.name} :: ${plan.reason.take(150)}")
+                    n++
+                }
+            }
         }
     }
 }

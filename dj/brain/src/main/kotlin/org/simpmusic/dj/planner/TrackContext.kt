@@ -9,10 +9,32 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
+import kotlin.math.sqrt
 
 /** Least-squares line `time = a + p * index` through a run of beats. */
 internal class BeatFit(val a: Double, val p: Double, val rms: Double, val points: Int) {
     fun timeAt(index: Int): Double = a + p * index
+}
+
+/**
+ * Quadratic least-squares model `time(i) = c0 + c1*x + c2*x^2` (x = i - i0) of the beats i0..i0+n-1: the local tempo curve.
+ * [noiseRms] is the residual to that curve (detector jitter, swing), [medianIbi] the median inter-beat interval.
+ */
+internal class LocalGrid(val i0: Int, val n: Int, val c0: Double, val c1: Double, val c2: Double, val noiseRms: Double, val medianIbi: Double) {
+    fun timeAt(i: Int): Double { val x = (i - i0).toDouble(); return c0 + c1 * x + c2 * x * x }
+
+    /** Mean beat period over beats [a, b] (ms), from the curve. */
+    fun meanPeriod(a: Int, b: Int): Double = (timeAt(b) - timeAt(a)) / max(1, b - a)
+
+    /** Largest deviation (ms) of the curve from a straight line through beats a and b, over [a, b]: what a constant rate cannot follow. */
+    fun driftMs(a: Int, b: Int): Double {
+        if (b <= a) return 0.0
+        val ta = timeAt(a)
+        val p = (timeAt(b) - ta) / (b - a)
+        var worst = 0.0
+        for (i in a..b) worst = max(worst, abs(timeAt(i) - (ta + p * (i - a))))
+        return worst
+    }
 }
 
 /**
@@ -114,6 +136,48 @@ internal class TrackContext(val analysis: TrackAnalysis) {
         }
         // express as index-absolute line: time = (c - p*a) + p*i
         return BeatFit(c - p * a, p, kotlin.math.sqrt(se / n), n)
+    }
+
+    /** Local tempo model over beats [i0, i1] (clamped); null when fewer than 6 beats. */
+    fun local(i0: Int, i1: Int): LocalGrid? {
+        val a = max(0, i0)
+        val b = min(beats.lastIndex, i1)
+        val n = b - a + 1
+        if (n < 6) return null
+        // normal equations for [1, x, x^2], x centred on the window to keep them well conditioned
+        val mid = (n - 1) / 2.0
+        var s0 = 0.0; var s1 = 0.0; var s2 = 0.0; var s3 = 0.0; var s4 = 0.0
+        var t0 = 0.0; var t1 = 0.0; var t2 = 0.0
+        for (k in 0 until n) {
+            val x = k - mid
+            val y = beats[a + k].toDouble()
+            val x2 = x * x
+            s0 += 1.0; s1 += x; s2 += x2; s3 += x2 * x; s4 += x2 * x2
+            t0 += y; t1 += x * y; t2 += x2 * y
+        }
+        val det = s0 * (s2 * s4 - s3 * s3) - s1 * (s1 * s4 - s3 * s2) + s2 * (s1 * s3 - s2 * s2)
+        if (abs(det) < 1e-9) return null
+        val q0 = (t0 * (s2 * s4 - s3 * s3) - s1 * (t1 * s4 - s3 * t2) + s2 * (t1 * s3 - s2 * t2)) / det
+        val q1 = (s0 * (t1 * s4 - s3 * t2) - t0 * (s1 * s4 - s3 * s2) + s2 * (s1 * t2 - t1 * s2)) / det
+        val q2 = (s0 * (s2 * t2 - t1 * s3) - s1 * (s1 * t2 - t1 * s2) + t0 * (s1 * s3 - s2 * s2)) / det
+        // re-express in x = i - a: x' = k, x = k - mid
+        val c2 = q2
+        val c1 = q1 - 2 * q2 * mid
+        val c0 = q0 - q1 * mid + q2 * mid * mid
+        var se = 0.0
+        for (k in 0 until n) { val e = beats[a + k] - (c0 + c1 * k + c2 * k * k); se += e * e }
+        val d = DoubleArray(n - 1) { (beats[a + it + 1] - beats[a + it]).toDouble() }
+        d.sort()
+        return LocalGrid(a, n, c0, c1, c2, sqrt(se / n), d[d.size / 2])
+    }
+
+    /** Median inter-beat interval of the beats inside [fromMs, toMs]; 0 if fewer than 4 beats. */
+    fun medianIbiIn(fromMs: Long, toMs: Long): Double {
+        val sel = beats.filter { it in fromMs..toMs }
+        if (sel.size < 4) return 0.0
+        val d = DoubleArray(sel.size - 1) { (sel[it + 1] - sel[it]).toDouble() }
+        d.sort()
+        return d[d.size / 2]
     }
 
     fun meanOver(values: FloatArray, fromMs: Long, toMs: Long): Float? {
