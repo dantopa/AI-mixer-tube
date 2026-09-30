@@ -19,3 +19,22 @@ expect fun rememberDjModeEnabled(): Boolean
 /** Length in whole seconds of the crossfade the DJ falls back to; 0 where DJ mode does not exist. */
 @Composable
 expect fun rememberDjFallbackSeconds(): Int
+
+/**
+ * A one-line status chip for Now Playing: what the AI DJ engine is doing right now ("analysing next track… 12 s",
+ * "ready, mix in 0:42", "mixing"...). Draws nothing while AI DJ mode is off, and on Desktop. Tapping it opens the DJ log.
+ */
+@Composable
+expect fun DjStatusChip(modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier)
+
+/**
+ * "DJ: what next?" sheet: the best songs of the analysed library to follow the playing one, with Play next / Play now.
+ * Android only; Desktop draws nothing (its caller never opens it, see [rememberDjModeEnabled]).
+ *
+ * @param onDone called after a suggestion was enqueued, so the caller can close the sheet it was opened from.
+ */
+@Composable
+expect fun DjNextSheet(
+    onDismiss: () -> Unit,
+    onDone: () -> Unit,
+)

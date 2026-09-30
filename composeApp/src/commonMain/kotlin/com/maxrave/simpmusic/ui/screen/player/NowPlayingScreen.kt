@@ -22,6 +22,9 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,6 +46,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -66,6 +70,7 @@ import com.maxrave.domain.manager.DataStoreManager
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.logger.Logger
 import com.maxrave.simpmusic.Platform
+import com.maxrave.simpmusic.expect.ui.DjStatusChip
 import com.maxrave.simpmusic.expect.ui.rememberVideoAspectRatio
 import com.maxrave.simpmusic.extension.GradientAngle
 import com.maxrave.simpmusic.extension.GradientOffset
@@ -870,23 +875,32 @@ fun NowPlayingScreenContent(
         )
     }
 
-    when (nowPlayingStyle) {
-        DataStoreManager.NOW_PLAYING_STYLE_M3_EXPRESSIVE ->
-            NowPlayingContentM3Expressive(
-                state = state,
-                actions = actions,
-            )
+    Box {
+        when (nowPlayingStyle) {
+            DataStoreManager.NOW_PLAYING_STYLE_M3_EXPRESSIVE ->
+                NowPlayingContentM3Expressive(
+                    state = state,
+                    actions = actions,
+                )
 
-        DataStoreManager.NOW_PLAYING_STYLE_APPLE_MUSIC ->
-            NowPlayingContentAppleMusic(
-                state = state,
-                actions = actions,
-            )
+            DataStoreManager.NOW_PLAYING_STYLE_APPLE_MUSIC ->
+                NowPlayingContentAppleMusic(
+                    state = state,
+                    actions = actions,
+                )
 
-        else ->
-            NowPlayingContentSpotify(
-                state = state,
-                actions = actions,
-            )
+            else ->
+                NowPlayingContentSpotify(
+                    state = state,
+                    actions = actions,
+                )
+        }
+        // AI DJ status: one line under the top bar, shared by all three styles (Android only, and only while DJ mode is on).
+        DjStatusChip(
+            Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = 52.dp),
+        )
     }
 }

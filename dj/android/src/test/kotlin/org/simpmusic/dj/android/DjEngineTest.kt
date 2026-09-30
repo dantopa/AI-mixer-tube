@@ -116,7 +116,7 @@ class DjEngineTest {
         val scope = CoroutineScope(SupervisorJob() + worker).also { scopes += it }
         val decoder = Decoder()
         val settings = MutableStateFlow(DjSettings(enabled = enabled))
-        val scheduler = DjAnalysisScheduler(AnalysisStore(File(dir, "a")), Analyzer(), decoder, AnalysisPolicy(Cond()) { true }, scope, worker, clock = { testScheduler.currentTime })
+        val scheduler = DjAnalysisScheduler(AnalysisStore(File(dir, "a")), Analyzer(), decoder, AnalysisPolicy(Cond()) { true }, scope, worker, io = worker, clock = { testScheduler.currentTime })
         val planner = Planner(plan)
         val renderer = Renderer()
         val windowDir = File(dir, "w")
@@ -156,6 +156,43 @@ class DjEngineTest {
             r.engine.onQueueContext(DjQueueContext("A", "B"))
             advanceUntilIdle()
             assertEquals(1, r.renderer.requests.size)
+        }
+
+    @Test
+    fun aRunningMixIsVisibleInTheDebugStateAndEndsWithConsumed() =
+        runTest {
+            val r = rig()
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            val p = r.engine.prepared("A", "B")!!
+            val ready = r.engine.debug.value
+            assertEquals("ready", ready.phase)
+            assertEquals("the countdown target: where the outgoing track reaches the mix", p.plan.exitPointMs, ready.mixAtMs)
+            assertFalse(ready.isHeavy && ready.isMixing)
+
+            r.engine.onMixStarted(p)
+            val mixing = r.engine.debug.value
+            assertTrue(mixing.isMixing)
+            assertTrue("busy: the library analysis keeps out of the way", mixing.isHeavy)
+            assertNotNull(mixing.mixStartedAtEpochMs)
+            assertEquals(p.plan.overlapMs - p.timeline.startRelMs, mixing.mixDurationMs)
+            assertEquals(mixing.fromBpm, ready.fromBpm)
+
+            r.engine.consumed(p, "DJ mix done")
+            val done = r.engine.debug.value
+            assertEquals("idle", done.phase)
+            assertNull(done.mixStartedAtEpochMs)
+            assertEquals("DJ mix done", done.lastOutcome)
+        }
+
+    @Test
+    fun aSimpleCrossfadePlanEndsInFallbackNotInPlanningSoItDoesNotLookBusyForever() =
+        runTest {
+            val r = rig(plan = { a, b -> fakePlan(a!!.videoId, b!!.videoId).copy(kind = PlanKind.SIMPLE_CROSSFADE, reason = "low confidence") })
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            assertEquals("fallback", r.engine.debug.value.phase)
+            assertFalse(r.engine.debug.value.isHeavy)
         }
 
     @Test

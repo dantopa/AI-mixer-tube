@@ -112,6 +112,7 @@ class SchedulerTest {
             DjAnalysisScheduler(
                 store, analyzer, decoder, policy, loopScope,
                 worker,
+                io = worker,
                 clock = { testScheduler.currentTime },
                 blockedRetryMs = 30_000L,
             )

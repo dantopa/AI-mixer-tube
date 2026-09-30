@@ -9,7 +9,13 @@ const val ANALYSIS_SAMPLE_RATE = 22_050
 /** Sample rate of decoded ranges handed to the window renderer (stereo). */
 const val RENDER_SAMPLE_RATE = 48_000
 
-class AudioUnavailableException(message: String) : java.io.IOException(message)
+open class AudioUnavailableException(message: String) : java.io.IOException(message)
+
+/**
+ * The audio is not (completely) cached and the caller may not use the network: the analysis is not broken, it is waiting for
+ * a connection it was not allowed to open. The scheduler keeps such a track queued instead of counting a failure.
+ */
+class AudioNeedsNetworkException(message: String, val partiallyCached: Boolean) : AudioUnavailableException(message)
 
 /** Turns a videoId into PCM. The Android implementation is [MediaCodecTrackDecoder]; tests use fakes. */
 interface TrackDecoder {

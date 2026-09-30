@@ -25,27 +25,54 @@ interface DeviceConditions {
  *  - NEXT_UP / NOW_PLAYING (the DJ needs it for the very next transition): blocked only by battery saver
  *    (unless charging) or a nearly flat battery, because a missing analysis costs nothing worse than a plain
  *    crossfade.
- *  - Network: BACKGROUND and NEXT_UP only fetch a stream themselves on an unmetered network, or when the user
- *    allowed metered analysis; on metered they decode from the cache only (a fully played/precached track is
- *    entirely there). NOW_PLAYING is already streaming, so it is not held back.
+ *  - Network: NEXT_UP fetches a stream on any network unless the user switched "analyze on mobile data" off; BACKGROUND
+ *    only on an unmetered one; where a fetch is forbidden they decode from the cache only (a fully played/precached
+ *    track is entirely there). NOW_PLAYING is already streaming, so it is not held back.
  */
 class AnalysisPolicy(
     private val conditions: DeviceConditions,
     private val analyzeOnMetered: () -> Boolean,
 ) {
-    fun mayRun(priority: AnalysisPriority): Boolean {
+    fun mayRun(priority: AnalysisPriority): Boolean = blockReason(priority) == null
+
+    /** Why [priority] may not run right now, or null. */
+    fun blockReason(priority: AnalysisPriority): BlockReason? {
         val c = conditions
         return when (priority) {
-            AnalysisPriority.BACKGROUND -> !c.isBatterySaver && (c.isCharging || c.batteryPercent >= 30)
-            AnalysisPriority.NEXT_UP, AnalysisPriority.NOW_PLAYING -> (c.isCharging || (!c.isBatterySaver && c.batteryPercent >= 10))
+            AnalysisPriority.BACKGROUND ->
+                when {
+                    c.isBatterySaver -> BlockReason.BATTERY_SAVER
+                    !c.isCharging && c.batteryPercent < 30 -> BlockReason.LOW_BATTERY
+                    else -> null
+                }
+            AnalysisPriority.NEXT_UP, AnalysisPriority.NOW_PLAYING ->
+                when {
+                    c.isCharging -> null
+                    c.isBatterySaver -> BlockReason.BATTERY_SAVER
+                    c.batteryPercent < 10 -> BlockReason.LOW_BATTERY
+                    else -> null
+                }
         }
     }
 
+    /**
+     * May a stream be fetched for [priority]? NOW_PLAYING is already streaming. NEXT_UP follows the "analyze on mobile
+     * data" switch. BACKGROUND (warming the library, possibly hundreds of songs) never fetches on a metered connection
+     * whatever that switch says: it would silently spend the user's data plan.
+     */
     fun mayUseNetwork(priority: AnalysisPriority): Boolean =
         when (priority) {
             AnalysisPriority.NOW_PLAYING -> true
-            else -> !conditions.isMetered || analyzeOnMetered()
+            AnalysisPriority.NEXT_UP -> !conditions.isMetered || analyzeOnMetered()
+            AnalysisPriority.BACKGROUND -> !conditions.isMetered
         }
+
+    val isMetered: Boolean get() = conditions.isMetered
+
+    /** One line for the log: every input the decisions above are made from. */
+    fun describe(): String =
+        "device[battery=${conditions.batteryPercent}% saver=${conditions.isBatterySaver} charging=${conditions.isCharging} " +
+            "metered=${conditions.isMetered} analyzeOnMetered=${analyzeOnMetered()}]"
 }
 
 class AndroidDeviceConditions(context: Context) : DeviceConditions {

@@ -32,9 +32,21 @@ if [[ ${#patches[@]} -eq 0 ]]; then
 fi
 
 status=0
-for p in "${patches[@]}"; do
+# A series is stacked: a later patch may touch the lines an earlier one added, so the earlier patch no longer reverse-applies
+# on its own once the later one is in. "Already applied" is therefore decided from the END of the series: the last patch
+# that reverse-applies cleanly proves itself and every patch before it are in; only what comes after it is applied.
+applied_upto=-1
+for ((i = ${#patches[@]} - 1; i >= 0; i--)); do
+  if git -C "$CORE" apply --reverse --check "${patches[$i]}" >/dev/null 2>&1; then
+    applied_upto=$i
+    break
+  fi
+done
+
+for i in "${!patches[@]}"; do
+  p="${patches[$i]}"
   name="$(basename "$p")"
-  if git -C "$CORE" apply --reverse --check "$p" >/dev/null 2>&1; then
+  if ((i <= applied_upto)); then
     echo "applied   $name"
   elif git -C "$CORE" apply --check "$p" >/dev/null 2>&1; then
     if [[ "$MODE" == "apply" ]]; then

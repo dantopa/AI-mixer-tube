@@ -142,4 +142,37 @@ data class DjSettings(
     val minConfidence: Float = 0.5f,
     /** Length of the simple-crossfade fallback. Mirrors the app's crossfade duration. */
     val fallbackCrossfadeMs: Long = 6000L,
+    /**
+     * Auto DJ: pick and enqueue the next track by itself when the queue is about to run out. Additive field, default off,
+     * so settings serialised before it existed still decode.
+     */
+    val autoDj: Boolean = false,
+    /** Auto DJ: how energy should move from one track to the next over the session. */
+    val autoDjArc: EnergyArc = EnergyArc.STEADY,
 )
+
+/** Shape of the energy over an Auto DJ session; feeds [org.simpmusic.dj.recommend.RecommendContext.energyTrend]. */
+@Serializable
+enum class EnergyArc {
+    /** Keep the floor where it is. */
+    STEADY,
+
+    /** Every next intro a little hotter than the previous outro. */
+    BUILD,
+
+    /** Every next intro a little cooler. */
+    COOL_DOWN,
+
+    /** Eight tracks up, eight tracks down. */
+    WAVE,
+    ;
+
+    /** Energy trend (-1..1) for the [step]th pick of a session (0 based). */
+    fun trendAt(step: Int): Float =
+        when (this) {
+            STEADY -> 0f
+            BUILD -> 0.6f
+            COOL_DOWN -> -0.6f
+            WAVE -> if ((step / 8) % 2 == 0) 0.6f else -0.6f
+        }
+}
