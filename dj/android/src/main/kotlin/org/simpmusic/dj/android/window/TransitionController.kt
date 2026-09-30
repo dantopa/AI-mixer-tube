@@ -206,7 +206,22 @@ class TransitionController(
 
     // ---- phases ----
 
+    private var outgoingStalledSinceMs = Double.NaN
+
     private fun tickLockOut(now: Double) {
+        // The user paused / the track ended / a seek is rebuffering: before the commit nothing audible has
+        // changed, so simply walk away and let the adapter carry on with whatever it is doing.
+        if (!outgoing.isPlaying) {
+            if (outgoingStalledSinceMs.isNaN()) outgoingStalledSinceMs = now
+            if (now - outgoingStalledSinceMs > OUTGOING_STALL_LIMIT_MS) {
+                log("outgoing deck stopped playing during lock-out -> abort before commit")
+                val result = abort()
+                host.onFailed("outgoing stopped", result)
+                return
+            }
+        } else {
+            outgoingStalledSinceMs = Double.NaN
+        }
         val loop = align!!
         val w = windowPositionMs()
         val ref = outEst.estimate(now, outgoing.positionMs())
@@ -371,5 +386,6 @@ class TransitionController(
         const val EARLIEST_XFADE_OUT_MS = 900.0
         const val EARLIEST_XFADE_IN_AFTER_MS = 900.0
         const val ABORT_RESEEK_MS = 50.0
+        const val OUTGOING_STALL_LIMIT_MS = 400.0
     }
 }

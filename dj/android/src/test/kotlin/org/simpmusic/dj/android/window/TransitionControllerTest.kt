@@ -186,6 +186,20 @@ class TransitionControllerTest {
     }
 
     @Test
+    fun userPausingTheOutgoingDeckDuringLockOutEndsTheTransitionBeforeCommit() {
+        val r = rig()
+        r.controller.start()
+        r.run(600.0) { false }
+        r.outgoing.pause()
+        r.run(2000.0) { r.controller.isFinished }
+        assertTrue(r.controller.isFinished)
+        assertEquals("outgoing stopped", r.host.failedReason)
+        assertFalse(r.host.failedResult!!.committed)
+        assertNull(r.host.committedSeek)
+        assertTrue(r.window.released)
+    }
+
+    @Test
     fun abortInsideTheWindowCommitsTheIncomingAtTheMappedPosition() {
         val r = rig()
         r.controller.start()
