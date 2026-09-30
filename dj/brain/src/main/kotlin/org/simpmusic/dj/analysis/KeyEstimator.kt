@@ -1,5 +1,6 @@
 package org.simpmusic.dj.analysis
 
+import org.simpmusic.dj.model.Camelot
 import org.simpmusic.dj.model.Mode
 import org.simpmusic.dj.model.MusicalKey
 import kotlin.math.abs
@@ -73,7 +74,16 @@ internal object KeyEstimator {
         val key = MusicalKey(best % 12, if (best < 12) Mode.MAJOR else Mode.MINOR)
         // honesty: sharp margin, a clearly tonal profile, and enough material
         val margin = corr[best] - corr[second]
-        val marginTerm = (margin / 0.12).coerceIn(0.0, 1.0)
+        // Relative / adjacent keys (Camelot distance <= 1) are all mix-compatible, so also ask how far the winner
+        // stands above the best key that would NOT be: blending the two keeps a relative-key coin flip from
+        // reading as certainty while not treating a harmless neighbour as a disaster.
+        var far = -1
+        for (i in 0 until 24) {
+            val k = MusicalKey(i % 12, if (i < 12) Mode.MAJOR else Mode.MINOR)
+            if (Camelot.distance(key, k) >= 2 && (far < 0 || corr[i] > corr[far])) far = i
+        }
+        val farMargin = if (far >= 0) corr[best] - corr[far] else margin
+        val marginTerm = 0.5 * (margin / 0.12).coerceIn(0.0, 1.0) + 0.5 * (farMargin / 0.2).coerceIn(0.0, 1.0)
         val fitTerm = ((corr[best] - 0.5) / 0.35).coerceIn(0.0, 1.0)
         val tonal = tonalness(g)
         val lengthTerm = min(1.0, activeFrames / 300.0) // 30 s of music for full trust

@@ -43,9 +43,12 @@ internal class OnsetFeatures(
     val levelLow: FloatArray,
     val levelHigh: FloatArray,
     val levelAll: FloatArray,
+    /** Coarse spectrum: [COARSE] log-band levels per frame (frame-major), for beat-synchronous timbre. */
+    val coarse: FloatArray,
 ) {
     companion object {
         private const val BANDS = 48
+        const val COARSE = 16
         private const val F_MIN = 30.0
         private const val F_MAX = 10500.0
         private const val GAMMA = 1000f
@@ -66,7 +69,8 @@ internal class OnsetFeatures(
             val levelLow = FloatArray(nFrames)
             val levelHigh = FloatArray(nFrames)
             val levelAll = FloatArray(nFrames)
-            if (nFrames == 0) return OnsetFeatures(0, flux, fluxLow, fluxHigh, levelLow, levelHigh, levelAll)
+            val coarse = FloatArray(nFrames * COARSE)
+            if (nFrames == 0) return OnsetFeatures(0, flux, fluxLow, fluxHigh, levelLow, levelHigh, levelAll, coarse)
 
             val fft = RealFft(n)
             val win = FloatArray(n) { (0.5 - 0.5 * cos(2.0 * PI * it / n)).toFloat() }
@@ -122,6 +126,11 @@ internal class OnsetFeatures(
                     if (b < lowEnd) sumLow += level
                     if (b >= highStart) sumHigh += level
                 }
+                for (g in 0 until COARSE) {
+                    var a = 0f
+                    for (b in g * 3 until g * 3 + 3) a += cur[b]
+                    coarse[t * COARSE + g] = a / 3f
+                }
                 levelAll[t] = sumAll / BANDS
                 levelLow[t] = sumLow / nLow
                 levelHigh[t] = sumHigh / nHigh
@@ -145,7 +154,7 @@ internal class OnsetFeatures(
                     flux[t] = fa / BANDS; fluxLow[t] = fl / nLow; fluxHigh[t] = fh / nHigh
                 }
             }
-            return OnsetFeatures(nFrames, flux, fluxLow, fluxHigh, levelLow, levelHigh, levelAll)
+            return OnsetFeatures(nFrames, flux, fluxLow, fluxHigh, levelLow, levelHigh, levelAll, coarse)
         }
     }
 }

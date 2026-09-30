@@ -63,6 +63,11 @@ internal class TempoEstimate(
     val prominence: Double,
     /** Other tempo candidates (bpm, score), best first; the octave siblings live here. */
     val alternates: List<Pair<Double, Double>>,
+    /**
+     * Score of the best NON-octave rival divided by the winner's (0..1): near 1 means two unrelated readings (e.g.
+     * 3:2 siblings) fit equally well. Octave siblings are excluded: half/double time is a known, planner-handled ambiguity.
+     */
+    val ambiguity: Double = 0.0,
 )
 
 /** Zero-mean, unbiased, normalised autocorrelation of an envelope, evaluable at fractional lags. */
@@ -103,28 +108,34 @@ internal class Acf(env: FloatArray, maxLagWanted: Int) {
     fun atBpm(bpm: Double) = at(60.0 * Grid.FPS / bpm)
 }
 
+internal class TempoParams(
+    /** Prior centre and width (octaves). Wide on purpose: dance music spans 70-180 BPM. */
+    val priorCenter: Double = 120.0,
+    val priorSigmaOct: Double = 1.0,
+    /** Multiples of the period contribute with weight k^-gamma. */
+    val gamma: Double = 0.0,
+    val maxMultiples: Int = 8,
+    /** Extra exponent on the autocorrelation at the period itself (the multiples alone cannot tell 3:2 siblings apart). */
+    val directPower: Double = 0.0,
+    val useLowBand: Boolean = true,
+    val lowBandMinPulse: Double = 0.25,
+    val demoteRatio: Double = 0.45,
+    val promoteRatio: Double = 0.6,
+    val promoteCeiling: Double = 182.0,
+    val demoteFloor: Double = 60.0,
+)
+
 internal object TempoEstimator {
     const val BPM_MIN = 50.0
     const val BPM_MAX = 220.0
     private const val STEP = 0.25
     private const val MAX_LAG_SEC = 6.0
 
-    /** Prior centre and width (octaves). Wide on purpose: dance music spans 70-180 BPM. */
-    var priorCenter = 120.0
-    var priorSigmaOct = 1.0
-
-    /** Octave decision thresholds (see [decideOctave]). */
-    var lowBandMinPulse = 0.25
-    var demoteRatio = 0.45
-    var promoteRatio = 0.6
-    var promoteCeiling = 182.0
-    var demoteFloor = 60.0
-
     /**
      * [env] is the detrended beat envelope, [low] the detrended low-band (kick/bass) flux, used only to decide between
      * octaves: the beat level is the fastest one at which the kick still keeps firing on every period.
      */
-    fun estimate(env: FloatArray, low: FloatArray? = null): TempoEstimate? {
+    fun estimate(env: FloatArray, low: FloatArray? = null, prm: TempoParams = TempoParams()): TempoEstimate? {
         val n = env.size
         val fps = Grid.FPS
         if (n < fps * 4) return null
@@ -137,12 +148,13 @@ internal object TempoEstimator {
         val score = DoubleArray(count)
         for (i in 0 until count) {
             val p = 60.0 * fps / bpms[i]
-            val k = max(1, min(8, (maxLag / p).toInt()))
-            var s = 0.0
-            for (m in 1..k) s += acf.at(m * p)
-            val comb = s / k
-            val oct = ln(bpms[i] / priorCenter) / ln(2.0)
-            score[i] = max(0.0, comb) * exp(-0.5 * (oct / priorSigmaOct) * (oct / priorSigmaOct))
+            val k = max(1, min(prm.maxMultiples, (maxLag / p).toInt()))
+            var s = 0.0; var ws = 0.0
+            for (m in 1..k) { val w = Math.pow(m.toDouble(), -prm.gamma); s += w * acf.at(m * p); ws += w }
+            val comb = s / ws
+            val oct = ln(bpms[i] / prm.priorCenter) / ln(2.0)
+            val direct = if (prm.directPower == 0.0) 1.0 else Math.pow(max(acf.at(p), 0.01), prm.directPower)
+            score[i] = max(0.0, comb) * direct * exp(-0.5 * (oct / prm.priorSigmaOct) * (oct / prm.priorSigmaOct))
         }
         val peaks = ArrayList<Int>()
         for (i in 1 until count - 1) if (score[i] > 0 && score[i] >= score[i - 1] && score[i] > score[i + 1]) peaks.add(i)
@@ -153,34 +165,37 @@ internal object TempoEstimator {
         meanScore /= count
         var bpm = bpms[peaks[0]]
         val prominence = if (meanScore > 0) score[peaks[0]] / meanScore else 1.0
-        if (low != null) {
+        if (low != null && prm.useLowBand) {
             val lowAcf = Acf(low, maxLagFrames)
-            if (lowAcf.ok) bpm = decideOctave(bpm, lowAcf, acf)
+            if (lowAcf.ok) bpm = decideOctave(bpm, lowAcf, acf, prm)
         }
-        // snap to the strongest nearby lag of the plain autocorrelation (the comb grid is only 0.25 BPM fine)
         val pulse = acf.atBpm(bpm).coerceIn(0.0, 1.0)
-        return TempoEstimate(bpm, pulse, prominence, peaks.take(6).map { bpms[it] to score[it] })
+        var amb = 0.0
+        for (j in peaks) {
+            val r = bpms[j] / bpm
+            val octave = abs(r - 1) < 0.04 || abs(r - 2) < 0.08 || abs(r - 0.5) < 0.04
+            if (!octave) amb = max(amb, score[j] / score[peaks[0]])
+        }
+        return TempoEstimate(bpm, pulse, prominence, peaks.take(6).map { bpms[it] to score[it] }, amb.coerceIn(0.0, 1.0))
     }
 
     /** Refines the octave using the low band: is there a kick on every period of this tempo, or only on every other? */
-    internal fun decideOctave(start: Double, low: Acf, all: Acf): Double {
+    internal fun decideOctave(start: Double, low: Acf, all: Acf, prm: TempoParams): Double {
         var b = start
         fun lowAt(x: Double) = low.atBpm(x)
-        // demote: at this tempo the kick is not firing every period, but it does at half the tempo
         var guard = 0
         while (guard++ < 2) {
             val half = b / 2
-            if (half < demoteFloor) break
+            if (half < prm.demoteFloor) break
             val here = lowAt(b); val there = lowAt(half)
-            if (max(here, there) >= lowBandMinPulse && here < demoteRatio * there && there > 0.0) b = half else break
+            if (max(here, there) >= prm.lowBandMinPulse && here < prm.demoteRatio * there && there > 0.0) b = half else break
         }
-        // promote: the kick keeps firing every period at double the tempo
         guard = 0
         while (guard++ < 2) {
             val dbl = b * 2
-            if (dbl > promoteCeiling) break
+            if (dbl > prm.promoteCeiling) break
             val here = lowAt(b); val there = lowAt(dbl)
-            if (max(here, there) >= lowBandMinPulse && there >= promoteRatio * here && there > 0.0 && all.atBpm(dbl) > 0.3) b = dbl else break
+            if (max(here, there) >= prm.lowBandMinPulse && there >= prm.promoteRatio * here && there > 0.0 && all.atBpm(dbl) > 0.3) b = dbl else break
         }
         return b
     }

@@ -24,6 +24,8 @@ internal object SectionAnalyzer {
         activeEndSec: Double,
         energy: FloatArray, // 100 ms grid, 0..1
         low: FloatArray,
+        /** Onset activity (mean spectral flux) on the same 100 ms grid, 0..1. */
+        activity: FloatArray,
         sp: SpectralFeatures,
         beats: DoubleArray?, // sec, may be null
         downbeatTimesSec: DoubleArray?,
@@ -56,8 +58,9 @@ internal object SectionAnalyzer {
         val dim = dimC + dimM + dimE
         val v = Array(n) { FloatArray(dim) }
         for (i in 0 until n) {
-            val j0 = max(0, Math.ceil(unitStart[i] * 10.0).toInt())
-            val j1 = min(sp.nFrames - 1, max(j0, Math.floor(unitEnd[i] * 10.0).toInt() - 1))
+            val last = min(sp.nFrames, energy.size) - 1
+            val j0 = min(last, max(0, Math.ceil(unitStart[i] * 10.0).toInt()))
+            val j1 = min(last, max(j0, Math.floor(unitEnd[i] * 10.0).toInt() - 1))
             var cnt = 0
             var eSum = 0.0; var lSum = 0.0
             for (j in j0..j1) {
@@ -133,7 +136,7 @@ internal object SectionAnalyzer {
         }
         cand.sortByDescending { novelty[it] }
         val picked = ArrayList<Int>()
-        for (c in cand) if (picked.all { abs(it - c) >= half }) picked.add(c)
+        for (c in cand) if (picked.all { abs(it - c) >= half * 3 / 2 }) picked.add(c)
         picked.sort()
 
         // ---- 5. snap to the grid
@@ -155,13 +158,18 @@ internal object SectionAnalyzer {
         val edges = ArrayList<Double>()
         edges.add(activeStartSec); edges.addAll(bounds); edges.add(activeEndSec)
         val secEnergy = FloatArray(edges.size - 1)
+        val secIntensity = FloatArray(edges.size - 1)
+        val secActivity = FloatArray(edges.size - 1)
         for (k in 0 until edges.size - 1) {
-            val j0 = max(0, (edges[k] * 10).toInt()); val j1 = min(energy.size - 1, (edges[k + 1] * 10).toInt())
-            var s2 = 0.0
-            for (j in j0..max(j0, j1)) s2 += energy[min(j, energy.size - 1)]
-            secEnergy[k] = (s2 / (max(j0, j1) - j0 + 1)).toFloat()
+            val j0 = min(energy.size - 1, max(0, (edges[k] * 10).toInt())); val j1 = max(j0, min(energy.size - 1, (edges[k + 1] * 10).toInt()))
+            var se = 0.0; var sl = 0.0; var sa = 0.0
+            for (j in j0..j1) { se += energy[j]; sl += low[j]; sa += activity[min(j, activity.size - 1)] }
+            val c = (j1 - j0 + 1).toDouble()
+            secEnergy[k] = (se / c).toFloat()
+            secIntensity[k] = ((se + sl + sa) / (3 * c)).toFloat()
+            secActivity[k] = (sa / c).toFloat()
         }
-        val kinds = label(secEnergy, edges)
+        val kinds = label(secIntensity, secActivity, edges)
         val list = (0 until edges.size - 1).map {
             Section(TimeRange((edges[it] * 1000).toLong(), (edges[it + 1] * 1000).toLong()), kinds[it], secEnergy[it])
         }
@@ -172,24 +180,31 @@ internal object SectionAnalyzer {
             m /= picked.size
             (((m / (mean + 1e-9)) - 2.5) / 6.0).coerceIn(0.0, 1.0) * 0.9 + 0.05
         }
-        return SectionResult(list, conf, bounds.toDoubleArray())
+        return SectionResult(list, if (conf.isNaN()) 0.0 else conf, bounds.toDoubleArray())
     }
 
-    private fun label(e: FloatArray, edges: List<Double>): List<SectionKind> {
+    private fun label(e: FloatArray, act: FloatArray, edges: List<Double>): List<SectionKind> {
         val n = e.size
         if (n == 1) return listOf(SectionKind.UNKNOWN)
         val mx = e.max()
+        val mxAct = act.max()
         val total = edges.last() - edges.first()
-        return List(n) { i ->
+        val kinds = ArrayList<SectionKind>()
+        for (i in 0 until n) {
             val rel = if (mx > 0) e[i] / mx else 0f
+            val actRel = if (mxAct > 0) act[i] / mxAct else 0f
             val dur = edges[i + 1] - edges[i]
-            when {
+            val afterBreak = i > 0 && kinds[i - 1] == SectionKind.BREAKDOWN
+            kinds.add(when {
                 i == 0 && (rel < 0.85f || dur < 0.2 * total) && rel < 0.95f -> SectionKind.INTRO
                 i == n - 1 && rel < 0.85f -> SectionKind.OUTRO
-                rel < 0.55f -> SectionKind.BREAKDOWN
-                rel >= 0.92f && (i == 0 || e[i - 1] < 0.92f * e[i]) -> SectionKind.DROP
+                // drums / percussive activity out: a breakdown, however loud the pad or vocal that remains
+                actRel < 0.4f || rel < 0.5f -> SectionKind.BREAKDOWN
+                // a drop is the peak that follows a breakdown or a clear jump up, not merely a loud verse
+                rel >= 0.92f && (afterBreak || (i > 0 && e[i - 1] < 0.8f * e[i])) -> SectionKind.DROP
                 else -> SectionKind.BODY
-            }
+            })
         }
+        return kinds
     }
 }

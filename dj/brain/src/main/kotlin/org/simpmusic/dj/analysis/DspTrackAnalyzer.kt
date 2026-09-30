@@ -46,8 +46,8 @@ class DspTrackAnalyzer : TrackAnalyzer {
         val durationMs = audio.durationMs
         val x = tm.stage("prepare") { prepare(audio) }
         val energy = tm.stage("energy") { EnergyCurves.compute(x) }
-        val eNorm = energy.normalised(energy.rms)
-        val lowNorm = energy.normalised(energy.lowRms)
+        val eNorm = energy.normalised(smooth121(energy.rms))
+        val lowNorm = energy.normalised(smooth121(energy.lowRms))
         val silent = x.isEmpty() || energy.loudnessDb < SILENCE_DB
         val base = TrackAnalysis(
             videoId = videoId,
@@ -118,7 +118,7 @@ class DspTrackAnalyzer : TrackAnalyzer {
         val sec = tm.stage("sections") {
             SectionAnalyzer.analyze(
                 durationSec = x.size / Grid.SR.toDouble(), activeStartSec = aStart, activeEndSec = aEnd,
-                energy = eNorm, low = lowNorm, sp = sp,
+                energy = eNorm, low = lowNorm, activity = activityGrid(on), sp = sp,
                 beats = if (beatsC != null && (beatsC.confidence >= 0.3f)) beat!!.timesSec else null,
                 downbeatTimesSec = downTimes, phraseTimesSec = phraseTimes,
             )
@@ -128,6 +128,26 @@ class DspTrackAnalyzer : TrackAnalyzer {
             bpm = bpm, beatTimesMs = beatsC, downbeatBeatIndices = downC, beatsPerBar = bpb,
             phraseStartsMs = phrases, key = key, sections = sectionsC, timbre = timbre,
         )
+    }
+
+    /** [1 2 1]/4 smoothing: removes the beat-phase flutter of 100 ms RMS blocks without blurring section edges. */
+    private fun smooth121(a: FloatArray): FloatArray {
+        if (a.size < 3) return a
+        return FloatArray(a.size) { i -> 0.25f * a[max(0, i - 1)] + 0.5f * a[i] + 0.25f * a[min(a.size - 1, i + 1)] }
+    }
+
+    /** Mean onset flux per 100 ms block, scaled to 0..1 (how busy the arrangement is). */
+    private fun activityGrid(on: OnsetFeatures): FloatArray {
+        val blocks = (on.nFrames * Grid.ONSET_HOP + Grid.SPEC_HOP - 1) / Grid.SPEC_HOP
+        val out = FloatArray(blocks); val cnt = IntArray(blocks)
+        for (f in 0 until on.nFrames) {
+            val b = min(blocks - 1, f * Grid.ONSET_HOP / Grid.SPEC_HOP)
+            out[b] += on.flux[f]; cnt[b]++
+        }
+        var m = 0f
+        for (b in 0 until blocks) { if (cnt[b] > 0) out[b] /= cnt[b]; if (out[b] > m) m = out[b] }
+        if (m > 0f) for (b in 0 until blocks) out[b] /= m
+        return out
     }
 
     private class RhythmConf(val bpm: Double, val beats: Double)
@@ -142,7 +162,9 @@ class DspTrackAnalyzer : TrackAnalyzer {
         val support = ((b.support - 1.6) / 3.0).coerceIn(0.0, 1.0)
         val regular = ((b.regularity - 0.5) / 0.4).coerceIn(0.0, 1.0)
         val enough = min(1.0, b.timesSec.size / 24.0)
-        val core = periodic * (0.3 + 0.7 * support)
+        // two unrelated tempo readings (not just half/double time) that fit equally well: say so
+        val ambiguity = 1.0 - 0.45 * ((t.ambiguity - 0.8) / 0.2).coerceIn(0.0, 1.0)
+        val core = periodic * (0.3 + 0.7 * support) * ambiguity
         val bpmC = core * (0.4 + 0.6 * regular) * (0.5 + 0.5 * enough)
         val beatsC = core * (0.2 + 0.8 * regular) * (0.5 + 0.5 * enough)
         return RhythmConf(bpmC.coerceIn(0.0, 1.0), beatsC.coerceIn(0.0, 1.0))
