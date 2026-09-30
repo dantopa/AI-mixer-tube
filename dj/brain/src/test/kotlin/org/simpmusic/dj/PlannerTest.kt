@@ -113,6 +113,20 @@ class PlannerTest {
     }
 
     @Test
+    fun anIrregularLongOverlapWindowShrinksTheOverlapInsteadOfFallingBackToACrossfade() {
+        // The owner's phone: 16 bars asked, "outgoing beat grid is irregular around the mix" and a plain crossfade.
+        // A glitch every ~20 s (a drumless break, a wrong beat run) sits inside any 45 s window but not inside a short one.
+        val glitchy = customAnalysis("g", 330, 85.7f) { i -> i * 700.0 + (i / 29) * 3000.0 }
+        val steady = customAnalysis("s", 330, 85.7f) { i -> i * 700.0 }
+        val asked = settings.copy(overlapBars = 16)
+        val plan = planner.plan(glitchy, steady, asked)
+        println("glitchy grid, 16 bars asked: ${plan.kind} overlap ${plan.overlapMs} ms | ${plan.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind)
+        assertTrue(plan.overlapMs < 16 * 4 * 700, "overlap should have shrunk: ${plan.overlapMs}")
+        assertTrue(plan.reason.contains("irregular over a longer overlap"))
+    }
+
+    @Test
     fun untrustedDownbeatsMeanBeatAlignmentAndAShorterOverlap() {
         val a = customAnalysis("a", 260, 120f, downConf = 0.05f) { it * 500.0 + 100 }
         val b = customAnalysis("b", 260, 122f, downConf = 0.05f) { it * (60000.0 / 122) + 100 }

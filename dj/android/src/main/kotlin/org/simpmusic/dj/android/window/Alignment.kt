@@ -16,7 +16,9 @@ import kotlin.math.abs
  */
 class LatencyCalibrator(
     startLatencyMs: Double = 120.0,
-    seekBiasMs: Double = 80.0,
+    // First guess of the follower's lag after a hard seek. 80 ms was optimistic: the first real device (a phone on Wi-Fi) finished
+    // its three corrective seeks 42 ms short, which is only consistent with a true lag near 250 ms and the half-way learning rate below.
+    seekBiasMs: Double = 250.0,
 ) {
     var startLatencyMs: Double = startLatencyMs
         private set
@@ -31,7 +33,9 @@ class LatencyCalibrator(
 
     /** [residualMs] = follower - reference measured after a seek that used the current bias. */
     fun observeSeek(residualMs: Double) {
-        seekBiasMs = ema(seekBiasMs, seekBiasMs - residualMs, 0.5).coerceIn(-200.0, 800.0)
+        // After a seek by (-error + bias) the new residual is exactly (bias - trueLag), so nearly the whole residual can be
+        // corrected at once. A learning rate of 0.5 halved the error per seek, and three seeks were not enough to lock.
+        seekBiasMs = ema(seekBiasMs, seekBiasMs - residualMs, 0.85).coerceIn(-200.0, 800.0)
     }
 
     private fun ema(old: Double, sample: Double, alpha: Double) = old + alpha * (sample - old)

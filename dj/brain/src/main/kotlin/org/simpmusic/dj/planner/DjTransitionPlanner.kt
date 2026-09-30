@@ -94,7 +94,10 @@ class DjTransitionPlanner : TransitionPlanner {
         val roughIn = inc.medianIbiIn(inc.firstAudibleMs, inc.firstAudibleMs + 60_000L).takeIf { it > 0 } ?: inc.medianBeatMs
         var tempo = chooseTempo(roughOut, roughIn, settings.maxTempoBend.toDouble())
             ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
-        val desiredUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
+        val requestedUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
+        // The overlap window is what gets checked for a steady beat, so a long overlap sees more of the track (a drumless
+        // break, a tempo change) than a short one. When the window is irregular the overlap is halved before the mix is given up.
+        var desiredUnits = requestedUnits
         val minUnits = if (barsMode) 1 else 4
         val softFloor = if (barsMode) 2 else 8
         val outroStart = out.outro()?.range?.startMs
@@ -103,7 +106,12 @@ class DjTransitionPlanner : TransitionPlanner {
         var pass = 0
         while (true) {
             loc = locate(out, inc, tempo, barsMode, desiredUnits, minUnits, softFloor, margin, outroStart, settings)
-            loc.fail?.let { return simplePlan(out, inc, fromId, toId, settings, it) }
+            val shortest = max(minUnits, softFloor)
+            if (loc.fail != null && loc.irregular && desiredUnits > shortest) {
+                desiredUnits = max(shortest, desiredUnits / 2)
+                continue
+            }
+            loc.fail?.let { return simplePlan(out, inc, fromId, toId, settings, it + if (desiredUnits < requestedUnits) " (also tried overlaps down to $desiredUnits)" else "") }
             val t2 = loc.tempo ?: return incompatibleTempo(out, inc, fromId, toId, settings, conf)
             pass++
             val settled = abs(t2.rateOut / tempo.rateOut - 1.0) < 0.02 && abs(t2.rateIn / tempo.rateIn - 1.0) < 0.02
@@ -268,7 +276,7 @@ class DjTransitionPlanner : TransitionPlanner {
             append("); exit ").append(exitMs).append(" ms (").append(exitPick.levelName).append(if (exitPick.viaOutro) ", outro" else "")
             append("), entry ").append(entryMs).append(" ms (").append(entryPick.levelName).append("); overlap ")
             append(units).append(if (barsMode) " bars" else " beats").append(" = ").append(overlapMs).append(" ms")
-            if (units < desiredUnits) append(" (clamped from $desiredUnits)")
+            if (units < requestedUnits) append(" (clamped from $requestedUnits" + (if (desiredUnits < requestedUnits) ", the beat grid was irregular over a longer overlap" else "") + ")")
             append("; ").append(keyNote)
             append("; bass swap ").append(if (bassSwap) "on" else if (!settings.bassSwap) "off (setting)" else "off (no bass to swap)")
             if (gainOut < 1.0 || gainIn < 1.0) append("; gain out ${fmt(gainOut.toFloat())} in ${fmt(gainIn.toFloat())}")
@@ -288,6 +296,8 @@ class DjTransitionPlanner : TransitionPlanner {
     internal class Located(
         val fail: String? = null, val tempo: Tempo? = null, val exitPick: Pick? = null, val entryPick: Pick? = null,
         val localOut: LocalGrid? = null, val localIn: LocalGrid? = null, val iOut: Int = 0, val iIn: Int = 0,
+        /** True when the failure was an irregular beat grid in the overlap window (a shorter overlap may still work). */
+        val irregular: Boolean = false,
     )
 
     /** Picks exit and entry with the given tempo estimate, then measures the LOCAL tempo of both overlap windows. */
@@ -338,7 +348,7 @@ class DjTransitionPlanner : TransitionPlanner {
             val t2 = chooseTempo(periodOut, periodIn, settings.maxTempoBend.toDouble())
             return Located(tempo = t2, exitPick = exitPick, entryPick = entryPick, localOut = localOut, localIn = localIn, iOut = iOut, iIn = iIn)
         }
-        return Located(fail = lastFail)
+        return Located(fail = lastFail, irregular = lastFail.contains("irregular"))
     }
 
     // ---------------------------------------------------------------------------------------------
