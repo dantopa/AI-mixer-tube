@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Wed, 30 Sep 2026 00:49:03 +0000
+Date: Wed, 30 Sep 2026 01:08:48 +0000
 Subject: [PATCH 1/2] media3: let DelegatingForwardingPlayer report an
  overridden position/duration and reroute session seeks
 

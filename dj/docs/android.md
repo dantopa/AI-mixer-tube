@@ -73,6 +73,49 @@ gets a plan; `FallbackOnlyPlanner` answers `SIMPLE_CROSSFADE`; a renderer that t
   `outgoingTail.startMs` / `incomingHead.startMs` are the source position of each PCM's sample 0. The window is
   `[startRelMs, endRelMs] = [preRollMs - 2500, settled + 6000]`. The renderer must write to a temp name and rename.
 
+### Wiring the real planner/renderer (NOT done: the merge was blocked)
+
+The coordinator announced `DjTransitionPlanner` and `OfflineMixRenderer` on branch `ccr-f6e68cc7-xs37nk`. Merging that
+branch from this worktree was **denied by the permission system** ("untrusted code integration"). I did not read or
+integrate it by any other route, so `DjModule` still binds the three placeholders and nothing below is compiled against
+the real classes. Everything I know of their API comes from the coordinator's message, not from the code. To finish:
+
+1. Merge `ccr-f6e68cc7-xs37nk` into this branch (an owner decision).
+2. In `di/DjModule.kt` replace `FallbackOnlyPlanner()` by `DjTransitionPlanner()` and `UnavailableWindowRenderer()` by
+   the adapter below.
+3. Check `WindowTimeline.check(plan)` accepts real plans (contract in section 2). If the planner exposes
+   `TransitionPlan.settleMs`, use it instead of `max(overlapMs, last keyframe)` in `WindowTimeline.build/check`.
+4. Add a JVM test that renders a real plan through the adapter and asserts the WAV length equals
+   `windowMs` and that the first `LEAD_IN` of the window equals the outgoing source audio.
+
+Adapter sketch (**names of `Options`/`Window` members unverified**; the mapping is the point: this app's window is
+`[preRollMs - LEAD_IN_MS, settled + TAIL_MS]`, i.e. renderer lead = `LEAD_IN_MS` of plain outgoing audio *before* the
+plan's pre-roll and tail = `TAIL_MS` after the lanes settle; both decoded PCMs must share ONE sample rate, which
+`MediaCodecTrackDecoder` guarantees with `RENDER_SAMPLE_RATE`):
+
+```kotlin
+class OfflineMixRendererAdapter(private val renderer: OfflineMixRenderer = OfflineMixRenderer()) : TransitionWindowRenderer {
+    override fun render(request: RenderRequest): RenderedWindow {
+        fun seg(p: StereoPcm) = AudioSegment(org.simpmusic.dj.render.StereoPcm(left(p), right(p), p.sampleRate), p.startMs)
+        val w = renderer.render(request.plan, seg(request.outgoingTail), seg(request.incomingHead),
+            OfflineMixRenderer.Options(/* leadMs = WindowTuning.LEAD_IN_MS, tailMs = WindowTuning.TAIL_MS */))
+        val tmp = File(request.output.parentFile, request.output.name + ".tmp")
+        WavIo.write(tmp, WavIo.Wav(arrayOf(w.left, w.right), w.sampleRate))
+        Files.move(tmp.toPath(), request.output.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        return RenderedWindow(request.output, w.sampleRate, w.frames.toLong())
+    }
+}
+```
+
+Two things to reconcile at merge time because they were designed independently:
+
+1. The renderer's own hand-off notion (`Window.handoffMs`, `handoffIncomingSourceMs`) versus this app's
+   lock-then-cross-fade at `lockInWindowMs .. xfadeInWindowMs`. The app deliberately hands off *later* than the earliest
+   possible point (it needs seconds of plain, settled audio to phase-lock a silent player onto), so it only needs the
+   renderer to keep rendering plain incoming audio for `TAIL_MS`. The default tail of 500 ms is NOT enough: pass 6000 ms.
+2. The decoded ranges: the renderer wants the outgoing audio from `exit - integral(rate over pre-roll) - >= 50 ms`; this
+   app decodes from `outgoingSourceAtWindowStart - 750 ms` (a superset, since it also covers the lead-in).
+
 ## 3. Hook points in the patched core
 
 Patch series: `patches/core/0001-…` (DelegatingForwardingPlayer overrides) and `0002-…` (adapter, DI, gradle). Apply
@@ -84,12 +127,12 @@ patches applied.
 |---|---|
 | `DjHooks` constructor parameter (null = original behaviour) | `exoplayer/CrossfadeExoPlayerAdapter.kt:92`; passed via `getOrNull<DjHooks>()` in `di/Media3ServiceModule.kt:198`; `djModule` loaded in `loadMediaService()` `:555` |
 | Prepared-window callback wiring | `CrossfadeExoPlayerAdapter.kt:148` (`init`) |
-| Crossfade is the DJ fallback: `crossfadeActive`, `crossfadeDurationMs` getter (uses `DjSettings.fallbackCrossfadeMs` while DJ is on) | `:332-343` |
-| **(a) trigger**: 50 ms position poll -> `djPollTick` starts a prepared window when the outgoing SOURCE position reaches `outgoingSourceAtWindowStart - startLatency` | `:3148` (call), `:2918` (impl); guards `djBlockedReason()` (casting, listen-together `crossfadeSuppressed`, repeat one, video, speed/pitch != 1, album) |
-| Plain crossfade held back while a window is ready/running | poll `:3155`, EOF path `:2056` (`djHoldsCrossfade`) |
-| **(b)+(c) player plumbing**: `djPort` (window player = `createExoPlayerInstance()`, `commitToIncoming`, `onWindowRetired`, `onFinished`, `onFailed`) reusing `secondaryPlayer`, `setupPlayerListenerInternal`, `swapDelegate`, `setCrossfading`, `finalizeCrossfade` | `:3000-3130` |
+| Crossfade is the DJ fallback: `crossfadeActive`, `crossfadeDurationMs` getter (uses `DjSettings.fallbackCrossfadeMs` while DJ is on) | `:335-345` |
+| **(a) trigger**: 50 ms position poll -> `djPollTick` starts a prepared window when the outgoing SOURCE position reaches `outgoingSourceAtWindowStart - startLatency` | `:3154` (call), `:2918` (impl); guards `djBlockedReason()` (casting, listen-together `crossfadeSuppressed`, repeat one, video, speed/pitch != 1, album) |
+| Plain crossfade held back while a window is ready/running | poll `:3161`, EOF path `:2056` (`djHoldsCrossfade`) |
+| **(b)+(c) player plumbing**: `djPort` (window player = `createExoPlayerInstance()`, `commitToIncoming`, `onWindowRetired`, `onFinished`, `onFailed`) reusing `secondaryPlayer`, `setupPlayerListenerInternal`, `swapDelegate`, `setCrossfading`, `finalizeCrossfade` | `:3006-3122` |
 | Synchronous abort at every crossfade-cancel site (commit-incoming, `seekTo(index)`, cleanup, load, release, cast) | `djAbortInternal()` calls at `:483 :770 :1450 :1623 :1940 :1965` |
-| UI position while the window is audible | poll `:3139` (`djUiPositionMs`), session via `DelegatingForwardingPlayer.positionOverride` |
+| UI position while the window is audible | poll `:3145` (`djUiPositionMs`), session via `DelegatingForwardingPlayer.positionOverride` |
 | EOF path | **no DJ trigger there, deliberately**: a window needs ~2.5 s of lead-in before the mix and is rendered ahead, so an end-of-track trigger cannot exist; if the poll missed the window the existing `handleTrackEndInternal` crossfade/normal transition runs untouched |
 
 **Skip-silence** is turned off on the outgoing player when a window starts and on the window / incoming players;

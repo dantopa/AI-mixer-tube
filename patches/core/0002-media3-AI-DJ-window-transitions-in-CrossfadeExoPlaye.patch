@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
-Date: Wed, 30 Sep 2026 00:50:18 +0000
+Date: Wed, 30 Sep 2026 01:08:48 +0000
 Subject: [PATCH 2/2] media3: AI DJ window transitions in
  CrossfadeExoPlayerAdapter (behind DjHooks, off by default)
 
@@ -64,7 +64,7 @@ index d00d051..e879837 100644
  
  @OptIn(UnstableApi::class)
 diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
-index f810fd5..baa744f 100644
+index f810fd5..b0322f8 100644
 --- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
 +++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
 @@ -40,6 +40,12 @@ import com.maxrave.media3.audio.EqualizerCurve
@@ -198,7 +198,7 @@ index f810fd5..baa744f 100644
                  !crossfadeSuppressed &&
                  hasNextMediaItem() &&
                  !isCrossfading &&
-@@ -2861,6 +2893,229 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -2861,6 +2893,235 @@ internal class CrossfadeExoPlayerAdapter(
          triggerPrecachingInternal()
      }
  
@@ -243,6 +243,12 @@ index f810fd5..baa744f 100644
 +            // Blocked (cast, repeat one, video...): a window prepared earlier must not hold the plain crossfade back.
 +            if (ctx.blockedReason != null) djDiscardPrepared()
 +            val runner = djRunner ?: return
++            if (!runner.isRunning && !runner.prepared.holdsCrossfadeAt(positionMs)) {
++                // The outgoing track is already past the window's start: too late, the plain crossfade takes over.
++                hooks.consumed(runner.prepared, "missed the trigger")
++                djDiscardPrepared()
++                return
++            }
 +            if (ctx.blockedReason == null && !runner.isRunning && !runner.isDone && player.isPlaying && runner.isWindowReady &&
 +                runner.prepared.isTriggeredAt(positionMs, hooks.calibrator.startLatencyMs)
 +            ) {
@@ -428,7 +434,7 @@ index f810fd5..baa744f 100644
      // ========== Internal: Position Updates ==========
  
      /**
-@@ -2881,7 +3136,7 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -2881,7 +3142,7 @@ internal class CrossfadeExoPlayerAdapter(
                              ) {
                                  // During crossfade, show the incoming track's timeline
                                  val timelinePlayer = if (isCrossfading) secondaryPlayer ?: player else player
@@ -437,7 +443,7 @@ index f810fd5..baa744f 100644
                                  val dur = timelinePlayer.duration
                                  val buf = timelinePlayer.bufferedPosition
  
-@@ -2889,11 +3144,15 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -2889,11 +3150,15 @@ internal class CrossfadeExoPlayerAdapter(
                                  if (dur > 0) cachedDuration = dur
                                  if (buf >= 0) cachedBufferedPosition = buf
  
