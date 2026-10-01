@@ -1,5 +1,7 @@
 package org.simpmusic.dj.planner
 
+import org.simpmusic.dj.analysis.GridRepair
+
 import org.simpmusic.dj.model.Camelot
 import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.EchoOutSpec
@@ -39,7 +41,11 @@ class DjTransitionPlanner : TransitionPlanner {
     override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan =
         plan(from, to, settings, PlanConstraints())
 
-    override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
+    override fun plan(fromRaw: TrackAnalysis?, toRaw: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
+        // Beat grids that lose the beat (dropped beats, a switch to the tresillo subdivision) are rebuilt from the
+        // bar first; regular grids pass through untouched (see GridRepair).
+        val from = fromRaw?.let(GridRepair::cached)
+        val to = toRaw?.let(GridRepair::cached)
         val s = sanitise(settings)
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
         return try {

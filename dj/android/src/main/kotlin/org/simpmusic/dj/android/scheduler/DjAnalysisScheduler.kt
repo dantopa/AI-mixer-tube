@@ -471,7 +471,7 @@ class DjAnalysisScheduler(
 
     private fun summary(a: TrackAnalysis): String =
         "bpm=${a.bpm?.let { "%.1f(c%.2f)".format(it.value, it.confidence) }} beats=${a.beatTimesMs?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} " +
-            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms"
+            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason}"
 
     private fun queueSummary(): String = queue.values.joinToString(prefix = "[", postfix = "]") { "${it.videoId}/${it.priority}" }
 

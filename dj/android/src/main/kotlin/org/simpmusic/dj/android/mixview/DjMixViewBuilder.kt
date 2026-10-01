@@ -108,13 +108,14 @@ object DjMixViewBuilder {
         }
 
         // Beats: source ms -> plan ms through the (monotone) source(t) table.
-        val beatsSrc = analysis?.beatTimesMs?.value.orEmpty()
+        val grid = analysis?.let(org.simpmusic.dj.analysis.GridRepair::cached) // the grid the planner used
+        val beatsSrc = grid?.beatTimesMs?.value.orEmpty()
         val beats = ArrayList<Float>()
         val downbeats = ArrayList<Float>()
         if (beatsSrc.isNotEmpty()) {
             val from = max(start, activeFrom)
             val inv = SourceInverse(from, end, source)
-            val downSet = analysis?.downbeatBeatIndices?.value.orEmpty().toHashSet()
+            val downSet = grid?.downbeatBeatIndices?.value.orEmpty().toHashSet()
             for ((i, b) in beatsSrc.withIndex()) {
                 val t = inv.planTimeOf(b.toDouble()) ?: continue
                 beats += t.toFloat()

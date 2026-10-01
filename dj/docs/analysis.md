@@ -31,3 +31,13 @@ Speed: ~1 s warm for a 4-minute track on the dev box (phone speed unmeasured).
 ## Known failure modes
 Tempo octave and 3:2 ambiguity; downbeat weights fitted on only 12 tracks; one global key; fuzzy section labels; DJ-mix tempo changes are not followed.
 Bump `analyzerId` whenever a parameter changes behaviour.
+
+
+## Grid repair (2026-10-01)
+
+Beat This! loses the beat on cumbia: it drops beats and then follows the tresillo / güiro (thirds of the beat), while its
+downbeats stay on the bar. `GridRepair` rebuilds such grids from the bar on read (planner, recommender, mix view):
+bar period from the downbeat gaps, beats per bar from the lattice the original beats support, Ellis DP over the original
+beats and downbeats, snap to the original beat within 45 ms, fill the rest. Regular grids (85 % of intervals within 8 %
+of the median) pass through untouched. On the owner's 46-track cumbia radio, simple-mode beat-matched pairs went from
+346 to 1704 of 2070. See `GridRepairReport` to measure a cache of analyses with and without it.

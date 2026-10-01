@@ -1,5 +1,7 @@
 package org.simpmusic.dj.recommend
 
+import org.simpmusic.dj.analysis.GridRepair
+
 import org.simpmusic.dj.model.*
 import kotlin.math.abs
 import kotlin.math.exp
@@ -49,7 +51,10 @@ class HeuristicRecommender(
             .toList()
 
     /** Score of playing [next] after [current], 0..1, with a per-component breakdown. Public: used by [SetBuilder]. */
-    fun score(current: TrackAnalysis, next: TrackAnalysis, settings: DjSettings): Recommendation {
+    fun score(currentRaw: TrackAnalysis, nextRaw: TrackAnalysis, settings: DjSettings): Recommendation {
+        // the tempo term reads the bpm field, which a broken grid gets wrong by a whole subdivision (see GridRepair)
+        val current = GridRepair.cached(currentRaw)
+        val next = GridRepair.cached(nextRaw)
         val parts = LinkedHashMap<String, Float>()
         val why = ArrayList<String>()
 
