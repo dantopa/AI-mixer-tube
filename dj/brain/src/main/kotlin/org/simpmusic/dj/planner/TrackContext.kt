@@ -69,10 +69,15 @@ internal class TrackContext(val analysis: TrackAnalysis) {
 
     /**
      * True when a tempo measured locally (bpm) is the same tempo the track has as a whole, allowing the half / double
-     * lattice: it must match the whole-grid average or the tempo field. Nothing to compare against counts as agreement.
+     * lattice: it must match the whole-grid average, the median beat interval or the tempo field. Nothing to compare
+     * against counts as agreement.
+     *
+     * The median interval is there for grids with holes: a tracker that stays silent through a beatless break (common in
+     * electronic music) leaves a long gap, which drags the span-based average down while every beat it did mark sits at
+     * the true tempo. A device log refused a 124 bpm house exit because the average said 113 and the DSP field 110.
      */
     fun localTempoAgrees(localBpm: Double): Boolean {
-        val refs = listOfNotNull(avgBpm.takeIf { it > 0 }, bpmValue)
+        val refs = listOfNotNull(avgBpm.takeIf { it > 0 }, gridBpm.takeIf { it > 0 }, bpmValue)
         if (refs.isEmpty() || localBpm <= 0) return true
         return refs.any { ref -> listOf(1.0, 2.0, 0.5).any { abs(localBpm / ref / it - 1.0) < LOCAL_TEMPO_TOLERANCE } }
     }
