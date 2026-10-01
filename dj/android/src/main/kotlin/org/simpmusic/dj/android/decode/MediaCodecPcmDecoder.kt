@@ -152,7 +152,11 @@ class MediaCodecPcmDecoder {
                 // track on a Pixel 10 Pro, 2026-09-30); with the pipeline full the output is already waiting.
                 var fed = 0
                 while (!inputDone && fed < MAX_FEED_PER_LOOP) {
-                    val inIdx = codec.dequeueInputBuffer(if (fed == 0) TIMEOUT_US else 0L)
+                    // Never wait for an input slot: with every slot already queued (the normal state once the pipeline is
+                    // full) a 10 ms wait here was paid on EVERY loop turn before the one output below was taken, so the
+                    // decoder ran at one 20 ms Opus packet per ~10 ms = 2x real time, even from a local file (device log
+                    // 2026-10-01: 60 s of audio in 27 s on dj-render, 1.8x on dj-analysis). Waiting belongs on the output.
+                    val inIdx = codec.dequeueInputBuffer(0L)
                     if (inIdx < 0) break
                     val buf = codec.getInputBuffer(inIdx)!!
                     val size = extractor.readSampleData(buf, 0)
