@@ -120,7 +120,7 @@ class TransitionController(
         window.play()
         winEst.reset()
         outEst.reset()
-        align = AlignmentLoop(calibrator).also { it.start(now) }
+        align = AlignmentLoop(calibrator, target = SeekTarget.WINDOW, log = log).also { it.start(now) }
         setPhase(Phase.LOCK_OUT, now)
     }
 
@@ -313,7 +313,7 @@ class TransitionController(
             inEst.reset()
             incomingStartIssued = true
             startIssuedWindowMs = w
-            align = AlignmentLoop(calibrator).also { it.start(now) }
+            align = AlignmentLoop(calibrator, target = SeekTarget.LIVE, log = log).also { it.start(now) }
             setPhase(Phase.LOCK_IN, now)
         }
     }

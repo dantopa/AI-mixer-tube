@@ -153,7 +153,7 @@ class TransitionControllerTest {
         first.run(60_000.0) { first.controller.isFinished }
         assertTrue(first.host.finished)
         assertTrue("start latency estimate moved toward 180: ${cal.startLatencyMs}", cal.startLatencyMs > 60.0)
-        assertTrue("seek bias moved toward the seek latency: ${cal.seekBiasMs}", cal.seekBiasMs > 40.0)
+        assertTrue("seek bias moved toward the seek latency: $cal", maxOf(cal.seekBiasMs, cal.windowSeekBiasMs) > 40.0)
     }
 
     @Test

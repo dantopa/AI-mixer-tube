@@ -25,6 +25,16 @@ class LatencyCalibrator(
     var seekBiasMs: Double = seekBiasMs
         private set
 
+    /**
+     * The same lag for the WINDOW deck (a local WAV), learned separately: it seeks very differently from a live deck
+     * streaming YouTube audio, and one shared estimate was dragged back and forth by the two (a device log showed
+     * 34 -> 197 -> 61 -> 200 ms across consecutive lock-outs and lock-ins, with lock-outs failing at 53-111 ms).
+     */
+    var windowSeekBiasMs: Double = seekBiasMs
+        private set
+
+    fun seekBias(target: SeekTarget): Double = if (target == SeekTarget.WINDOW) windowSeekBiasMs else seekBiasMs
+
     /** [observedLagMs] = how far the deck's position was behind where it should have been right after starting. */
     fun observeStart(observedLagMs: Double) {
         // The lag we saw is (latency - the head start we gave); the true latency is head start + lag.
@@ -32,14 +42,23 @@ class LatencyCalibrator(
     }
 
     /** [residualMs] = follower - reference measured after a seek that used the current bias. */
-    fun observeSeek(residualMs: Double) {
+    fun observeSeek(residualMs: Double, target: SeekTarget = SeekTarget.LIVE) {
         // After a seek by (-error + bias) the new residual is exactly (bias - trueLag), so nearly the whole residual can be
         // corrected at once. A learning rate of 0.5 halved the error per seek, and three seeks were not enough to lock.
-        seekBiasMs = ema(seekBiasMs, seekBiasMs - residualMs, 0.85).coerceIn(-200.0, 800.0)
+        if (target == SeekTarget.WINDOW) {
+            windowSeekBiasMs = ema(windowSeekBiasMs, windowSeekBiasMs - residualMs, 0.85).coerceIn(-200.0, 800.0)
+        } else {
+            seekBiasMs = ema(seekBiasMs, seekBiasMs - residualMs, 0.85).coerceIn(-200.0, 800.0)
+        }
     }
+
+    override fun toString(): String = "startLatency=%.0f ms seekBias live=%.0f window=%.0f ms".format(startLatencyMs, seekBiasMs, windowSeekBiasMs)
 
     private fun ema(old: Double, sample: Double, alpha: Double) = old + alpha * (sample - old)
 }
+
+/** Which kind of deck a corrective seek moves: the pre-rendered window (local WAV) or a live streaming deck. */
+enum class SeekTarget { WINDOW, LIVE }
 
 /**
  * Closed-loop lock of a *follower* deck onto a *reference* deck that carry identical audio.
@@ -59,6 +78,8 @@ class AlignmentLoop(
     private val settleAfterSeekMs: Double = 260.0,
     private val maxSeeks: Int = 3,
     private val minSamples: Int = 6,
+    private val target: SeekTarget = SeekTarget.LIVE,
+    private val log: (String) -> Unit = {},
 ) {
     enum class State { WARMUP, MEASURING, SETTLING, LOCKED, FAILED }
 
@@ -126,7 +147,8 @@ class AlignmentLoop(
                 val median = samples.sorted().let { if (it.size % 2 == 1) it[it.size / 2] else (it[it.size / 2 - 1] + it[it.size / 2]) / 2 }
                 lastErrorMs = median
                 if (firstErrorMs.isNaN()) firstErrorMs = median
-                if (lastSeekWasMine) calibrator.observeSeek(median)
+                if (lastSeekWasMine) calibrator.observeSeek(median, target)
+                log("lock ${target.name.lowercase()}: measured %.1f ms (median of %d) after %d seeks, bias %.0f ms".format(median, samples.size, seeksUsed, calibrator.seekBias(target)))
                 if (abs(median) <= toleranceMs) {
                     state = State.LOCKED
                     return Step.Locked
@@ -139,7 +161,7 @@ class AlignmentLoop(
                 lastSeekWasMine = true
                 state = State.SETTLING
                 phaseStartMs = nowMs
-                return Step.SeekBy(-median + calibrator.seekBiasMs)
+                return Step.SeekBy(-median + calibrator.seekBias(target))
             }
         }
     }
