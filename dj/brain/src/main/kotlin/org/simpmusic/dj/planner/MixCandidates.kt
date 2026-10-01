@@ -27,11 +27,18 @@ internal object MixScoring {
     /** Enough audio left after the exit for the overlap (not absurdly late). */
     const val W_ROOM_OUT = 0.02
     /** Energy continuity between the outgoing exit region and the incoming entry region (broadband), and entry >= exit. */
-    const val W_ENERGY = 0.25
+    const val W_ENERGY = 0.17
     /** Same for the low band (kick / bass presence). */
     const val W_LOW = 0.06
     /** The incoming entry is a phrase start where something happens (intro start, first body, drop), not a breakdown. */
-    const val W_ENTRY_KIND = 0.16
+    const val W_ENTRY_KIND = 0.10
+    /** The incoming track's low band (kick / bass) STARTS at the entry: its base comes in exactly where the outgoing track's base has gone, instead of two basses sounding together. */
+    const val W_BASS_ENTRY = 0.14
+    /** Window (ms) around the entry over which the low band before and after it is compared. */
+    const val BASS_ENTRY_MS = 3_000L
+    /** A low band below this after the entry means the incoming track carries no base there to line up. */
+    const val BASS_ENTRY_MIN = 0.12f
+
     /** Grid level of exit and entry: phrase start > downbeat > beat. */
     const val W_LEVEL = 0.06
     /** Among near-equal candidates leave the incoming track most of its length. */
@@ -74,6 +81,8 @@ internal class EntryCand(
     val energyAfter: Float?,
     val lowAfter: Float?,
     val isBreakdownStart: Boolean,
+    /** 0..1: how completely the incoming low band STARTS here (0 = already there or absent, 1 = silent before, present after). */
+    val bassEntry: Double = 0.0,
 ) {
     val timeMs: Long get() = pick.timeMs
 }
@@ -206,6 +215,9 @@ internal object MixCandidates {
             val after = inc.meanOver(inc.energy, n, n + MixScoring.REGION_MS)
             val before = inc.meanOver(inc.energy, n - MixScoring.REGION_MS, n)
             val lowAfter = inc.meanOver(inc.lowBand, n, n + MixScoring.REGION_MS)
+            val lowNear = inc.meanOver(inc.lowBand, n, n + MixScoring.BASS_ENTRY_MS)
+            val lowPrev = if (n < MixScoring.BASS_ENTRY_MS) 0f else inc.meanOver(inc.lowBand, n - MixScoring.BASS_ENTRY_MS, n) ?: 0f
+            val bassEntry = if (lowNear != null && lowNear >= MixScoring.BASS_ENTRY_MIN) ((lowNear - lowPrev) / lowNear).toDouble().coerceIn(0.0, 1.0) else 0.0
             var breakdownStart = false
             var kind: Double? = null
             inc.sections?.let { secs ->
@@ -230,7 +242,7 @@ internal object MixCandidates {
             else if (n <= inc.firstAudibleMs + tol) 0.9 else 0.5
             val kindScore = kind ?: energyKind
             val roomFraction = ((inc.durationMs - n) / max(1.0, inc.durationMs.toDouble())).coerceIn(0.0, 1.0)
-            list += EntryCand(p, levelScore(p.levelName), kindScore, roomFraction, after, lowAfter, breakdownStart)
+            list += EntryCand(p, levelScore(p.levelName), kindScore, roomFraction, after, lowAfter, breakdownStart, bassEntry)
         }
         return list
     }
@@ -255,7 +267,7 @@ internal object MixCandidates {
         val kind = if (n.isBreakdownStart && e.inBreakdown) 1.0 else n.kindScore
         val level = 0.5 * (e.levelScore + n.levelScore)
         val outroZone = MixScoring.OUTRO_ZONE_PENALTY * max(0.0, (e.playedFraction - MixScoring.OUTRO_ZONE_FROM) / (1.0 - MixScoring.OUTRO_ZONE_FROM)).coerceAtMost(1.0)
-        return -outroZone + MixScoring.W_BASS_DROP * e.bassDrop + MixScoring.W_EXIT_BOUNDARY * e.boundary +
+        return -outroZone + MixScoring.W_BASS_DROP * e.bassDrop + MixScoring.W_BASS_ENTRY * n.bassEntry + MixScoring.W_EXIT_BOUNDARY * e.boundary +
             MixScoring.W_PLAYED * e.playedFraction +
             MixScoring.W_ROOM_OUT * e.roomScore +
             MixScoring.W_ENERGY * energyTerm +

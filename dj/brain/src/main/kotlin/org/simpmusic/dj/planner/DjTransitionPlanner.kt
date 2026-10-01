@@ -204,6 +204,19 @@ class DjTransitionPlanner : TransitionPlanner {
     private fun tempoWhy(c: Ctx) =
         "tempos ${fmt1(c.out.gridBpm)} -> ${fmt1(c.inc.gridBpm)} bpm are beyond the +-${(c.settings.maxTempoBend * 100).toInt()}% bend"
 
+    /**
+     * The decision compares the LOCAL tempo around each candidate exit and entry, not the track-wide averages, so the reason
+     * must show those: "93.8 -> 90.9" printed from the averages looked like a 3 % gap that was refused.
+     */
+    private fun localTempoWhy(c: Ctx, outPeriods: Collection<Double>, inPeriods: Collection<Double>): String {
+        fun range(periods: Collection<Double>): String {
+            val bpm = periods.filter { it > 0 }.map { 60000.0 / it }
+            return if (bpm.isEmpty()) "?" else if (bpm.max() - bpm.min() < 0.5) fmt1(bpm.average()) else "${fmt1(bpm.min())}-${fmt1(bpm.max())}"
+        }
+        return "local tempos at the candidate mix points (outgoing ${range(outPeriods)} bpm, incoming ${range(inPeriods)} bpm; track averages ${fmt1(c.out.gridBpm)} / ${fmt1(c.inc.gridBpm)}) " +
+            "are beyond the +-${(c.settings.maxTempoBend * 100).toInt()}% bend"
+    }
+
     /** Tempos cannot be matched: an echo-out at the end of the outgoing track (never a bare cut). */
     private fun echoAtEnd(c: Ctx, why: String): TransitionPlan {
         val out = c.out
@@ -281,7 +294,7 @@ class DjTransitionPlanner : TransitionPlanner {
             if (lastFail == null) lastFail = a.fail
         }
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
-        val why = if (tries == 0) tempoWhy(c) + " at every candidate mix point" else "no candidate mix point beat-matches (${lastFail ?: "?"})"
+        val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
         var echoTries = 0
         var echoFail: String? = null
         for (cand in all) {

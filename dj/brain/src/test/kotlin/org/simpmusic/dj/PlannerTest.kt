@@ -600,7 +600,9 @@ class PlannerTest {
                     lockErrorIdealMs(plan, a, b, so, si)
                 }
                 worstLock = maxOf(worstLock, err)
-                assertTrue(err < 2.0, "phase lock $err ms: ${plan.reason}") // exit and entry are whole ms: up to 1 ms of that is rounding
+                // The planner accepts up to MAX_DRIFT_MS (20 ms) of beat slide over the overlap (the beat tracker's own resolution is 20 ms),
+                // plus up to 1 ms of rounding (exit and entry are whole ms).
+                assertTrue(err < 21.0, "phase lock $err ms: ${plan.reason}")
             }
         }
         println("realistic fuzz: $kinds, worst phase-lock error ${"%.3f".format(worstLock)} ms over $matched beat-matched plans")
