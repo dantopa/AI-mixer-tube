@@ -108,6 +108,12 @@ class DjAnalysisScheduler(
     quick: TrackAnalyzer? = null,
     /** Called after an analysis is stored (caches that hold the previous one must forget it). */
     private val onStored: (String) -> Unit = {},
+    /**
+     * Called on the worker thread as each job starts. Production raises the thread to normal priority for NOW_PLAYING /
+     * NEXT_UP (someone is waiting for that analysis) and drops it to background for the library warm-up: a thread left at
+     * THREAD_PRIORITY_BACKGROUND is confined to the little cores with a sliver of CPU while the app is in use.
+     */
+    private val onJobStart: (AnalysisPriority) -> Unit = {},
 ) : TrackAnalysisRepository {
     private val quick: TrackAnalyzer? = quick?.takeIf { it.id != analyzer.id }
 
@@ -381,6 +387,10 @@ class DjAnalysisScheduler(
         val id = entry.videoId
         val t0 = clock()
         val network = policy.mayUseNetwork(entry.priority)
+        try {
+            onJobStart(entry.priority)
+        } catch (_: Throwable) {
+        }
         DjLog.i(TAG, "start $id ${entry.priority} attempt=${entry.failures + 1} network=${if (network) "allowed" else "forbidden"} | ${policy.describe()}")
         try {
             val useAnalyzer = analyzerFor(entry.priority)

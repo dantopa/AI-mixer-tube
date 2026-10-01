@@ -175,7 +175,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val roughOut = out.medianIbiIn(out.audibleEndMs - 60_000L, out.audibleEndMs).takeIf { it > 0 } ?: out.medianBeatMs
         val roughIn = inc.medianIbiIn(inc.firstAudibleMs, inc.firstAudibleMs + 60_000L).takeIf { it > 0 } ?: inc.medianBeatMs
         var tempo = chooseTempo(roughOut, roughIn, settings.maxTempoBend.toDouble())
-            ?: return echoAtEnd(c, tempoWhy(c))
+            ?: return echoAtEnd(c, localTempoWhy(c, listOf(roughOut), listOf(roughIn)))
         // The overlap window is what gets checked for a steady beat, so a long overlap sees more of the track (a drumless
         // break, a tempo change) than a short one. When the window is irregular the overlap is halved before the mix is given up.
         var desiredUnits = c.requestedUnits
@@ -191,7 +191,7 @@ class DjTransitionPlanner : TransitionPlanner {
                 continue
             }
             loc.fail?.let { return simplePlan(out, inc, c.fromId, c.toId, settings, it + if (desiredUnits < c.requestedUnits) " (also tried overlaps down to $desiredUnits)" else "", c.earliest) }
-            val t2 = loc.tempo ?: return echoAtEnd(c, tempoWhy(c))
+            val t2 = loc.tempo ?: return echoAtEnd(c, localTempoWhy(c, listOf(roughOut), listOf(roughIn)))
             pass++
             val settled = abs(t2.rateOut / tempo.rateOut - 1.0) < 0.02 && abs(t2.rateIn / tempo.rateIn - 1.0) < 0.02
             tempo = t2

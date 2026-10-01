@@ -135,6 +135,8 @@ class MediaCodecPcmDecoder {
 
         var stalled = 0
         var lastProgressNs = System.nanoTime()
+        val tPump = System.nanoTime()
+        var nextReportS = PROGRESS_EVERY_S
 
         val emit: (FloatArray, Int) -> Unit = { buf, n ->
             stats.sinkSamples += n
@@ -195,6 +197,12 @@ class MediaCodecPcmDecoder {
                         val bytesPerSample = if (floatPcm) 4 else 2
                         val frames = info.size / (bytesPerSample * inCh)
                         stats.decodedFrames += frames
+                        val audioS = stats.decodedFrames / inRate
+                        if (audioS >= nextReportS) {
+                            val ms = (System.nanoTime() - tPump) / 1_000_000
+                            DjLog.i(TAG, "decode progress: ${audioS}s of audio in $ms ms (${"%.1f".format(audioS * 1000.0 / maxOf(1L, ms))}x real time) on ${Thread.currentThread().name} prio=${android.os.Process.getThreadPriority(android.os.Process.myTid())}")
+                            nextReportS += PROGRESS_EVERY_S
+                        }
                         if (scratchIn.size < frames * inCh) scratchIn = FloatArray(frames * inCh)
                         if (floatPcm) {
                             out.asFloatBuffer().get(scratchIn, 0, frames * inCh)
@@ -264,6 +272,7 @@ class MediaCodecPcmDecoder {
 
         /** Input packets queued per loop pass (the codec only accepts as many as it has free slots). */
         const val MAX_FEED_PER_LOOP = 8
+        const val PROGRESS_EVERY_S = 30L
         const val PAD_US = 200_000L
         const val STALL_LIMIT = 300 // * TIMEOUT_US = 3 s
         const val NO_PROGRESS_NS = 30_000_000_000L

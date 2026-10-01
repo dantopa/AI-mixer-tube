@@ -71,13 +71,13 @@ private val ANALYSIS_DECODER = named("djAnalysisDecoder")
 private val WINDOW_DECODER = named("djWindowDecoder")
 
 /** A single daemon thread at background priority: DJ work must never compete with the playback threads. */
-private fun backgroundDispatcher(name: String): CoroutineDispatcher =
+private fun backgroundDispatcher(name: String, priority: Int = Process.THREAD_PRIORITY_BACKGROUND): CoroutineDispatcher =
     Executors
         .newSingleThreadExecutor { r ->
             Thread(
                 {
                     try {
-                        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                        Process.setThreadPriority(priority)
                     } catch (_: Throwable) {
                     }
                     r.run()
@@ -108,7 +108,7 @@ val djModule =
             get<DjSettingsRepository>().settings.stateIn(get<CoroutineScope>(named(SERVICE_SCOPE)), SharingStarted.Eagerly, DjSettings())
         }
         single<CoroutineDispatcher>(ANALYSIS_DISPATCHER) { backgroundDispatcher("dj-analysis") }
-        single<CoroutineDispatcher>(RENDER_DISPATCHER) { backgroundDispatcher("dj-render") }
+        single<CoroutineDispatcher>(RENDER_DISPATCHER) { backgroundDispatcher("dj-render", Process.THREAD_PRIORITY_DEFAULT) }
 
         single { AnalysisStore(File(androidContext().filesDir, "dj/analysis"), keepOtherAnalyzers = setOf(org.simpmusic.dj.analysis.DspTrackAnalyzer.ID)) }
         single<DeviceConditions> { AndroidDeviceConditions(androidContext()) }
@@ -137,6 +137,10 @@ val djModule =
                 worker = get(ANALYSIS_DISPATCHER),
                 quick = org.simpmusic.dj.android.analysis.TimedDsp(org.simpmusic.dj.analysis.DspTrackAnalyzer()),
                 onStored = { id -> getOrNull<AnalysisPool>()?.invalidate(id) },
+                onJobStart = { priority ->
+                    // the playing / next track's analysis is what a mix waits for: normal priority. The library warm-up stays in the background.
+                    Process.setThreadPriority(if (priority == AnalysisPriority.BACKGROUND) Process.THREAD_PRIORITY_BACKGROUND else Process.THREAD_PRIORITY_DEFAULT)
+                },
             )
         }
 
