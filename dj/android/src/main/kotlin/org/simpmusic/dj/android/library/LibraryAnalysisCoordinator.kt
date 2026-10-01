@@ -38,7 +38,7 @@ class SchedulerBackgroundPort(
 ) : BackgroundAnalysisPort {
     override val available: Boolean get() = scheduler.state.value.analyzerAvailable
 
-    override suspend fun isAnalysed(videoId: String): Boolean = store.has(videoId, analyzerId)
+    override suspend fun isAnalysed(videoId: String): Boolean = store.has(videoId) // a quick (DSP-only) analysis is enough to classify a library track
 
     override suspend fun analyse(videoId: String): AnalysisOutcome = scheduler.analyseInBackground(videoId)
 
@@ -97,7 +97,7 @@ class LibraryAnalysisPolicy(
     }
 
     companion object {
-        const val MIN_BATTERY_PERCENT = 50
+        const val MIN_BATTERY_PERCENT = 30
     }
 }
 

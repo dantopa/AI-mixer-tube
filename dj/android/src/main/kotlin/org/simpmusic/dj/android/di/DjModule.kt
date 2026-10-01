@@ -110,7 +110,7 @@ val djModule =
         single<CoroutineDispatcher>(ANALYSIS_DISPATCHER) { backgroundDispatcher("dj-analysis") }
         single<CoroutineDispatcher>(RENDER_DISPATCHER) { backgroundDispatcher("dj-render") }
 
-        single { AnalysisStore(File(androidContext().filesDir, "dj/analysis")) }
+        single { AnalysisStore(File(androidContext().filesDir, "dj/analysis"), keepOtherAnalyzers = setOf(org.simpmusic.dj.analysis.DspTrackAnalyzer.ID)) }
         single<DeviceConditions> { AndroidDeviceConditions(androidContext()) }
 
         single<TrackAnalyzer> { get<DjLogInstaller>(); DjAnalyzerFactory.create(androidContext()) }
@@ -135,6 +135,8 @@ val djModule =
                 policy = AnalysisPolicy(get()) { analyzeOnMetered.value },
                 scope = CoroutineScope(SupervisorJob() + get<CoroutineDispatcher>(ANALYSIS_DISPATCHER)),
                 worker = get(ANALYSIS_DISPATCHER),
+                quick = org.simpmusic.dj.android.analysis.TimedDsp(org.simpmusic.dj.analysis.DspTrackAnalyzer()),
+                onStored = { id -> getOrNull<AnalysisPool>()?.invalidate(id) },
             )
         }
 
@@ -168,8 +170,8 @@ val djModule =
         single<DjPlayerPort> { HandlerPlayerPort({ get<MediaPlayerHandler>() }, get()) }
         single {
             val store = get<AnalysisStore>()
-            val analyzerId = get<TrackAnalyzer>().id
-            AnalysisPool(get(), AnalysisPool.storeLookup { id -> store.get(id, analyzerId) })
+            // any analysis will do for ranking the library: the quick one classifies, the full one refines it later
+            AnalysisPool(get(), AnalysisPool.storeLookup { id -> store.get(id) })
         }
         single {
             LibraryAnalysisCoordinator(

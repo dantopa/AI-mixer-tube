@@ -23,6 +23,7 @@ import org.simpmusic.dj.android.decode.AudioUnavailableException
 import org.simpmusic.dj.android.decode.CancelSignal
 import org.simpmusic.dj.android.decode.TrackDecoder
 import org.simpmusic.dj.android.render.StereoPcm
+import org.simpmusic.dj.android.scheduler.AnalysisOutcome
 import org.simpmusic.dj.android.scheduler.AnalysisPolicy
 import org.simpmusic.dj.android.scheduler.AnalyzerUnavailableException
 import org.simpmusic.dj.android.scheduler.DeviceConditions
@@ -100,9 +101,9 @@ class SchedulerTest {
         var meteredAllowed: Boolean = false,
     )
 
-    private fun TestScope.rig(analyzer: TrackAnalyzer = FakeAnalyzer(), conditions: Conditions = Conditions()): Rig {
+    private fun TestScope.rig(analyzer: TrackAnalyzer = FakeAnalyzer(), conditions: Conditions = Conditions(), quick: TrackAnalyzer? = null): Rig {
         val decoder = FakeDecoder()
-        val store = AnalysisStore(dir)
+        val store = AnalysisStore(dir, keepOtherAnalyzers = setOfNotNull(quick?.id))
         var allowed = false
         val policy = AnalysisPolicy(conditions) { allowed }
         // NOT backgroundScope: advanceUntilIdle() deliberately ignores tasks dispatched from it.
@@ -115,6 +116,7 @@ class SchedulerTest {
                 io = worker,
                 clock = { testScheduler.currentTime },
                 blockedRetryMs = 30_000L,
+                quick = quick,
             )
         return Rig(this, decoder, analyzer, conditions, scheduler, store).also { r -> r.meteredAllowed = allowed }
     }
@@ -132,6 +134,26 @@ class SchedulerTest {
             r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
             advanceUntilIdle()
             assertEquals(1, r.decoder.decoded.size)
+        }
+
+    @Test
+    fun libraryWarmUpUsesTheQuickAnalyzerAndPlayingTheTrackUpgradesIt() =
+        runTest {
+            val r = rig(quick = FakeAnalyzer("quick-1"))
+            assertEquals(AnalysisOutcome.Done("aaa"), r.scheduler.analyseInBackground("aaa"))
+            assertEquals("quick-1", r.store.get("aaa")!!.analyzerId)
+            // A full read does not see it, and does not throw it away either.
+            assertEquals(null, r.scheduler.get("aaa"))
+            assertNotNull(r.store.get("aaa"))
+            // The library is not analysed twice by the warm-up...
+            r.scheduler.request("aaa", AnalysisPriority.BACKGROUND)
+            advanceUntilIdle()
+            assertEquals(1, r.decoder.decoded.size)
+            // ...but the track that is about to play gets the full analysis.
+            r.scheduler.request("aaa", AnalysisPriority.NEXT_UP)
+            advanceUntilIdle()
+            assertEquals(2, r.decoder.decoded.size)
+            assertEquals("fake-1", r.scheduler.get("aaa")!!.analyzerId)
         }
 
     @Test

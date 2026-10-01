@@ -167,13 +167,13 @@ class LibraryAnalysisCoordinatorTest {
     @Test
     fun waitsForPowerOrHalfABatteryAndNeverRunsInBatterySaver() =
         runTest {
-            val r = rig(listOf(cand("a", CandidateSource.LIKED)), conditions = Conditions(batteryPercent = 49, isCharging = false))
+            val r = rig(listOf(cand("a", CandidateSource.LIKED)), conditions = Conditions(batteryPercent = 29, isCharging = false))
             r.coordinator.start()
             advanceTimeBy(5_000)
             assertTrue(r.port.order.isEmpty())
             assertEquals(AnalysisPause.LOW_BATTERY, r.coordinator.state.value.pause)
 
-            r.conditions.batteryPercent = 50
+            r.conditions.batteryPercent = 30
             r.conditions.isBatterySaver = true
             advanceTimeBy(31_000)
             assertTrue("battery saver blocks even with enough charge", r.port.order.isEmpty())

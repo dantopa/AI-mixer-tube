@@ -25,6 +25,11 @@ class AnalysisStore(
     private val dir: File,
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+    /**
+     * Analyzer ids that are NOT stale although they are not the one a caller asks for: the quick (DSP-only) analyses of the
+     * library. A read for the full analyzer returns null for them but must not delete them.
+     */
+    private val keepOtherAnalyzers: Set<String> = emptySet(),
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -54,6 +59,11 @@ class AnalysisStore(
             } catch (e: IOException) {
                 return null
             }
+        if (analysis.videoId == videoId && analysis.schemaVersion == TrackAnalysis.SCHEMA_VERSION &&
+            analyzerId != null && analysis.analyzerId != analyzerId && analysis.analyzerId in keepOtherAnalyzers
+        ) {
+            return null // a tolerated analysis by another analyzer: not what was asked for, but not stale either
+        }
         if (analysis.videoId != videoId ||
             analysis.schemaVersion != TrackAnalysis.SCHEMA_VERSION ||
             (analyzerId != null && analysis.analyzerId != analyzerId)

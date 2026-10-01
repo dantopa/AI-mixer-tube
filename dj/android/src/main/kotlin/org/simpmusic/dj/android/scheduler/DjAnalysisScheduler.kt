@@ -100,7 +100,24 @@ class DjAnalysisScheduler(
     private val clock: () -> Long = System::currentTimeMillis,
     private val blockedRetryMs: Long = 30_000L,
     private val failureMemoryMs: Long = 10 * 60_000L,
+    /**
+     * A cheap analyzer (DSP only: tempo, key, energy) used for BACKGROUND library warm-up, so a whole library is classified in
+     * minutes instead of an hour. The full [analyzer] later upgrades a track on demand (NOW_PLAYING / NEXT_UP). Ignored when it
+     * is the same analyzer as [analyzer] (no neural model installed).
+     */
+    quick: TrackAnalyzer? = null,
+    /** Called after an analysis is stored (caches that hold the previous one must forget it). */
+    private val onStored: (String) -> Unit = {},
 ) : TrackAnalysisRepository {
+    private val quick: TrackAnalyzer? = quick?.takeIf { it.id != analyzer.id }
+
+    /** Analyzer for work at [priority]: the quick one for the library warm-up when there is one. */
+    private fun analyzerFor(priority: AnalysisPriority): TrackAnalyzer = if (priority == AnalysisPriority.BACKGROUND) quick ?: analyzer else analyzer
+
+    /** True when [videoId] already has what [priority] needs: BACKGROUND accepts a quick analysis, the others need the full one. */
+    private fun fresh(videoId: String, priority: AnalysisPriority): Boolean =
+        if (priority == AnalysisPriority.BACKGROUND && quick != null) store.has(videoId) else store.has(videoId, analyzer.id)
+
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
 
     private class Failure(val message: String?, val needsNetwork: Boolean)
@@ -149,7 +166,7 @@ class DjAnalysisScheduler(
             DjLog.w(TAG, "request $videoId $priority ignored: no analyzer available")
             return
         }
-        val fresh = withContext(io) { store.has(videoId, analyzer.id) }
+        val fresh = withContext(io) { fresh(videoId, priority) }
         if (fresh) {
             DjLog.d(TAG, "request $videoId $priority: already analysed (fresh in store)")
             return
@@ -229,7 +246,7 @@ class DjAnalysisScheduler(
      */
     suspend fun analyseInBackground(videoId: String, timeoutMs: Long = 10 * 60_000L): AnalysisOutcome {
         if (analyzer is UnavailableAnalyzer || !_state.value.analyzerAvailable) return AnalysisOutcome.Unavailable(videoId)
-        if (withContext(io) { store.has(videoId, analyzer.id) }) return AnalysisOutcome.Done(videoId)
+        if (withContext(io) { fresh(videoId, AnalysisPriority.BACKGROUND) }) return AnalysisOutcome.Done(videoId)
         synchronized(lock) {
             val until = failedUntil[videoId]
             if (until != null && clock() < until) return AnalysisOutcome.Failed(videoId, "failed recently")
@@ -366,7 +383,8 @@ class DjAnalysisScheduler(
         val network = policy.mayUseNetwork(entry.priority)
         DjLog.i(TAG, "start $id ${entry.priority} attempt=${entry.failures + 1} network=${if (network) "allowed" else "forbidden"} | ${policy.describe()}")
         try {
-            if (store.has(id, analyzer.id)) {
+            val useAnalyzer = analyzerFor(entry.priority)
+            if (fresh(id, entry.priority)) {
                 DjLog.d(TAG, "$id already in store, nothing to do")
                 outcomes.tryEmit(AnalysisOutcome.Done(id))
                 return
@@ -380,9 +398,10 @@ class DjAnalysisScheduler(
                 return
             }
             val tAnalyse = clock()
-            val analysis = analyzer.analyze(id, pcm)
+            val analysis = useAnalyzer.analyze(id, pcm)
             val tStore = clock()
             store.put(analysis)
+            onStored(id)
             synchronized(lock) {
                 lastFailure.remove(id)
                 failedUntil.remove(id)
