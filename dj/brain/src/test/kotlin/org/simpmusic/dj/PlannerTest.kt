@@ -78,34 +78,33 @@ class PlannerTest {
     }
 
     @Test
-    fun aTempoRampInsideTheOverlapShortensItOrFallsBack() {
+    fun aTempoRampInsideTheOverlapIsFollowedNotRefused() {
         val steady = customAnalysis("b", 200, 120f) { it * 500.0 + 200 }
-        // outgoing slows down 12% over its last 64 beats: constant rates cannot follow that
+        // outgoing slows down 12% over its last 64 beats: constant rates cannot follow that; following the tempo curve can
         val drifting = customAnalysis("a", 200, 120f) { i -> if (i < 130) i * 500.0 else 130 * 500.0 + (i - 130) * 500.0 + 0.5 * 500.0 * 0.12 / 70.0 * (i - 130.0) * (i - 130.0) }
         val plan = planner.plan(drifting, steady, settings)
         println("drift: ${plan.kind} ${plan.reason}")
-        val bar = 2000.0
-        assertTrue(plan.kind == PlanKind.SIMPLE_CROSSFADE || plan.overlapMs / bar < 8.0)
-        assertTrue(plan.reason.contains("drift") || plan.reason.contains("irregular") || plan.kind == PlanKind.BEAT_MATCHED)
-        if (plan.kind == PlanKind.BEAT_MATCHED) {
-            // whatever it kept must hold the 8 ms budget
-            val co = DeckClock.outgoing(plan)
-            val ci = DeckClock.incoming(plan)
-            val ob = drifting.beatTimesMs!!.value
-            val ib = steady.beatTimesMs!!.value
-            val i0 = ob.indices.minBy { abs(ob[it] - plan.exitPointMs) }
-            val j0 = ib.indices.minBy { abs(ib[it] - plan.entryPointMs) }
-            var worst = 0.0
-            var k = 0
-            while (i0 + k < ob.size && j0 + k < ib.size) {
-                val t = co.wallAt(ob[i0 + k].toDouble())
-                if (t > plan.overlapMs) break
-                worst = maxOf(worst, abs(t - ci.wallAt(ib[j0 + k].toDouble())))
-                k++
-            }
-            println("kept overlap worst slide: $worst ms")
-            assertTrue(worst < 10.0)
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind, plan.reason)
+        // measured on the TRUE beats (not the fitted curves): every beat pair of the overlap lands together
+        val co = DeckClock.outgoing(plan)
+        val ci = DeckClock.incoming(plan)
+        val ob = drifting.beatTimesMs!!.value
+        val ib = steady.beatTimesMs!!.value
+        val i0 = ob.indices.minBy { abs(ob[it] - plan.exitPointMs) }
+        val j0 = ib.indices.minBy { abs(ib[it] - plan.entryPointMs) }
+        var worst = 0.0
+        var k = 0
+        while (i0 + k < ob.size && j0 + k < ib.size) {
+            val t = co.wallAt(ob[i0 + k].toDouble())
+            if (t > plan.overlapMs) break
+            worst = maxOf(worst, abs(t - ci.wallAt(ib[j0 + k].toDouble())))
+            k++
         }
+        println("overlap ${plan.overlapMs} ms over $k beats, worst slide: $worst ms")
+        assertTrue(k >= 8, "too short an overlap kept: $k beats")
+        assertTrue(worst < 3.0, "beats slide $worst ms")
+        // the incoming deck is back at native speed once settled (the device can only hand over to plain audio)
+        assertEquals(1f, plan.incoming.rate.valueAt(plan.settleMs.toDouble()), 0.003f)
         // a grid that wanders far more than that is refused with a clear reason
         val wild = customAnalysis("w", 200, 120f) { i -> i * 500.0 + 120.0 * kotlin.math.sin(i * 0.9) + (if (i % 3 == 0) 90.0 else 0.0) }
         val p2 = planner.plan(wild, steady, settings)

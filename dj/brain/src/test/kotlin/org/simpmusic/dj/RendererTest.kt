@@ -96,6 +96,23 @@ class RendererTest {
         }
     }
 
+    @Test
+    fun aTempoFollowingPlanIsFollowedByTheRenderedAudio() {
+        // Same pair as PlannerTest's drift case: the outgoing slows 12 % over its last 70 beats (a live band,
+        // a rubato outro). A constant rate slides >100 ms; the warped lanes must keep the clicks together.
+        val ra = SyntheticTracks.clickTrackAt(200, 120f, sampleRate = sr) { i ->
+            if (i < 130) i * 500.0 else 130 * 500.0 + (i - 130) * 500.0 + 0.5 * 500.0 * 0.12 / 70.0 * (i - 130.0) * (i - 130.0)
+        }
+        val rb = SyntheticTracks.clickTrackAt(200, 120f, sampleRate = sr) { i -> i * 500.0 + 200 }
+        val a = FakeAnalysis.fromTruth(ra.truth, "a", withSections = false)
+        val b = FakeAnalysis.fromTruth(rb.truth, "b", withSections = false)
+        val plan = planner.plan(a, b, settings)
+        println("tempo-following render: ${plan.kind} ${plan.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind, plan.reason)
+        assertTrue(plan.reason.contains("tempo-following"), plan.reason)
+        checkAlignment("warp", plan, ra, rb, tolMs = 3.0)
+    }
+
     private data class Quad(val a: Float, val b: Float, val so: Int, val si: Int)
 
     @Test

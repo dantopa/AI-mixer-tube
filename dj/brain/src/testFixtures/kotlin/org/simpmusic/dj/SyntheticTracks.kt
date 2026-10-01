@@ -170,7 +170,30 @@ object SyntheticTracks {
         return Rendered(PcmAudio(out, sampleRate), truth, Spec(bpm, truth.key, sampleRate = sampleRate, firstBeatMs = firstBeatMs, videoId = "click-${bpm.toInt()}"))
     }
 
-    private fun midiFreq(m: Int) = 440.0 * 2.0.pow((m - 69) / 12.0)
+    /** Click track whose beat i sits at [beatAt] (ms), for tempo curves a constant-bpm [clickTrack] cannot express. */
+    fun clickTrackAt(beats: Int, nominalBpm: Float, beatsPerBar: Int = 4, sampleRate: Int = 44100, tailMs: Int = 1000, beatAt: (Int) -> Double): Rendered {
+        val durationMs = beatAt(beats - 1).toLong() + tailMs
+        val out = FloatArray((durationMs * sampleRate / 1000).toInt())
+        val times = ArrayList<Int>()
+        val downs = ArrayList<Int>()
+        for (i in 0 until beats) {
+            val t = beatAt(i)
+            times += Math.round(t).toInt()
+            val down = i % beatsPerBar == 0
+            if (down) downs += i
+            val f = if (down) 1500.0 else 1000.0
+            val start = Math.round(t * sampleRate / 1000).toInt()
+            val len = (0.012 * sampleRate).toInt()
+            for (k in 0 until len) {
+                if (start + k >= out.size) break
+                out[start + k] += (sin(2 * PI * f * k / sampleRate) * exp(-k / (0.003 * sampleRate)) * 0.9).toFloat()
+            }
+        }
+        val truth = Truth(nominalBpm, MusicalKey(0, Mode.MAJOR), times, downs, emptyList(), durationMs)
+        return Rendered(PcmAudio(out, sampleRate), truth, Spec(nominalBpm, truth.key, sampleRate = sampleRate, videoId = "clickat-${nominalBpm.toInt()}"))
+    }
+
+    private fun midiFreq(m: Int) =440.0 * 2.0.pow((m - 69) / 12.0)
 
     private fun addNote(out: FloatArray, sr: Int, startMs: Double, lenMs: Double, freq: Double, gain: Float, harmonics: Int) {
         val s = (startMs * sr / 1000).toInt()

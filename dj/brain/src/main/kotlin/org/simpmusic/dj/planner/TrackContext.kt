@@ -23,6 +23,12 @@ internal class BeatFit(val a: Double, val p: Double, val rms: Double, val points
 internal class LocalGrid(val i0: Int, val n: Int, val c0: Double, val c1: Double, val c2: Double, val noiseRms: Double, val medianIbi: Double) {
     fun timeAt(i: Int): Double { val x = (i - i0).toDouble(); return c0 + c1 * x + c2 * x * x }
 
+    /** The fitted curve at a fractional beat index. */
+    fun timeAtD(i: Double): Double { val x = i - i0; return c0 + c1 * x + c2 * x * x }
+
+    /** Local beat period (ms per beat) of the fitted curve at a fractional beat index: its derivative. */
+    fun slopeAt(i: Double): Double = c1 + 2.0 * c2 * (i - i0)
+
     /** Mean beat period over beats [a, b] (ms), from the curve. */
     fun meanPeriod(a: Int, b: Int): Double = (timeAt(b) - timeAt(a)) / max(1, b - a)
 

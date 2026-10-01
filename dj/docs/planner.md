@@ -110,6 +110,12 @@ always one candidate, so it stays reachable.
   the classic AT_END logic (which also honours `earliestExitMs`), and finally a SIMPLE_CROSSFADE whose reason says why.
   A crossfade whose natural start is before `earliestExitMs` is shortened to what is left of the track.
 * **No trusted beat grid on either track** (or one below `minConfidence`) is still a SIMPLE_CROSSFADE, never an echo.
+* **Tempo-following** (2026-10-01): when one constant rate per deck would let the beats slide more than 4 ms over the
+  overlap, the rate lanes follow each deck's local grid instead (`warpFor`): the quadratic `LocalGrid` fit makes the
+  source position a quadratic of the beat index, so the rate that keeps one lattice step per wall beat is a LINEAR ramp
+  over the overlap. Both ends must sit inside the bend; otherwise the old path (shorten the overlap until the drift fits
+  `MAX_DRIFT_MS`, or give up) runs. The incoming still ramps back to 1.0 after the overlap. Verified on synthetic
+  click tracks only (plan 0.76 ms, rendered audio 0.61 ms, vs 119 ms with a constant rate).
 
 ### Echo-out (`PlanKind.ECHO_OUT`)
 

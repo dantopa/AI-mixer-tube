@@ -411,11 +411,33 @@ class DjTransitionPlanner : TransitionPlanner {
         }
         val unitsBeforeDrift = units
         var drift = lockError(units)
-        while (drift > MAX_DRIFT_MS && units > minUnits) { units--; drift = lockError(units) }
-        if (drift > MAX_DRIFT_MS) {
-            return Attempt.fail("tempo drifts: beats of the two tracks slide ${fmt1(drift)} ms apart even over a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap")
+        // ---- tempo-following: when a constant rate cannot hold the two grids together (a band that speeds up or slows down),
+        // each deck follows its own fitted tempo curve instead. The fit is quadratic in the beat index, so the source position
+        // is quadratic in wall time and the rate that pins it to one constant mix grid is a LINEAR ramp over the overlap:
+        // exactly representable by the rate lane, and integrated exactly by DeckClock, the renderer and the device timeline.
+        // It follows the curve, not each detected beat, so detector jitter is not turned into tempo flutter.
+        var warp: Warp? = null
+        if (drift > WARP_FROM_DRIFT_MS) {
+            var u = units
+            while (u >= minUnits) {
+                val wp = warpFor(u * unit, tempo2, localOut, localIn, iOut, iIn, settings.maxTempoBend.toDouble())
+                if (wp != null) { warp = wp; break }
+                u--
+            }
+            if (warp != null) {
+                val shortened = (warp.overlapMs / unit).roundToLong().toInt()
+                if (shortened < units) notes += "overlap shortened from $units to $shortened to keep the tempo-following within the bend"
+                units = shortened
+                notes += "tempo-following (a constant rate would slide ${fmt1(drift)} ms): out x${fmt3(warp.out0)}->${fmt3(warp.out1)}, in x${fmt3(warp.in0)}->${fmt3(warp.in1)}"
+            }
         }
-        if (units < unitsBeforeDrift) notes += "overlap shortened from $unitsBeforeDrift to $units because the local tempo drifts"
+        if (warp == null) {
+            while (drift > MAX_DRIFT_MS && units > minUnits) { units--; drift = lockError(units) }
+            if (drift > MAX_DRIFT_MS) {
+                return Attempt.fail("tempo drifts: beats of the two tracks slide ${fmt1(drift)} ms apart even over a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap, and following the tempo curves needs more than the +-${(settings.maxTempoBend * 100).toInt()}% bend")
+            }
+            if (units < unitsBeforeDrift) notes += "overlap shortened from $unitsBeforeDrift to $units because the local tempo drifts"
+        }
         val overlapMs = (units * unit).roundToLong()
 
         if (conf < settings.minConfidence) {
@@ -423,8 +445,12 @@ class DjTransitionPlanner : TransitionPlanner {
         }
 
         // ---- ramps (pre-roll on the outgoing deck, return-to-native on the incoming one) ----
-        val bendOut = abs(rateOut - 1.0)
-        val bendIn = abs(rateIn - 1.0)
+        // With tempo-following the outgoing pre-roll ramps to the rate at T0 and the incoming deck returns from its rate at
+        // the end of the overlap; the bends that size the ramps are the larger of each deck's two ends.
+        val rateOutAtT0 = warp?.out0 ?: rateOut
+        val rateInAtEnd = warp?.in1 ?: rateIn
+        val bendOut = if (warp != null) max(abs(warp.out0 - 1.0), abs(warp.out1 - 1.0)) else abs(rateOut - 1.0)
+        val bendIn = if (warp != null) max(abs(warp.in0 - 1.0), abs(warp.in1 - 1.0)) else abs(rateIn - 1.0)
         val rampBeats = when {
             max(bendOut, bendIn) > 0.05 -> 16
             max(bendOut, bendIn) > 0.02 -> 12
@@ -434,13 +460,14 @@ class DjTransitionPlanner : TransitionPlanner {
         val inBeatWall = w / tempo2.strideIn
         // the ramp must fit into the audio before the exit point (the deck plays ~rate during it)
         val beforeRoom = (exitMs - 250L).coerceAtLeast(0L)
-        val rampOutMs = min(rampBeats * outBeatWall, beforeRoom / ((1.0 + rateOut) / 2.0)).let { floor(it).toLong() }
+        val rampOutMs = min(rampBeats * outBeatWall, beforeRoom / ((1.0 + rateOutAtT0) / 2.0)).let { floor(it).toLong() }
         val minRamp = (4 * outBeatWall).toLong()
         if (rampOutMs < minRamp && (bendOut > 1e-4 || shiftOut != 0)) {
             return Attempt.fail("not enough audio before the exit point for the tempo pre-roll")
         }
-        val afterRoom = (inc.durationMs - entryMs - 250L - overlapMs * rateIn).coerceAtLeast(0.0)
-        val rampBackMs = floor(min(rampBeats * inBeatWall, afterRoom / max(rateIn, 0.5))).toLong().coerceAtLeast(0L)
+        val inConsumed = if (warp != null) warp.inSourceMs else overlapMs * rateIn
+        val afterRoom = (inc.durationMs - entryMs - 250L - inConsumed).coerceAtLeast(0.0)
+        val rampBackMs = floor(min(rampBeats * inBeatWall, afterRoom / max(rateInAtEnd, 0.5))).toLong().coerceAtLeast(0L)
 
         // ---- gain matching (attenuate the louder deck only: never boosts, so never clips) ----
         var gainOut = 1.0
@@ -453,8 +480,8 @@ class DjTransitionPlanner : TransitionPlanner {
         }
 
         // ---- bass swap / filters ----
-        val lowOut = out.meanOver(out.lowBand, exitMs, exitMs + (overlapMs * rateOut).toLong())
-        val lowIn = inc.meanOver(inc.lowBand, entryMs, entryMs + (overlapMs * rateIn).toLong())
+        val lowOut = out.meanOver(out.lowBand, exitMs, exitMs + (warp?.outSourceMs ?: (overlapMs * rateOut)).toLong())
+        val lowIn = inc.meanOver(inc.lowBand, entryMs, entryMs + inConsumed.toLong())
         val bassWorth = (lowOut == null || lowIn == null) || (lowOut > BASS_WORTH && lowIn > BASS_WORTH)
         val bassSwap = settings.bassSwap && bassWorth && overlapMs >= 2 * lattice * 2
         val swapWidth = max(200L, min(lattice.toLong(), overlapMs / 4))
@@ -462,12 +489,30 @@ class DjTransitionPlanner : TransitionPlanner {
         val swapStart = (mid - swapWidth / 2).coerceAtLeast(0L)
         val swapEnd = swapStart + swapWidth
 
-        val outRate = if (bendOut > RATE_EPS) ParamCurve(listOf(Keyframe(-rampOutMs, 1f), Keyframe(0, rateOut.toFloat(), Ease.SMOOTHSTEP))) else ParamCurve.constant(1f)
-        val inRate = if (bendIn > RATE_EPS) {
-            val keys = arrayListOf(Keyframe(0, rateIn.toFloat()), Keyframe(overlapMs, rateIn.toFloat()))
-            if (rampBackMs > 0) keys += Keyframe(overlapMs + rampBackMs, 1f, Ease.SMOOTHSTEP)
-            ParamCurve(keys)
-        } else ParamCurve.constant(1f)
+        val outRate = when {
+            warp != null -> {
+                val keys = arrayListOf<Keyframe>()
+                if (rampOutMs > 0) keys += Keyframe(-rampOutMs, 1f)
+                keys += Keyframe(0, warp.out0.toFloat(), Ease.SMOOTHSTEP)
+                keys += Keyframe(overlapMs, warp.out1.toFloat(), Ease.LINEAR)
+                ParamCurve(keys)
+            }
+            bendOut > RATE_EPS -> ParamCurve(listOf(Keyframe(-rampOutMs, 1f), Keyframe(0, rateOut.toFloat(), Ease.SMOOTHSTEP)))
+            else -> ParamCurve.constant(1f)
+        }
+        val inRate = when {
+            warp != null -> {
+                val keys = arrayListOf(Keyframe(0, warp.in0.toFloat()), Keyframe(overlapMs, warp.in1.toFloat(), Ease.LINEAR))
+                if (rampBackMs > 0) keys += Keyframe(overlapMs + rampBackMs, 1f, Ease.SMOOTHSTEP)
+                ParamCurve(keys)
+            }
+            bendIn > RATE_EPS -> {
+                val keys = arrayListOf(Keyframe(0, rateIn.toFloat()), Keyframe(overlapMs, rateIn.toFloat()))
+                if (rampBackMs > 0) keys += Keyframe(overlapMs + rampBackMs, 1f, Ease.SMOOTHSTEP)
+                ParamCurve(keys)
+            }
+            else -> ParamCurve.constant(1f)
+        }
         val outPitch = if (shiftOut != 0) ParamCurve(listOf(Keyframe(-rampOutMs, 0f), Keyframe(0, shiftOut.toFloat(), Ease.SMOOTHSTEP))) else ParamCurve.constant(0f)
         val inPitch = if (shiftIn != 0) {
             ParamCurve(listOf(Keyframe(0, shiftIn.toFloat()), Keyframe(overlapMs, shiftIn.toFloat()), Keyframe(overlapMs + max(rampBackMs, 1L), 0f, Ease.SMOOTHSTEP)))
@@ -498,7 +543,7 @@ class DjTransitionPlanner : TransitionPlanner {
         }
         val reason = buildString {
             append("beat-matched ").append(fmt1(out.gridBpm)).append(" -> ").append(fmt1(inc.gridBpm)).append(" bpm at ").append(fmt1(mixBpm.toDouble()))
-            append(" (out x").append(fmt3(rateOut)).append(", in x").append(fmt3(rateIn))
+            append(" (out x").append(fmt3(warp?.out0 ?: rateOut)).append(", in x").append(fmt3(warp?.in0 ?: rateIn))
             if (tempo2.strideOut != 1 || tempo2.strideIn != 1) append(", half/double-time lattice ${tempo2.strideOut}:${tempo2.strideIn}")
             append("); exit ").append(exitMs).append(" ms (").append(exitPick.levelName).append(if (exitPick.viaOutro) ", outro" else "")
             append("), entry ").append(entryMs).append(" ms (").append(entryPick.levelName).append("); overlap ")
@@ -511,6 +556,31 @@ class DjTransitionPlanner : TransitionPlanner {
             append("; confidence ").append(fmt(conf))
         }
         return Attempt.ok(plan.copy(reason = reason))
+    }
+
+    /** Rates of a tempo-following overlap: each deck's rate at T0 and at the end of the overlap, and the source each consumes. */
+    internal class Warp(val overlapMs: Double, val out0: Double, val out1: Double, val in0: Double, val in1: Double, val outSourceMs: Double, val inSourceMs: Double)
+
+    /**
+     * The rates that pin both fitted tempo curves to one constant mix grid of period `tempo.wallLatticeMs` over [overlapMs],
+     * or null when an end of either ramp is beyond [maxBend]. Wall time t covers `t / lattice` lattice steps, i.e.
+     * `stride * t / lattice` beats of each deck, so source(t) = curve(i0 + stride * t / lattice) and the rate is its
+     * derivative: `slope(i) * stride / lattice`, linear in t because the curve is quadratic.
+     */
+    internal fun warpFor(overlapMs: Double, tempo: Tempo, localOut: LocalGrid, localIn: LocalGrid, iOut: Int, iIn: Int, maxBend: Double): Warp? {
+        val w = tempo.wallLatticeMs
+        if (w <= 0.0 || overlapMs <= 0.0) return null
+        val steps = overlapMs / w
+        val so = tempo.strideOut.toDouble()
+        val si = tempo.strideIn.toDouble()
+        val out0 = localOut.slopeAt(iOut.toDouble()) * so / w
+        val out1 = localOut.slopeAt(iOut + so * steps) * so / w
+        val in0 = localIn.slopeAt(iIn.toDouble()) * si / w
+        val in1 = localIn.slopeAt(iIn + si * steps) * si / w
+        for (r in doubleArrayOf(out0, out1, in0, in1)) if (!r.isFinite() || r <= 0.0 || abs(r - 1.0) > maxBend + 1e-9) return null
+        val outSource = localOut.timeAtD(iOut + so * steps) - localOut.timeAtD(iOut.toDouble())
+        val inSource = localIn.timeAtD(iIn + si * steps) - localIn.timeAtD(iIn.toDouble())
+        return Warp(overlapMs, out0, out1, in0, in1, outSource, inSource)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -883,6 +953,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val RATE_EPS = 2e-5
         private const val UNIT_EPS = 0.03
         private const val MAX_DRIFT_MS = 20.0
+
+        /** A constant rate that keeps the grids within this many ms is kept as it is; beyond it the decks follow their tempo curves. */
+        private const val WARP_FROM_DRIFT_MS = 4.0
         private const val MAX_POINT_RETRIES = 6
         private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
