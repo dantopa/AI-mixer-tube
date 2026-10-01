@@ -29,11 +29,11 @@ class AnalysisPolicyHeatTest {
     }
 
     @Test
-    fun thePlayingAndNextTrackStopOnlyWhenThePhoneIsSeverelyHot() {
-        val c = C(thermalStatus = 2)
+    fun thePlayingAndNextTrackStopOnlyWhenThePhoneIsCriticallyHot() {
+        val c = C(thermalStatus = 3)
         val p = AnalysisPolicy(c) { true }
         assertNull(p.blockReason(AnalysisPriority.NEXT_UP))
-        c.thermalStatus = 3
+        c.thermalStatus = 4
         assertEquals(BlockReason.HOT, p.blockReason(AnalysisPriority.NEXT_UP))
         c.isCharging = true
         assertEquals("heat wins over the charger", BlockReason.HOT, p.blockReason(AnalysisPriority.NOW_PLAYING))

@@ -29,7 +29,7 @@ interface DeviceConditions {
  *    it kept the phone hot for the whole session.
  *  - NEXT_UP / NOW_PLAYING (the DJ needs it for the very next transition): blocked only by battery saver
  *    (unless charging) or a nearly flat battery, because a missing analysis costs nothing worse than a plain
- *    crossfade. Also blocked once the phone is SEVERE-ly hot: a plain crossfade is better than a throttled phone.
+ *    crossfade. Also blocked once the phone is CRITICAL-ly hot: a plain crossfade is better than a throttled phone.
  *  - Network: NEXT_UP fetches a stream on any network unless the user switched "analyze on mobile data" off; BACKGROUND
  *    only on an unmetered one; where a fetch is forbidden they decode from the cache only (a fully played/precached
  *    track is entirely there). NOW_PLAYING is already streaming, so it is not held back.
@@ -53,7 +53,7 @@ class AnalysisPolicy(
                 }
             AnalysisPriority.NEXT_UP, AnalysisPriority.NOW_PLAYING ->
                 when {
-                    c.thermalStatus >= THERMAL_SEVERE -> BlockReason.HOT
+                    c.thermalStatus >= THERMAL_CRITICAL -> BlockReason.HOT
                     c.isCharging -> null
                     c.isBatterySaver -> BlockReason.BATTERY_SAVER
                     c.batteryPercent < 10 -> BlockReason.LOW_BATTERY
@@ -79,7 +79,9 @@ class AnalysisPolicy(
     private companion object {
         // PowerManager.THERMAL_STATUS_LIGHT / _SEVERE
         const val THERMAL_LIGHT = 1
-        const val THERMAL_SEVERE = 3
+        // Not SEVERE: a Pixel 10 Pro reported SEVERE while charging and playing, and the DJ stood still for the whole
+        // session. The playing / next track is one analysis at a time; only CRITICAL (the system is about to act) stops it.
+        const val THERMAL_CRITICAL = 4
     }
 
     /** One line for the log: every input the decisions above are made from. */

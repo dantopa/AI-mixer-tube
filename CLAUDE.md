@@ -160,7 +160,7 @@ Service modules:
     - ONNX Runtime no longer spin-waits between operators (`session.intra_op.allow_spinning` / `inter_op` = 0 in `OnnxBeatModel`); it still runs 2 intra-op threads.
     - Library warm-up (BACKGROUND priority) now runs only while CHARGING and below thermal LIGHT. Before, it ran on battery from 30 %. `BlockReason` gained `NOT_CHARGING` / `HOT`, `AnalysisPause` gained the same two, each with its own UI string. `DjRuntime` resumes the warm-up only while AI DJ is on, and stops it when the DJ is turned off.
     - `LibraryAnalysisCoordinator` checks the device and busy state BEFORE its four Room queries; it polls every 2 s while waiting.
-    - NOW_PLAYING / NEXT_UP analysis is blocked at thermal SEVERE (a plain crossfade beats a throttled phone).
+    - NOW_PLAYING / NEXT_UP analysis is blocked at thermal CRITICAL (build v; it was SEVERE in build t, and the owner's Pixel 10 Pro reported SEVERE while charging and playing, so the DJ stood still showing "blocked: phone is hot").
     - `AndroidDeviceConditions` caches the sticky battery intent for 15 s.
     - `QueueLookAhead.WINDOW` went 4 -> 3. In steady state the look-ahead costs about one extra full analysis per track; the 4th candidate made the start of a radio a burst of three.
     - `MainStallWatchdog` beats every 200 ms (was 40) and its watcher sleeps 100 ms (was 25), so ~15 wakeups/s instead of ~65; stalls under ~300 ms are no longer reported.
