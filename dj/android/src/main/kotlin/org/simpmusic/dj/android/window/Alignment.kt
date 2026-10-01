@@ -16,9 +16,9 @@ import kotlin.math.abs
  */
 class LatencyCalibrator(
     startLatencyMs: Double = 120.0,
-    // First guess of the follower's lag after a hard seek. 80 ms was optimistic: the first real device (a phone on Wi-Fi) finished
-    // its three corrective seeks 42 ms short, which is only consistent with a true lag near 250 ms and the half-way learning rate below.
-    seekBiasMs: Double = 250.0,
+    // First guess of the follower's lag after a hard seek. 250 ms came from device lock-outs that measured during Media3's
+    // post-seek position smoothing, i.e. from an artifact; 120 ms is a middle guess, learned per deck kind after one seek.
+    seekBiasMs: Double = 120.0,
 ) {
     var startLatencyMs: Double = startLatencyMs
         private set
@@ -74,12 +74,21 @@ class AlignmentLoop(
     private val calibrator: LatencyCalibrator,
     private val toleranceMs: Double = WindowTuning.LOCK_TOLERANCE_MS,
     private val warmupMs: Double = WindowTuning.LOCK_MEASURE_FROM_MS.toDouble(),
-    private val measureMs: Double = 160.0,
+    private val measureMs: Double = 300.0,
     private val settleAfterSeekMs: Double = 260.0,
     private val maxSeeks: Int = 3,
     private val minSamples: Int = 6,
     private val target: SeekTarget = SeekTarget.LIVE,
     private val log: (String) -> Unit = {},
+    /**
+     * A measurement is only trusted once the error has stopped moving: Media3 runs the REPORTED position of a deck that
+     * was just started or seeked up to 10 % fast or slow for up to a second while it hands over from the playhead to
+     * the AudioTimestamp, so an offset measured then is a reporting artifact (the device's sign-flipping 50-110 ms
+     * residuals). Max |d(error)/dt| accepted, in ms per ms.
+     */
+    private val maxSlope: Double = 0.004,
+    /** Give up waiting for a steady signal after this long in one measurement and use what there is. */
+    private val maxSteadyWaitMs: Double = 2500.0,
 ) {
     enum class State { WARMUP, MEASURING, SETTLING, LOCKED, FAILED }
 
@@ -111,6 +120,7 @@ class AlignmentLoop(
     private var startedAtMs = Double.NaN
     private var phaseStartMs = 0.0
     private val samples = ArrayList<Double>()
+    private val sampleTimes = ArrayList<Double>()
     private var lastSeekWasMine = false
 
     fun start(nowMs: Double) {
@@ -130,6 +140,7 @@ class AlignmentLoop(
                     state = State.MEASURING
                     phaseStartMs = nowMs
                     samples.clear()
+                    sampleTimes.clear()
                 }
                 return Step.None
             }
@@ -138,17 +149,27 @@ class AlignmentLoop(
                     state = State.MEASURING
                     phaseStartMs = nowMs
                     samples.clear()
+                    sampleTimes.clear()
                 }
                 return Step.None
             }
             State.MEASURING -> {
                 samples.add(errorMs)
+                sampleTimes.add(nowMs)
+                // keep a sliding window of the last measureMs
+                while (sampleTimes.size > minSamples && nowMs - sampleTimes.first() > measureMs) {
+                    sampleTimes.removeAt(0)
+                    samples.removeAt(0)
+                }
                 if (nowMs - phaseStartMs < measureMs || samples.size < minSamples) return Step.None
+                val slope = slopeOf(sampleTimes, samples)
+                if (abs(slope) > maxSlope && nowMs - phaseStartMs < maxSteadyWaitMs) return Step.None
+                if (abs(slope) > maxSlope) log("lock ${target.name.lowercase()}: signal still moving (%.3f ms/ms) after %.0f ms, measuring anyway".format(slope, nowMs - phaseStartMs))
                 val median = samples.sorted().let { if (it.size % 2 == 1) it[it.size / 2] else (it[it.size / 2 - 1] + it[it.size / 2]) / 2 }
                 lastErrorMs = median
                 if (firstErrorMs.isNaN()) firstErrorMs = median
                 if (lastSeekWasMine) calibrator.observeSeek(median, target)
-                log("lock ${target.name.lowercase()}: measured %.1f ms (median of %d) after %d seeks, bias %.0f ms".format(median, samples.size, seeksUsed, calibrator.seekBias(target)))
+                log("lock ${target.name.lowercase()}: measured %.1f ms (median of %d, steady after %.0f ms) after %d seeks, bias %.0f ms".format(median, samples.size, nowMs - phaseStartMs, seeksUsed, calibrator.seekBias(target)))
                 if (abs(median) <= toleranceMs) {
                     state = State.LOCKED
                     return Step.Locked
@@ -164,5 +185,19 @@ class AlignmentLoop(
                 return Step.SeekBy(-median + calibrator.seekBias(target))
             }
         }
+    }
+
+    private fun slopeOf(t: List<Double>, y: List<Double>): Double {
+        val n = t.size
+        if (n < 2) return 0.0
+        val mt = t.average()
+        val my = y.average()
+        var num = 0.0
+        var den = 0.0
+        for (i in 0 until n) {
+            num += (t[i] - mt) * (y[i] - my)
+            den += (t[i] - mt) * (t[i] - mt)
+        }
+        return if (den <= 0.0) 0.0 else num / den
     }
 }

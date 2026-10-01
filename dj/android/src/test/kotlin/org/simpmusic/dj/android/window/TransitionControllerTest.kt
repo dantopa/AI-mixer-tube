@@ -40,19 +40,23 @@ class TransitionControllerTest {
         incomingReadyDelay: Double = 300.0,
         calibrator: LatencyCalibrator = LatencyCalibrator(),
         headStartMs: Double = 0.0, // how far the window starts behind/ahead of the live deck at trigger time
+        smoothMin: Double = 0.0,
+        smoothMax: Double = 0.0,
+        seed: Int = 0,
+        debug: Boolean = false,
     ): Rig {
         val clock = FakeClock()
         val w0 = timeline.outgoingSourceAtWindowStart
         // live outgoing has been playing; at "now" it is exactly at window-start source position.
         val outgoing = FakeDeck("live-out", clock, w0 + headStartMs, jitterMs = jitter, startPlaying = true, seed = 11).also { it.volume = userVol }
-        val window = FakeDeck("window", clock, 0.0, startLatencyMs = windowStartLatency, seekLatencyMs = seekLatency, jitterMs = jitter, seed = 22, seekLandingErrorMs = seekLandingError)
+        val window = FakeDeck("window", clock, 0.0, startLatencyMs = windowStartLatency, seekLatencyMs = seekLatency, jitterMs = jitter, seed = 22 + seed * 7, seekLandingErrorMs = seekLandingError, smoothMinMs = smoothMin, smoothMaxMs = smoothMax)
         lateinit var rig: Rig
         val host =
             RecordingHost(clock) { seekSource ->
-                FakeDeck("live-in", clock, seekSource.toDouble(), startLatencyMs = 90.0, seekLatencyMs = seekLatency, jitterMs = jitter, readyAtMs = clock.now + incomingReadyDelay, seed = 33, seekLandingErrorMs = seekLandingError)
+                FakeDeck("live-in", clock, seekSource.toDouble(), startLatencyMs = 90.0, seekLatencyMs = seekLatency, jitterMs = jitter, readyAtMs = clock.now + incomingReadyDelay, seed = 33 + seed * 7, seekLandingErrorMs = seekLandingError, smoothMinMs = smoothMin, smoothMaxMs = smoothMax)
                     .also { rig.incomingDeck = it }
             }
-        val controller = TransitionController(timeline, outgoing, window, host, clock, { userVol }, calibrator)
+        val controller = TransitionController(timeline, outgoing, window, host, clock, { userVol }, calibrator, log = { if (debug) println("[%.0f] %s".format(clock.now, it)) })
         rig = Rig(clock, outgoing, window, host, controller)
         return rig
     }
@@ -316,5 +320,42 @@ class TransitionControllerTest {
             if (i > 20) worst = maxOf(worst, abs(est.estimate(now, raw) - truth))
         }
         assertTrue("worst estimation error $worst ms (raw jitter +-8)", worst < 4.0)
+    }
+
+    /**
+     * The device failure, reproduced: Media3 smooths the REPORTED position for up to ~1 s after every start and
+     * seek. Both hand-offs must still land on the TRUE audio within a few ms, across many seeds.
+     */
+    @Test
+    fun bothHandoffsAreAlignedInTrueTimeDespiteMedia3PositionSmoothing() {
+        val outErrs = ArrayList<Double>()
+        val inErrs = ArrayList<Double>()
+        var failed = 0
+        // One calibrator for the whole run, as on the device: what one mix learns about the decks the next one uses.
+        val cal = LatencyCalibrator()
+        for (seed in 0 until 40) {
+            val r = rig(smoothMin = 30.0, smoothMax = 150.0, seed = seed, seekLatency = 90.0, calibrator = cal)
+            r.controller.start()
+            var outErr = Double.NaN
+            var inErr = Double.NaN
+            r.run(60_000.0) {
+                if (r.controller.phase == TransitionController.Phase.XFADE_OUT && outErr.isNaN()) {
+                    outErr = timeline.outgoingSourceOfWindow(r.window.truePositionMs) - r.outgoing.truePositionMs
+                }
+                if (r.controller.phase == TransitionController.Phase.XFADE_IN && inErr.isNaN()) {
+                    inErr = r.incomingDeck!!.truePositionMs - timeline.incomingSourceOfWindow(r.window.truePositionMs)
+                }
+                r.controller.isFinished
+            }
+            if (!r.host.finished) { failed++; println("seed $seed: phase=${r.controller.phase} failed=${r.host.failedReason}") }
+            if (!outErr.isNaN()) outErrs += abs(outErr)
+            if (!inErr.isNaN()) inErrs += abs(inErr)
+        }
+        val worstOut = outErrs.maxOrNull() ?: Double.NaN
+        val worstIn = inErrs.maxOrNull() ?: Double.NaN
+        println("smoothing: failed $failed/40, live->window worst ${"%.1f".format(worstOut)} ms (median ${"%.1f".format(outErrs.sorted().getOrNull(outErrs.size / 2) ?: Double.NaN)}), window->live worst ${"%.1f".format(worstIn)} ms (median ${"%.1f".format(inErrs.sorted().getOrNull(inErrs.size / 2) ?: Double.NaN)})")
+        assertEquals("transitions that did not finish", 0, failed)
+        assertTrue("live->window worst $worstOut ms", worstOut <= 6.0)
+        assertTrue("window->live worst $worstIn ms", worstIn <= 6.0)
     }
 }

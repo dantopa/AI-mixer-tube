@@ -193,7 +193,7 @@ class TransitionController(
                 if (incomingStartIssued && inc.isPlaying) {
                     // Already carrying the right audio; only fix it when clearly off the mapped position.
                     if (phase == Phase.LOCK_IN || phase == Phase.XFADE_IN) {
-                        val ref = mappedIncomingPosition()
+                        val ref = incomingReferenceAt(windowPositionMs()).toLong()
                         if (abs(inc.positionMs() - ref) > ABORT_RESEEK_MS && phase == Phase.LOCK_IN) inc.seekTo(ref)
                     }
                     playing = true
@@ -268,7 +268,8 @@ class TransitionController(
 
     private fun beginCommit(now: Double, w: Double) {
         val lockInSource = timeline.incomingSourceOfWindow(timeline.lockInWindowMs.toDouble())
-        val inc = host.commitToIncoming(lockInSource.toLong())
+        // Parked where it must be when it starts, INCOMING_EARLY_START_MS before the lanes settle.
+        val inc = host.commitToIncoming((lockInSource - WindowTuning.INCOMING_EARLY_START_MS).coerceAtLeast(0.0).toLong())
         if (inc == null) {
             log("host refused to commit")
             val result = abort()
@@ -298,8 +299,9 @@ class TransitionController(
         window.volume = userVolume()
         val w = windowPositionMs()
         val inc = incoming ?: return
-        // Start the incoming deck early enough that its first audible sample lands at lockInWindowMs.
-        if (!incomingStartIssued && w >= timeline.lockInWindowMs - calibrator.startLatencyMs) {
+        // Start the (silent) incoming deck INCOMING_EARLY_START_MS ahead of the settle point, so the position Media3
+        // reports for it has stopped smoothing by the time the lock measures it.
+        if (!incomingStartIssued && w >= timeline.lockInWindowMs - WindowTuning.INCOMING_EARLY_START_MS - calibrator.startLatencyMs) {
             if (!inc.isReady) {
                 if (w >= timeline.xfadeInWindowMs) {
                     log("incoming deck never became ready")
@@ -323,7 +325,7 @@ class TransitionController(
         val inc = incoming!!
         val loop = align!!
         val w = windowPositionMs()
-        val ref = timeline.incomingSourceOfWindow(w)
+        val ref = incomingReferenceAt(w)
         val follower = inEst.estimate(now, inc.positionMs())
         val err = follower - ref + decodeSkewMs // live incoming (ExoPlayer) vs window (our decode)
         when (val step = if (inc.isPlaying) loop.update(now, err) else AlignmentLoop.Step.None) {
@@ -346,6 +348,16 @@ class TransitionController(
             host.onEvent(TransitionEvent.LockedIn(residual, loop.seeksUsed, forced = !locked))
             setPhase(Phase.XFADE_IN, now)
         }
+    }
+
+    /**
+     * Where the live incoming deck should be at window time [w]. From the settle point on, the window plays the incoming
+     * at rate 1, so that is the mapped source. Before it (the deck runs early and silent) the window may still be on
+     * a tempo lane, so the target is the settle position projected back at rate 1, which the live deck does play.
+     */
+    private fun incomingReferenceAt(w: Double): Double {
+        val lockIn = timeline.lockInWindowMs.toDouble()
+        return if (w >= lockIn) timeline.incomingSourceOfWindow(w) else timeline.incomingSourceOfWindow(lockIn) - (lockIn - w)
     }
 
     private fun tickXfadeIn(now: Double) {
