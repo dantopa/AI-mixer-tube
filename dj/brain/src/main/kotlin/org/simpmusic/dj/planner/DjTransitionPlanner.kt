@@ -869,7 +869,7 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BASS_WORTH = 0.15f
         private const val RATE_EPS = 2e-5
         private const val UNIT_EPS = 0.03
-        private const val MAX_DRIFT_MS = 8.0
+        private const val MAX_DRIFT_MS = 20.0
         private const val MAX_POINT_RETRIES = 6
         private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
