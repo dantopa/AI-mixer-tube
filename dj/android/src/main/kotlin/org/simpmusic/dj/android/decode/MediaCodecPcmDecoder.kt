@@ -175,81 +175,91 @@ class MediaCodecPcmDecoder {
                 }
             }
 
-            val outIdx = codec.dequeueOutputBuffer(info, TIMEOUT_US)
-            when {
-                outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    val f = codec.outputFormat
-                    inRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                    inCh = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-                    floatPcm =
-                        f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
-                        f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
-                    resampler = StreamingResampler(inRate, request.outSampleRate, request.outChannels)
-                    stats.inRate = inRate
-                    stats.floatPcm = floatPcm
-                    DjLog.d(TAG, "codec output format: $f -> $inRate Hz x$inCh floatPcm=$floatPcm")
-                }
+            // Take EVERY output that is ready before going back to feed input: one output per loop turn (with a 10 ms wait
+            // in front of it) capped the decode at ~9x real time on a 2026-10-01 device log. Only the first dequeue of a
+            // turn may wait; the rest are polls.
+            var waitUs = TIMEOUT_US
+            var drain = true
+            while (drain && !outputDone) {
+                val waited = waitUs > 0
+                val outIdx = codec.dequeueOutputBuffer(info, waitUs)
+                waitUs = 0L
+                when {
+                    outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val f = codec.outputFormat
+                        inRate = f.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        inCh = f.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        floatPcm =
+                            f.containsKey(MediaFormat.KEY_PCM_ENCODING) &&
+                            f.getInteger(MediaFormat.KEY_PCM_ENCODING) == AudioFormat.ENCODING_PCM_FLOAT
+                        resampler = StreamingResampler(inRate, request.outSampleRate, request.outChannels)
+                        stats.inRate = inRate
+                        stats.floatPcm = floatPcm
+                        DjLog.d(TAG, "codec output format: $f -> $inRate Hz x$inCh floatPcm=$floatPcm")
+                    }
 
-                outIdx >= 0 -> {
-                    stalled = 0
-                    lastProgressNs = System.nanoTime()
-                    val out = codec.getOutputBuffer(outIdx)!!
-                    if (info.size > 0 && inRate > 0) {
-                        out.position(info.offset)
-                        out.limit(info.offset + info.size)
-                        out.order(ByteOrder.nativeOrder())
-                        val bytesPerSample = if (floatPcm) 4 else 2
-                        val frames = info.size / (bytesPerSample * inCh)
-                        stats.decodedFrames += frames
-                        val audioS = stats.decodedFrames / inRate
-                        if (audioS >= nextReportS) {
-                            val ms = (System.nanoTime() - tPump) / 1_000_000
-                            DjLog.i(TAG, "decode progress: ${audioS}s of audio in $ms ms (${"%.1f".format(audioS * 1000.0 / maxOf(1L, ms))}x real time) on ${Thread.currentThread().name} prio=${android.os.Process.getThreadPriority(android.os.Process.myTid())}")
-                            nextReportS += PROGRESS_EVERY_S
+                    outIdx >= 0 -> {
+                        stalled = 0
+                        lastProgressNs = System.nanoTime()
+                        val out = codec.getOutputBuffer(outIdx)!!
+                        if (info.size > 0 && inRate > 0) {
+                            out.position(info.offset)
+                            out.limit(info.offset + info.size)
+                            out.order(ByteOrder.nativeOrder())
+                            val bytesPerSample = if (floatPcm) 4 else 2
+                            val frames = info.size / (bytesPerSample * inCh)
+                            stats.decodedFrames += frames
+                            val audioS = stats.decodedFrames / inRate
+                            if (audioS >= nextReportS) {
+                                val ms = (System.nanoTime() - tPump) / 1_000_000
+                                DjLog.i(TAG, "decode progress: ${audioS}s of audio in $ms ms (${"%.1f".format(audioS * 1000.0 / maxOf(1L, ms))}x real time) on ${Thread.currentThread().name} prio=${android.os.Process.getThreadPriority(android.os.Process.myTid())}")
+                                nextReportS += PROGRESS_EVERY_S
+                            }
+                            if (scratchIn.size < frames * inCh) scratchIn = FloatArray(frames * inCh)
+                            if (floatPcm) {
+                                out.asFloatBuffer().get(scratchIn, 0, frames * inCh)
+                            } else {
+                                val sb = out.asShortBuffer()
+                                for (i in 0 until frames * inCh) scratchIn[i] = sb.get() / 32768f
+                            }
+                            // Frame clock: pts of this buffer, in frames, from the first delivered buffer.
+                            val bufStartUs = info.presentationTimeUs
+                            var from = 0
+                            var to = frames
+                            if (bufStartUs < startUs) {
+                                from = (((startUs - bufStartUs) * inRate) / 1_000_000L).toInt().coerceIn(0, frames)
+                            }
+                            if (endUs != Long.MAX_VALUE) {
+                                val limit = (((endUs - bufStartUs) * inRate) / 1_000_000L).toInt()
+                                if (limit < to) to = limit.coerceIn(0, frames)
+                            }
+                            if (to > from) {
+                                val n = to - from
+                                if (scratchMix.size < n * request.outChannels) scratchMix = FloatArray(n * request.outChannels)
+                                val slice = if (from == 0) scratchIn else scratchIn.copyOfRange(from * inCh, to * inCh)
+                                ChannelMixer.convert(slice, n, inCh, request.outChannels, scratchMix)
+                                resampler!!.process(scratchMix, n, emit)
+                            }
+                            if (endUs != Long.MAX_VALUE && bufStartUs + (frames * 1_000_000L / inRate) >= endUs) {
+                                codec.releaseOutputBuffer(outIdx, false)
+                                outputDone = true
+                                continue
+                            }
                         }
-                        if (scratchIn.size < frames * inCh) scratchIn = FloatArray(frames * inCh)
-                        if (floatPcm) {
-                            out.asFloatBuffer().get(scratchIn, 0, frames * inCh)
-                        } else {
-                            val sb = out.asShortBuffer()
-                            for (i in 0 until frames * inCh) scratchIn[i] = sb.get() / 32768f
-                        }
-                        // Frame clock: pts of this buffer, in frames, from the first delivered buffer.
-                        val bufStartUs = info.presentationTimeUs
-                        var from = 0
-                        var to = frames
-                        if (bufStartUs < startUs) {
-                            from = (((startUs - bufStartUs) * inRate) / 1_000_000L).toInt().coerceIn(0, frames)
-                        }
-                        if (endUs != Long.MAX_VALUE) {
-                            val limit = (((endUs - bufStartUs) * inRate) / 1_000_000L).toInt()
-                            if (limit < to) to = limit.coerceIn(0, frames)
-                        }
-                        if (to > from) {
-                            val n = to - from
-                            if (scratchMix.size < n * request.outChannels) scratchMix = FloatArray(n * request.outChannels)
-                            val slice = if (from == 0) scratchIn else scratchIn.copyOfRange(from * inCh, to * inCh)
-                            ChannelMixer.convert(slice, n, inCh, request.outChannels, scratchMix)
-                            resampler!!.process(scratchMix, n, emit)
-                        }
-                        if (endUs != Long.MAX_VALUE && bufStartUs + (frames * 1_000_000L / inRate) >= endUs) {
-                            codec.releaseOutputBuffer(outIdx, false)
+                        codec.releaseOutputBuffer(outIdx, false)
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
                             outputDone = true
-                            continue
+                            stats.outputEos = true
                         }
                     }
-                    codec.releaseOutputBuffer(outIdx, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        outputDone = true
-                        stats.outputEos = true
-                    }
-                }
 
-                outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    // With input exhausted and no output for a long time the codec is wedged.
-                    if (inputDone && ++stalled > STALL_LIMIT) throw DecodeException("codec stalled at end of stream")
-                    if (System.nanoTime() - lastProgressNs > NO_PROGRESS_NS) {
-                        throw DecodeException("codec made no progress for ${NO_PROGRESS_NS / 1_000_000_000L} s (inputDone=$inputDone, in=${stats.inputBuffers} buffers)")
+                    outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                        drain = false
+                        // With input exhausted and no output for a long time the codec is wedged.
+                        if (waited && inputDone && ++stalled > STALL_LIMIT) throw DecodeException("codec stalled at end of stream")
+                        if (System.nanoTime() - lastProgressNs > NO_PROGRESS_NS) {
+                            throw DecodeException("codec made no progress for ${NO_PROGRESS_NS / 1_000_000_000L} s (inputDone=$inputDone, in=${stats.inputBuffers} buffers)")
+                        }
                     }
                 }
             }

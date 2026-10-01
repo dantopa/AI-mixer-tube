@@ -85,6 +85,7 @@ android {
 
     buildTypes {
         release {
+            buildConfigField("boolean", "SKIP_OFFICIAL_CHECK", "false")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -104,6 +105,20 @@ android {
             isMinifyEnabled = false
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-dev"
+            buildConfigField("boolean", "SKIP_OFFICIAL_CHECK", "true")
+        }
+        // A release-quality build (R8, not debuggable, so ART compiles it ahead of time and uses the libraries' baseline
+        // profiles) that installs over the .dev debug build and is signed with the same debug key. Debuggable builds run
+        // Compose and every Kotlin hot loop (DJ DSP, resampler, phase vocoder) deoptimized: much more CPU, much more heat.
+        create("profile") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-profile"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            isDebuggable = false
+            // signed with a debug key, so the official-build check (release key from F-Droid metadata) must not run
+            buildConfigField("boolean", "SKIP_OFFICIAL_CHECK", "true")
         }
     }
     compileOptions {
@@ -191,7 +206,7 @@ sentry {
     org.set("simpmusic")
     projectName.set("android")
     ignoredFlavors.set(setOf("foss"))
-    ignoredBuildTypes.set(setOf("debug"))
+    ignoredBuildTypes.set(setOf("debug", "profile"))
     autoInstallation.enabled = false
     if (isFullBuild) {
         val token =
