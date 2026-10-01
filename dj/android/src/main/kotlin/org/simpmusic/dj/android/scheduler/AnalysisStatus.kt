@@ -1,7 +1,7 @@
 package org.simpmusic.dj.android.scheduler
 
 /** Why queued analysis work is held back by the device (not by the track). */
-enum class BlockReason { BATTERY_SAVER, LOW_BATTERY }
+enum class BlockReason { BATTERY_SAVER, LOW_BATTERY, NOT_CHARGING, HOT }
 
 /**
  * What is happening to the analysis of ONE track, in terms the settings screen can turn into a short sentence.

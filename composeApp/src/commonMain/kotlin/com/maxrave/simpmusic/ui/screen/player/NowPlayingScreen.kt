@@ -479,20 +479,8 @@ fun NowPlayingScreenContent(
     }
 
     // Crossfade: RGB rainbow color cycling when transitioning between tracks
-    val infiniteTransition = rememberInfiniteTransition(label = "crossfadeRainbow")
-    val rainbowHue by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec =
-            infiniteRepeatable(
-                animation = tween(1000, easing = LinearEasing),
-                repeatMode = RepeatMode.Restart,
-            ),
-        label = "rainbowHue",
-    )
-    val rainbowColor = hsvToColor(rainbowHue, 1f, 1f)
     val sliderTrackColor by animateColorAsState(
-        targetValue = if (timelineState.isCrossfading) rainbowColor else Color.White,
+        targetValue = crossfadeRainbowColor(timelineState.isCrossfading),
         animationSpec = tween(300),
         label = "sliderCrossfadeColor",
     )
@@ -903,4 +891,26 @@ fun NowPlayingScreenContent(
                 .padding(top = 52.dp),
         )
     }
+}
+
+/**
+ * The cycling rainbow while a crossfade runs, plain white otherwise. The infinite transition exists only during the
+ * crossfade: it used to run all the time, and because the hue is read at the top of the player it recomposed the whole
+ * Now Playing tree (blurred backdrop included) on every frame while nothing was crossfading.
+ */
+@Composable
+internal fun crossfadeRainbowColor(isCrossfading: Boolean): Color {
+    if (!isCrossfading) return Color.White
+    val infiniteTransition = rememberInfiniteTransition(label = "crossfadeRainbow")
+    val rainbowHue by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec =
+            infiniteRepeatable(
+                animation = tween(1000, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
+            ),
+        label = "rainbowHue",
+    )
+    return hsvToColor(rainbowHue, 1f, 1f)
 }

@@ -53,7 +53,8 @@ class SchedulerDiagnosticsTest {
 
     private class Conditions(
         override var isBatterySaver: Boolean = false,
-        override var isCharging: Boolean = false,
+        override var isCharging: Boolean = true,
+        override var thermalStatus: Int = 0,
         override var batteryPercent: Int = 80,
         override var isMetered: Boolean = false,
     ) : DeviceConditions
@@ -118,7 +119,7 @@ class SchedulerDiagnosticsTest {
     @Test
     fun batterySaverShowsAsBlockedNotAsFailure() =
         runTest {
-            val r = rig(Conditions(isBatterySaver = true, batteryPercent = 80))
+            val r = rig(Conditions(isBatterySaver = true, batteryPercent = 80, isCharging = false))
             r.scheduler.request("a", AnalysisPriority.NEXT_UP)
             advanceTimeBy(5_000)
             assertEquals(AnalysisStatus.Blocked(BlockReason.BATTERY_SAVER), r.scheduler.statusOf("a"))

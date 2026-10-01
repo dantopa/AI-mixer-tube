@@ -141,7 +141,9 @@ class QueueLookAhead(
 
     companion object {
         /** Tracks after the current one that are considered (the next one included). */
-        const val WINDOW = 4
+        // 3, not 4: each candidate is a full analysis (~35 s of CPU); the 4th rarely won and made the start of a radio
+        // a burst of three back-to-back analyses.
+        const val WINDOW = 3
         const val HISTORY = 30
 
         /** The challenger must beat the queued next track by this much, or the order stays. */

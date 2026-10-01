@@ -43,12 +43,15 @@ class DjRuntime(
             prefetcher.start()
             controller.start()
             lookAhead.start()
-            if (repository.libraryAnalysis.first()) {
-                DjLog.i("boot", "library analysis was left running: resuming")
-                coordinator.start()
-            }
             settings.map { it.enabled }.distinctUntilChanged().collect { on ->
                 DjLog.i("boot", "AI DJ mode ${if (on) "ON" else "OFF"}")
+                // The library warm-up only serves the DJ: with the DJ off it must not cost anything, even if it was left on.
+                if (on && repository.libraryAnalysis.first()) {
+                    DjLog.i("boot", "library analysis was left running: resuming")
+                    coordinator.start()
+                } else if (!on) {
+                    coordinator.stop()
+                }
                 // the watchdog only runs while the DJ is on, so a user who does not use it pays nothing
                 if (on) org.simpmusic.dj.android.diag.MainStallWatchdog.start() else org.simpmusic.dj.android.diag.MainStallWatchdog.stop()
                 if (on) diagnostics.runSelfCheck()

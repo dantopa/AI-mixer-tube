@@ -56,7 +56,8 @@ class SchedulerTest {
 
     private class Conditions(
         override var isBatterySaver: Boolean = false,
-        override var isCharging: Boolean = false,
+        override var isCharging: Boolean = true,
+        override var thermalStatus: Int = 0,
         override var batteryPercent: Int = 80,
         override var isMetered: Boolean = false,
     ) : DeviceConditions
@@ -221,7 +222,7 @@ class SchedulerTest {
     @Test
     fun lowBatteryBlocksBackgroundButNotChargingNorNowPlaying() =
         runTest {
-            val c = Conditions(batteryPercent = 15)
+            val c = Conditions(batteryPercent = 15, isCharging = false)
             val r = rig(conditions = c)
             r.scheduler.request("bg", AnalysisPriority.BACKGROUND)
             r.scheduler.request("now", AnalysisPriority.NOW_PLAYING)

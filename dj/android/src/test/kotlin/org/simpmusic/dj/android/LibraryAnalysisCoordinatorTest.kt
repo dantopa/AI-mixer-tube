@@ -35,7 +35,8 @@ class LibraryAnalysisCoordinatorTest {
 
     private class Conditions(
         override var isBatterySaver: Boolean = false,
-        override var isCharging: Boolean = false,
+        override var isCharging: Boolean = true,
+        override var thermalStatus: Int = 0,
         override var batteryPercent: Int = 80,
         override var isMetered: Boolean = false,
     ) : DeviceConditions
@@ -165,29 +166,30 @@ class LibraryAnalysisCoordinatorTest {
         }
 
     @Test
-    fun waitsForPowerOrHalfABatteryAndNeverRunsInBatterySaver() =
+    fun runsOnlyWhileChargingNeverInBatterySaverAndNeverWhenThePhoneIsWarm() =
         runTest {
-            val r = rig(listOf(cand("a", CandidateSource.LIKED)), conditions = Conditions(batteryPercent = 29, isCharging = false))
+            val r = rig(listOf(cand("a", CandidateSource.LIKED)), conditions = Conditions(batteryPercent = 90, isCharging = false))
             r.coordinator.start()
             advanceTimeBy(5_000)
-            assertTrue(r.port.order.isEmpty())
-            assertEquals(AnalysisPause.LOW_BATTERY, r.coordinator.state.value.pause)
+            assertTrue("a full battery is not enough: it waits for the charger", r.port.order.isEmpty())
+            assertEquals(AnalysisPause.NOT_CHARGING, r.coordinator.state.value.pause)
 
-            r.conditions.batteryPercent = 30
             r.conditions.isBatterySaver = true
             advanceTimeBy(31_000)
-            assertTrue("battery saver blocks even with enough charge", r.port.order.isEmpty())
+            assertTrue("battery saver blocks", r.port.order.isEmpty())
             assertEquals(AnalysisPause.BATTERY_SAVER, r.coordinator.state.value.pause)
 
             r.conditions.isBatterySaver = false
+            r.conditions.isCharging = true
+            r.conditions.thermalStatus = 1 // THERMAL_STATUS_LIGHT
+            advanceTimeBy(31_000)
+            assertTrue("a warm phone is left alone", r.port.order.isEmpty())
+            assertEquals(AnalysisPause.HOT, r.coordinator.state.value.pause)
+
+            r.conditions.thermalStatus = 0
             advanceTimeBy(31_000)
             advanceUntilIdle()
             assertEquals(listOf("a"), r.port.order)
-
-            val charging = rig(listOf(cand("b", CandidateSource.LIKED)), conditions = Conditions(batteryPercent = 5, isCharging = true))
-            charging.coordinator.start()
-            advanceUntilIdle()
-            assertEquals("charging is enough at any level", listOf("b"), charging.port.order)
         }
 
     @Test

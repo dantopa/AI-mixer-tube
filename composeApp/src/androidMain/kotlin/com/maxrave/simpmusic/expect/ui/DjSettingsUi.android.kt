@@ -55,6 +55,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_library_pause
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_analyzer
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_battery_saver
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_low_battery
+import simpmusic.composeapp.generated.resources.ai_dj_library_pause_not_charging
+import simpmusic.composeapp.generated.resources.ai_dj_library_pause_hot
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_metered
 import simpmusic.composeapp.generated.resources.ai_dj_library_pause_transition
 import simpmusic.composeapp.generated.resources.ai_dj_library_nothing_to_do
@@ -144,6 +146,8 @@ actual fun DjSettingsSection(castRemote: Boolean) {
         mapOf(
             AnalysisPause.BATTERY_SAVER to stringResource(Res.string.ai_dj_library_pause_battery_saver),
             AnalysisPause.LOW_BATTERY to stringResource(Res.string.ai_dj_library_pause_low_battery),
+            AnalysisPause.NOT_CHARGING to stringResource(Res.string.ai_dj_library_pause_not_charging),
+            AnalysisPause.HOT to stringResource(Res.string.ai_dj_library_pause_hot),
             AnalysisPause.METERED_NETWORK to stringResource(Res.string.ai_dj_library_pause_metered),
             AnalysisPause.TRANSITION_RENDERING to stringResource(Res.string.ai_dj_library_pause_transition),
             AnalysisPause.ANALYZER_MISSING to stringResource(Res.string.ai_dj_library_pause_analyzer),

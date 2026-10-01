@@ -47,6 +47,10 @@ class OnnxBeatModel private constructor(
             val opts = OrtSession.SessionOptions().apply {
                 if (threads > 0) setIntraOpNumThreads(threads)
                 setInterOpNumThreads(1)
+                // Between operators the pool threads would otherwise busy-wait for the next op: a full core each, burnt
+                // for the whole 15 s run on a phone. Sleeping costs a few % of speed and saves that heat.
+                addConfigEntry("session.intra_op.allow_spinning", "0")
+                addConfigEntry("session.inter_op.allow_spinning", "0")
             }
             return OnnxBeatModel(env, env.createSession(bytes, opts))
         }

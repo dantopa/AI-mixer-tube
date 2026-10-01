@@ -16,15 +16,20 @@ interface DeviceConditions {
     /** 0..100, or 100 when unknown. */
     val batteryPercent: Int
     val isMetered: Boolean
+
+    /** PowerManager.THERMAL_STATUS_* (0 = none ... 6 = shutdown); 0 when unknown. */
+    val thermalStatus: Int get() = 0
 }
 
 /**
  * Policy: when may analysis of [priority] run, and may it touch the network?
  *
- *  - BACKGROUND (warming the library): never in battery saver, never below 30% unless charging.
+ *  - BACKGROUND (warming the library): only while charging, never in battery saver, never once the phone is warm
+ *    (thermal LIGHT or above). It used to run on battery from 30 %, and on top of the playing / next track's analysis
+ *    it kept the phone hot for the whole session.
  *  - NEXT_UP / NOW_PLAYING (the DJ needs it for the very next transition): blocked only by battery saver
  *    (unless charging) or a nearly flat battery, because a missing analysis costs nothing worse than a plain
- *    crossfade.
+ *    crossfade. Also blocked once the phone is SEVERE-ly hot: a plain crossfade is better than a throttled phone.
  *  - Network: NEXT_UP fetches a stream on any network unless the user switched "analyze on mobile data" off; BACKGROUND
  *    only on an unmetered one; where a fetch is forbidden they decode from the cache only (a fully played/precached
  *    track is entirely there). NOW_PLAYING is already streaming, so it is not held back.
@@ -42,11 +47,13 @@ class AnalysisPolicy(
             AnalysisPriority.BACKGROUND ->
                 when {
                     c.isBatterySaver -> BlockReason.BATTERY_SAVER
-                    !c.isCharging && c.batteryPercent < 30 -> BlockReason.LOW_BATTERY
+                    !c.isCharging -> BlockReason.NOT_CHARGING
+                    c.thermalStatus >= THERMAL_LIGHT -> BlockReason.HOT
                     else -> null
                 }
             AnalysisPriority.NEXT_UP, AnalysisPriority.NOW_PLAYING ->
                 when {
+                    c.thermalStatus >= THERMAL_SEVERE -> BlockReason.HOT
                     c.isCharging -> null
                     c.isBatterySaver -> BlockReason.BATTERY_SAVER
                     c.batteryPercent < 10 -> BlockReason.LOW_BATTERY
@@ -69,9 +76,15 @@ class AnalysisPolicy(
 
     val isMetered: Boolean get() = conditions.isMetered
 
+    private companion object {
+        // PowerManager.THERMAL_STATUS_LIGHT / _SEVERE
+        const val THERMAL_LIGHT = 1
+        const val THERMAL_SEVERE = 3
+    }
+
     /** One line for the log: every input the decisions above are made from. */
     fun describe(): String =
-        "device[battery=${conditions.batteryPercent}% saver=${conditions.isBatterySaver} charging=${conditions.isCharging} " +
+        "device[battery=${conditions.batteryPercent}% saver=${conditions.isBatterySaver} charging=${conditions.isCharging} thermal=${conditions.thermalStatus} " +
             "metered=${conditions.isMetered} analyzeOnMetered=${analyzeOnMetered()}]"
 }
 
@@ -82,7 +95,22 @@ class AndroidDeviceConditions(context: Context) : DeviceConditions {
 
     override val isBatterySaver: Boolean get() = power?.isPowerSaveMode == true
 
-    private fun battery(): Intent? = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    @Volatile private var cachedBattery: Intent? = null
+
+    @Volatile private var cachedAt = 0L
+
+    /** The sticky battery intent is a binder round trip; the scheduler and the engine ask several times a second. */
+    private fun battery(): Intent? {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (cachedBattery == null || now - cachedAt > 15_000L) {
+            cachedBattery = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            cachedAt = now
+        }
+        return cachedBattery
+    }
+
+    override val thermalStatus: Int
+        get() = if (android.os.Build.VERSION.SDK_INT >= 29) power?.currentThermalStatus ?: 0 else 0
 
     override val isCharging: Boolean
         get() {

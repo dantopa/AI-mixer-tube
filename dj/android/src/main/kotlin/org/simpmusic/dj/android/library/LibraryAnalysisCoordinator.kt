@@ -49,6 +49,8 @@ class SchedulerBackgroundPort(
 enum class AnalysisPause {
     BATTERY_SAVER,
     LOW_BATTERY,
+    NOT_CHARGING,
+    HOT,
     METERED_NETWORK,
     TRANSITION_RENDERING,
     ANALYZER_MISSING,
@@ -72,7 +74,8 @@ data class LibraryAnalysisState(
 /**
  * When may the library be analysed, and which song is next. Pure so the policy is unit-tested without a coordinator.
  *
- *  - Never in battery saver; only while charging OR at [MIN_BATTERY_PERCENT] or more.
+ *  - Only while charging, never in battery saver, never once the phone is warm (thermal LIGHT or above): on battery
+ *    it kept the phone hot through the whole session on top of the playing / next track's analysis.
  *  - Network: unmetered only. Hundreds of songs would silently spend a mobile data plan, so unlike the playing / next
  *    track's analysis this does NOT follow the "analyze on mobile data" switch. On a metered connection only DOWNLOADED
  *    songs are analysed, because those are decoded from the download cache without touching the network.
@@ -84,7 +87,8 @@ class LibraryAnalysisPolicy(
     fun blockedBy(): AnalysisPause? =
         when {
             conditions.isBatterySaver && !conditions.isCharging -> AnalysisPause.BATTERY_SAVER
-            !conditions.isCharging && conditions.batteryPercent < MIN_BATTERY_PERCENT -> AnalysisPause.LOW_BATTERY
+            !conditions.isCharging -> AnalysisPause.NOT_CHARGING
+            conditions.thermalStatus >= 1 -> AnalysisPause.HOT // PowerManager.THERMAL_STATUS_LIGHT
             else -> null
         }
 
@@ -177,6 +181,19 @@ class LibraryAnalysisCoordinator(
             if (!port.available) {
                 _state.update { it.copy(pause = AnalysisPause.ANALYZER_MISSING) }
                 return
+            }
+            // Device and busy checks first: the candidate list is four Room queries over the whole library, and this
+            // loop polls every couple of seconds while it waits.
+            val blockedEarly = policy.blockedBy()
+            if (blockedEarly != null) {
+                _state.update { it.copy(pause = blockedEarly, current = null) }
+                delay(idleRetryMs)
+                continue
+            }
+            if (transitionBusy()) {
+                _state.update { it.copy(pause = AnalysisPause.TRANSITION_RENDERING, current = null) }
+                delay(busyPollMs)
+                continue
             }
             val set = CandidateSelection.select(source.candidates(), cap)
             val pending = ArrayList<LibraryCandidate>()

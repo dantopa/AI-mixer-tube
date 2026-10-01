@@ -42,6 +42,8 @@ import org.simpmusic.dj.model.DjSettings
 import simpmusic.composeapp.generated.resources.Res
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_battery_saver
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_low_battery
+import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_not_charging
+import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_hot
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_mobile_data
 import simpmusic.composeapp.generated.resources.ai_dj_status_needs_network
 import simpmusic.composeapp.generated.resources.dj_chip_analysing_current
@@ -176,6 +178,8 @@ private fun analysisText(cur: AnalysisStatus?, nxt: AnalysisStatus?): String {
                 when (focus.reason) {
                     BlockReason.BATTERY_SAVER -> stringResource(Res.string.ai_dj_status_blocked_battery_saver).removePrefix("blocked: ")
                     BlockReason.LOW_BATTERY -> stringResource(Res.string.ai_dj_status_blocked_low_battery).removePrefix("blocked: ")
+                    BlockReason.NOT_CHARGING -> stringResource(Res.string.ai_dj_status_blocked_not_charging).removePrefix("blocked: ")
+                    BlockReason.HOT -> stringResource(Res.string.ai_dj_status_blocked_hot).removePrefix("blocked: ")
                 },
             )
         is AnalysisStatus.NeedsNetwork ->

@@ -10,6 +10,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_status_analysed
 import simpmusic.composeapp.generated.resources.ai_dj_status_analysing
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_battery_saver
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_low_battery
+import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_not_charging
+import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_hot
 import simpmusic.composeapp.generated.resources.ai_dj_status_blocked_mobile_data
 import simpmusic.composeapp.generated.resources.ai_dj_status_failed
 import simpmusic.composeapp.generated.resources.ai_dj_status_failed_unknown
@@ -32,6 +34,8 @@ fun AnalysisStatus?.label(): String =
             when (reason) {
                 BlockReason.BATTERY_SAVER -> stringResource(Res.string.ai_dj_status_blocked_battery_saver)
                 BlockReason.LOW_BATTERY -> stringResource(Res.string.ai_dj_status_blocked_low_battery)
+                BlockReason.NOT_CHARGING -> stringResource(Res.string.ai_dj_status_blocked_not_charging)
+                BlockReason.HOT -> stringResource(Res.string.ai_dj_status_blocked_hot)
             }
         is AnalysisStatus.NeedsNetwork ->
             if (metered) stringResource(Res.string.ai_dj_status_blocked_mobile_data) else stringResource(Res.string.ai_dj_status_needs_network)

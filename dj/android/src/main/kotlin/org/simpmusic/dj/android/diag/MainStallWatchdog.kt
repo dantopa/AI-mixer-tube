@@ -8,18 +8,20 @@ import org.simpmusic.dj.android.log.DjLog
 
 /** Which build of the DJ code this is, printed at boot so a pasted log says what it came from. Bump it with every shipped change. */
 object DjBuild {
-    const val ID = "2026-10-01-s calib-persist"
+    const val ID = "2026-10-01-t cooler"
 }
 
 /**
- * Finds out WHY the app feels laggy instead of guessing: a heartbeat posted to the main thread every 40 ms, and a background
+ * Finds out WHY the app feels laggy instead of guessing: a heartbeat posted to the main thread every 200 ms, and a background
  * thread that notices when the heartbeat is late. The first time a stall passes [STALL_MS] it logs what the main thread is
  * doing right then (top frames of its stack), and when it recovers it logs how long it lasted. Any code blocking the UI shows
- * up, not only the DJ's. Costs one message on the main looper every 40 ms.
+ * up, not only the DJ's. Costs one message on the main looper every 200 ms.
  */
 object MainStallWatchdog {
-    private const val BEAT_MS = 40L
-    private const val STALL_MS = 150L
+    // 200 / 100 ms instead of 40 / 25: ~15 wakeups a second instead of ~65 all through playback (it kept cores out of
+    // deep idle with the screen off). Stalls under ~300 ms are no longer reported; those are not what users feel as lag.
+    private const val BEAT_MS = 200L
+    private const val STALL_MS = 300L
     private const val MAX_REPORTS_PER_MINUTE = 30
     private const val TAG = "stall"
 
@@ -64,7 +66,7 @@ object MainStallWatchdog {
         var reports = 0
         while (running) {
             try {
-                Thread.sleep(25)
+                Thread.sleep(100)
             } catch (_: InterruptedException) {
                 return
             }
