@@ -35,7 +35,9 @@ object WindowTuning {
     const val LOCK_TOLERANCE_MS = 6.0
 
     /** Give up (abort before commit / force the hand-off after) beyond this offset (ms). */
-    const val LOCK_GIVE_UP_MS = 35.0
+    // 35 ms aborted 3 of 8 cumbia mixes on the device; the owner prefers more mixes with an occasional small
+    // flam over a plain crossfade, so the hand-off goes ahead up to 60 ms.
+    const val LOCK_GIVE_UP_MS = 60.0
 
     /** Loudness-match volume of the incoming track is ramped to 1.0 over this long after the hand-off. */
     const val SETTLE_RAMP_MS = 1500L

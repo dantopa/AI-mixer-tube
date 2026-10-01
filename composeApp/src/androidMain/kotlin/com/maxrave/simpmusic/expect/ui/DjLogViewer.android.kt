@@ -273,6 +273,12 @@ fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, S
                 put("analysis/${f.name}", f.readBytes())
             }
             put("dj-log.txt", DjLog.text().toByteArray())
+            // The in-memory log starts with this process; the file pair on disk also holds earlier sessions (the
+            // app may have been restarted since the mix that went wrong).
+            for (name in listOf("dj-debug.log.1", "dj-debug.log")) {
+                val f = File(context.filesDir, "dj/$name")
+                if (f.isFile) put("disk/$name", f.readBytes())
+            }
             put("titles.tsv", names.entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
         }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.FileProvider", zip)
