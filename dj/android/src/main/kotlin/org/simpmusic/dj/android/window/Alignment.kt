@@ -35,10 +35,25 @@ class LatencyCalibrator(
 
     fun seekBias(target: SeekTarget): Double = if (target == SeekTarget.WINDOW) windowSeekBiasMs else seekBiasMs
 
+    /**
+     * Called after every learned change. The values describe this phone's audio path, not one session, so they are
+     * saved and handed back through [restore] on the next start: a device log showed the FIRST mix after an app start
+     * failing on the defaults (bias 120 ms) while every later one locked on the learned values.
+     */
+    @Volatile var onChanged: ((LatencyCalibrator) -> Unit)? = null
+
+    /** Values saved by an earlier process; anything outside the learnable range is ignored. */
+    fun restore(startLatencyMs: Double, seekBiasMs: Double, windowSeekBiasMs: Double) {
+        if (startLatencyMs.isFinite() && startLatencyMs in 0.0..600.0) this.startLatencyMs = startLatencyMs
+        if (seekBiasMs.isFinite() && seekBiasMs in -200.0..800.0) this.seekBiasMs = seekBiasMs
+        if (windowSeekBiasMs.isFinite() && windowSeekBiasMs in -200.0..800.0) this.windowSeekBiasMs = windowSeekBiasMs
+    }
+
     /** [observedLagMs] = how far the deck's position was behind where it should have been right after starting. */
     fun observeStart(observedLagMs: Double) {
         // The lag we saw is (latency - the head start we gave); the true latency is head start + lag.
         startLatencyMs = ema(startLatencyMs, startLatencyMs + observedLagMs, 0.4).coerceIn(0.0, 600.0)
+        onChanged?.invoke(this)
     }
 
     /** [residualMs] = follower - reference measured after a seek that used the current bias. */
@@ -50,6 +65,7 @@ class LatencyCalibrator(
         } else {
             seekBiasMs = ema(seekBiasMs, seekBiasMs - residualMs, 0.85).coerceIn(-200.0, 800.0)
         }
+        onChanged?.invoke(this)
     }
 
     override fun toString(): String = "startLatency=%.0f ms seekBias live=%.0f window=%.0f ms".format(startLatencyMs, seekBiasMs, windowSeekBiasMs)
@@ -88,7 +104,7 @@ class AlignmentLoop(
      */
     private val maxSlope: Double = 0.004,
     /** Give up waiting for a steady signal after this long in one measurement and use what there is. */
-    private val maxSteadyWaitMs: Double = 2500.0,
+    private val maxSteadyWaitMs: Double = 3500.0,
 ) {
     enum class State { WARMUP, MEASURING, SETTLING, LOCKED, FAILED }
 
@@ -164,7 +180,8 @@ class AlignmentLoop(
                 if (nowMs - phaseStartMs < measureMs || samples.size < minSamples) return Step.None
                 val slope = slopeOf(sampleTimes, samples)
                 if (abs(slope) > maxSlope && nowMs - phaseStartMs < maxSteadyWaitMs) return Step.None
-                if (abs(slope) > maxSlope) log("lock ${target.name.lowercase()}: signal still moving (%.3f ms/ms) after %.0f ms, measuring anyway".format(slope, nowMs - phaseStartMs))
+                val steady = abs(slope) <= maxSlope
+                if (!steady) log("lock ${target.name.lowercase()}: signal still moving (%.3f ms/ms) after %.0f ms, measuring anyway".format(slope, nowMs - phaseStartMs))
                 val median = samples.sorted().let { if (it.size % 2 == 1) it[it.size / 2] else (it[it.size / 2 - 1] + it[it.size / 2]) / 2 }
                 lastErrorMs = median
                 if (firstErrorMs.isNaN()) firstErrorMs = median

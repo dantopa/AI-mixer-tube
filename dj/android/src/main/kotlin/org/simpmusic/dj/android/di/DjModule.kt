@@ -156,6 +156,7 @@ val djModule =
                     settingsFlow = get(named("djSettings")),
                     heavyDispatcher = get(RENDER_DISPATCHER),
                     windowDir = File(androidContext().cacheDir, "dj/windows"),
+                    calibrator = persistentCalibrator(androidContext()),
                     titleOf = { id -> librarySource.find(id)?.title },
                 )
             // The library analysis, the recommender, Auto DJ and the diagnostics start with the engine (they idle while off).
@@ -283,4 +284,29 @@ private fun org.koin.core.scope.Scope.audioResolver(): CacheFirstAudioSourceReso
 /** Registers [djModule]. Idempotent enough for the app's single load site. */
 fun loadDjModule() {
     loadKoinModules(djModule)
+}
+
+/**
+ * The lock calibration (start latency, seek lag of each deck kind) belongs to this phone's audio path, so it survives
+ * app restarts: without it the first mix of every session started from the defaults and could fail its lock-out.
+ */
+private fun persistentCalibrator(context: android.content.Context): org.simpmusic.dj.android.window.LatencyCalibrator {
+    val prefs = context.getSharedPreferences("dj_calibration", android.content.Context.MODE_PRIVATE)
+    val calibrator = org.simpmusic.dj.android.window.LatencyCalibrator()
+    if (prefs.contains("start")) {
+        calibrator.restore(
+            prefs.getFloat("start", Float.NaN).toDouble(),
+            prefs.getFloat("live", Float.NaN).toDouble(),
+            prefs.getFloat("window", Float.NaN).toDouble(),
+        )
+        DjLog.i("boot", "calibrator restored: $calibrator")
+    }
+    calibrator.onChanged = { c ->
+        prefs.edit()
+            .putFloat("start", c.startLatencyMs.toFloat())
+            .putFloat("live", c.seekBiasMs.toFloat())
+            .putFloat("window", c.windowSeekBiasMs.toFloat())
+            .apply()
+    }
+    return calibrator
 }

@@ -338,6 +338,9 @@ class TransitionController(
         val locked = loop.state == AlignmentLoop.State.LOCKED
         val deadline = w >= timeline.xfadeInWindowMs
         if (deadline && !inc.isPlaying) {
+            // A corrective seek issued just before the deadline is still landing: give it a moment (the window has tail
+            // to spare) instead of throwing the whole mix away for it.
+            if (w < timeline.xfadeInWindowMs + WindowTuning.INCOMING_SEEK_GRACE_MS) return
             log("incoming deck is not playing at the hand-off deadline")
             val result = abort()
             host.onFailed("incoming not playing", result)

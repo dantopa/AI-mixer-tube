@@ -14,19 +14,22 @@ object WindowTuning {
      * silently and phase-locked to the live outgoing player before it is made audible, so this must
      * cover: start latency + at least one lock attempt (settle + measure + seek) + the hand-off fade.
      */
-    const val LEAD_IN_MS = 7000L
+    const val LEAD_IN_MS = 12_500L
 
     /** First moment a lock measurement is trusted after the window started (player warm-up). */
     const val LOCK_MEASURE_FROM_MS = 350L
 
     /** Window time at which the live outgoing -> window cross-fade starts. Must be < LEAD_IN_MS - XFADE_MS. */
-    const val XFADE_OUT_AT_MS = 6500L
+    const val XFADE_OUT_AT_MS = 12_000L
 
     /** Length of both hand-off fades. Linear, gain sum 1: the two paths carry identical (correlated) audio. */
     const val XFADE_MS = 100L
 
     /** After the lanes settle: silent live-incoming lock budget before the hand-off is forced. */
     const val LOCK_IN_DEADLINE_MS = 4000L
+
+    /** How long past the lock-in deadline a live incoming deck that is still finishing a seek is waited for. */
+    const val INCOMING_SEEK_GRACE_MS = 1000L
 
     /** Window content after the lanes settle (must exceed LOCK_IN_DEADLINE_MS + XFADE_MS + slack). */
     const val TAIL_MS = 6500L

@@ -358,4 +358,30 @@ class TransitionControllerTest {
         assertTrue("live->window worst $worstOut ms", worstOut <= 6.0)
         assertTrue("window->live worst $worstIn ms", worstIn <= 6.0)
     }
+
+    /**
+     * The device's first mix after an app start: a FRESH calibrator (defaults, wrong for this phone), a slow seek and a
+     * large, long reporting transient (the log measured -353 ms while the signal was still moving after 2.5 s). Every
+     * such first mix must still finish, inside the longer lead-in.
+     */
+    @Test
+    fun firstMixOnDefaultsLocksDespiteASlowLongTransient() {
+        var failed = 0
+        val outErrs = ArrayList<Double>()
+        for (seed in 0 until 40) {
+            val r = rig(smoothMin = 150.0, smoothMax = 350.0, seed = seed, seekLatency = 210.0, calibrator = LatencyCalibrator())
+            r.controller.start()
+            var outErr = Double.NaN
+            r.run(60_000.0) {
+                if (r.controller.phase == TransitionController.Phase.XFADE_OUT && outErr.isNaN()) {
+                    outErr = timeline.outgoingSourceOfWindow(r.window.truePositionMs) - r.outgoing.truePositionMs
+                }
+                r.controller.isFinished
+            }
+            if (!r.host.finished) { failed++; println("seed $seed: phase=${r.controller.phase} failed=${r.host.failedReason}") }
+            if (!outErr.isNaN()) outErrs += abs(outErr)
+        }
+        println("first mix: failed $failed/40, live->window worst ${"%.1f".format(outErrs.maxOrNull() ?: Double.NaN)} ms")
+        assertEquals("first mixes that did not finish", 0, failed)
+    }
 }
