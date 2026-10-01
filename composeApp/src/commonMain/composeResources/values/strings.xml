@@ -628,6 +628,7 @@
     <string name="dj_log_copy_all">Copy all</string>
     <string name="dj_log_copied">Log copied</string>
     <string name="dj_log_share">Share</string>
+    <string name="dj_log_export_analyses">Export analyses</string>
     <string name="dj_log_share_title">Share the DJ log</string>
     <string name="dj_log_clear">Clear</string>
     <string name="dj_log_run_now">Run analysis now</string>

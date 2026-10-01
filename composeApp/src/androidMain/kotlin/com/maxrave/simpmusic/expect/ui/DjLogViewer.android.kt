@@ -62,6 +62,7 @@ import simpmusic.composeapp.generated.resources.dj_log_clear
 import simpmusic.composeapp.generated.resources.dj_log_copy_all
 import simpmusic.composeapp.generated.resources.dj_log_copied
 import simpmusic.composeapp.generated.resources.dj_log_empty
+import simpmusic.composeapp.generated.resources.dj_log_export_analyses
 import simpmusic.composeapp.generated.resources.dj_log_nothing_playing
 import simpmusic.composeapp.generated.resources.dj_log_run_now
 import simpmusic.composeapp.generated.resources.dj_log_self_check
@@ -188,6 +189,16 @@ fun DjLogViewerDialog(onDismiss: () -> Unit) {
                     OutlinedButton(onClick = { diagnostics.runSelfCheck() }, contentPadding = PaddingValues(horizontal = 10.dp)) {
                         Text(stringResource(Res.string.dj_log_self_check), fontSize = 12.sp)
                     }
+                    OutlinedButton(
+                        onClick = {
+                            val names =
+                                queue?.data?.listTracks.orEmpty().associate { t ->
+                                    t.videoId to "${t.title} - ${t.artists.orEmpty().joinToString(", ") { it.name }}"
+                                }
+                            shareDjAnalyses(context, shareTitle, names)
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                    ) { Text(stringResource(Res.string.dj_log_export_analyses), fontSize = 12.sp) }
                 }
                 // ---- the log ----
                 if (lines.isEmpty()) {
@@ -240,4 +251,37 @@ fun shareDjLog(context: Context, chooserTitle: String) {
             }
         context.startActivity(Intent.createChooser(send, chooserTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
     }
+}
+
+/**
+ * Zips every stored track analysis (the JSON files under `filesDir/dj/analysis`), the DJ log and a `titles.tsv` (videoId -> title
+ * for the tracks of the current queue, so a radio's analyses can be told apart) and hands the zip to the share sheet.
+ * Analyses carry no audio: beat grid, tempo, key, energy curves. They are what the planner reads, so a developer can
+ * replay every pair of the owner's real queue offline.
+ */
+fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
+    runCatching {
+        val dir = File(context.cacheDir, "dj_log").apply { mkdirs() }
+        val zip = File(dir, "dj-analyses.zip")
+        java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
+            fun put(name: String, bytes: ByteArray) {
+                out.putNextEntry(java.util.zip.ZipEntry(name))
+                out.write(bytes)
+                out.closeEntry()
+            }
+            File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
+                put("analysis/${f.name}", f.readBytes())
+            }
+            put("dj-log.txt", DjLog.text().toByteArray())
+            put("titles.tsv", names.entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.FileProvider", zip)
+        val send =
+            Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        context.startActivity(Intent.createChooser(send, chooserTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+    }.onFailure { DjLog.w("export", "analysis export failed: ${it.message}") }
 }
