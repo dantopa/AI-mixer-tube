@@ -60,4 +60,10 @@ interface DjPlayerPort {
 
     /** Inserts [track] after the current one and skips to it. */
     suspend fun playNow(track: Track)
+
+    /**
+     * Moves the queued track [videoId] (somewhere after the current one) into the slot right after the current track,
+     * shifting the ones in between back by one. Nothing is added or removed. False when it was not possible.
+     */
+    suspend fun moveToNext(videoId: String): Boolean = false
 }

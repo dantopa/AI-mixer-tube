@@ -24,6 +24,7 @@ import org.koin.dsl.module
 import org.simpmusic.dj.android.DjEngine
 import org.simpmusic.dj.android.DjHooks
 import org.simpmusic.dj.android.auto.AnalysisPrefetcher
+import org.simpmusic.dj.android.auto.QueueLookAhead
 import org.simpmusic.dj.android.auto.AnalysisRequester
 import org.simpmusic.dj.android.auto.AutoDjController
 import org.simpmusic.dj.android.auto.DjRuntime
@@ -207,6 +208,18 @@ val djModule =
         }
         single {
             val scheduler = get<DjAnalysisScheduler>()
+            QueueLookAhead(
+                scope = get(named(SERVICE_SCOPE)),
+                settings = get(named("djSettings")),
+                port = get(),
+                analyses = scheduler,
+                planner = get(),
+                setKeep = { scheduler.setLookAhead(it) },
+                log = { DjLog.i("lookahead", it) },
+            )
+        }
+        single {
+            val scheduler = get<DjAnalysisScheduler>()
             AnalysisPrefetcher(
                 scope = get(named(SERVICE_SCOPE)),
                 settings = get(named("djSettings")),
@@ -245,6 +258,7 @@ val djModule =
                 coordinator = get(),
                 controller = get(),
                 prefetcher = get(),
+                lookAhead = get(),
                 diagnostics = get(),
             )
         }

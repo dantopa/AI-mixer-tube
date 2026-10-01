@@ -79,4 +79,21 @@ class HandlerPlayerPort(
         h.playNext(track)
         h.onPlayerEvent(PlayerEvent.Next)
     }
+
+    override suspend fun moveToNext(videoId: String): Boolean {
+        val h = handler()
+        val s = snapshotOf(h)
+        if (s.blockedReason != null || s.currentIndex < 0) return false
+        val target = s.currentIndex + 1
+        var pos = s.queueIds.drop(target).indexOf(videoId).let { if (it < 0) -1 else it + target }
+        if (pos < target) return false
+        while (pos > target) {
+            // One step at a time through the handler's own move, re-checking that the queue still is what we planned on.
+            val ids = h.queueData.value?.data?.listTracks?.map { it.videoId } ?: return false
+            if (ids.getOrNull(pos) != videoId) return false
+            h.moveItemUp(pos)
+            pos--
+        }
+        return true
+    }
 }

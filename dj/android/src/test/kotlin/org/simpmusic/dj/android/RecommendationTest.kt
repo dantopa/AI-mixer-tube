@@ -77,6 +77,11 @@ class FakePlayer(var snap: PlayerSnapshot = PlayerSnapshot()) : DjPlayerPort {
     override suspend fun playNow(track: Track) {
         calls += "now:${track.videoId}"
     }
+
+    override suspend fun moveToNext(videoId: String): Boolean {
+        calls += "move:$videoId"
+        return true
+    }
 }
 
 /** A planner that never plans a mix: every score then differs only by the musical facts. */

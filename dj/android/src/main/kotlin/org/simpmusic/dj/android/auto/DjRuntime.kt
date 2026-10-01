@@ -28,6 +28,7 @@ class DjRuntime(
     private val coordinator: LibraryAnalysisCoordinator,
     private val controller: AutoDjController,
     private val prefetcher: AnalysisPrefetcher,
+    private val lookAhead: QueueLookAhead,
     private val diagnostics: DjDiagnostics,
     private val startDelayMs: Long = 3_000L,
 ) {
@@ -41,6 +42,7 @@ class DjRuntime(
             DjLog.i("boot", "DJ runtime starting: build=${org.simpmusic.dj.android.diag.DjBuild.ID} settings=${settings.value}")
             prefetcher.start()
             controller.start()
+            lookAhead.start()
             if (repository.libraryAnalysis.first()) {
                 DjLog.i("boot", "library analysis was left running: resuming")
                 coordinator.start()
