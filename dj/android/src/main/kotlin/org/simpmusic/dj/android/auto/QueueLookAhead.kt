@@ -16,6 +16,7 @@ import org.simpmusic.dj.android.recommend.DjPlayerPort
 import org.simpmusic.dj.android.recommend.PlayerSnapshot
 import org.simpmusic.dj.model.AnalysisPriority
 import org.simpmusic.dj.model.DjSettings
+import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalysisRepository
 import org.simpmusic.dj.model.TransitionPlanner
@@ -27,8 +28,10 @@ import org.simpmusic.dj.recommend.RecommendContext
  * into the "next" slot. It only REORDERS tracks that are already in the queue: nothing is added or removed, so the radio's
  * own queue (endless extension, trim) is untouched.
  *
- * Cheap on purpose: only [WINDOW] tracks after the current one, analysed one after another (never in parallel) and only
- * once, after the current and the next track are already analysed, so it never delays the analyses the mix itself needs.
+ * Cheap on purpose: it only acts when the queued next track would NOT beat-match with the current one (tempos beyond the
+ * bend, an unusable grid). Only then are the other [WINDOW] tracks analysed, one after another (never in parallel), after
+ * the current and the next track, so it never delays the analyses the mix itself needs; and only a challenger that does
+ * beat-match can take the slot.
  *
  * Only on a YouTube radio queue: a playlist or an album has an order its owner chose, and is left alone, as is a track
  * somebody put in the next slot by hand or the DJ itself. Active while AI DJ and Auto DJ are on.
@@ -79,44 +82,58 @@ class QueueLookAhead(
             log("look-ahead: the next track was put there on purpose; leaving it")
             return
         }
+        val from = analysisOf(current, AnalysisPriority.NOW_PLAYING, perTrackWaitMs * 2) ?: return
+        val nextId = window.first()
+        val settingsNow = settings.value
+        val deadline = clock() + budgetMs
+        // The queued next is analysed fully anyway (the mix needs it). Only when it CANNOT be beat-matched with the current
+        // track are the other candidates worth a full analysis each (~30 s of CPU): most of the time the radio's own order
+        // already mixes, and analysing two more tracks per song just to confirm it was the look-ahead's main heat cost.
+        val next = analysisOf(nextId, AnalysisPriority.NEXT_UP, minOf(perTrackWaitMs, deadline - clock())) ?: return
+        val nextPlan = withContext(compute) { runCatching { planner.plan(from, next, settingsNow) }.getOrNull() }
+        if (nextPlan == null || nextPlan.kind == PlanKind.BEAT_MATCHED) {
+            decidedFor = current
+            log("look-ahead: $nextId mixes with the current track (${nextPlan?.kind}); not analysing the others")
+            return
+        }
+        log("look-ahead: $nextId would not beat-match (${nextPlan.reason}); looking at ${window.size - 1} more")
         setKeep(window.toSet())
 
-        val from = analysisOf(current, AnalysisPriority.NOW_PLAYING, perTrackWaitMs * 2) ?: return
-        val deadline = clock() + budgetMs
         val got = LinkedHashMap<String, TrackAnalysis>()
-        for (id in window) {
+        got[nextId] = next
+        for (id in window.drop(1)) {
             val left = deadline - clock()
             if (left <= 0) break
             val a = analysisOf(id, AnalysisPriority.NEXT_UP, minOf(perTrackWaitMs, left))
             if (a != null) got[id] = a
-            // the first candidate is the one that plays anyway: nothing to compare until it is known, but do not stall on it
-            if (id == window.first() && a == null) break
         }
+        decidedFor = current
         if (got.size < 2) {
             log("look-ahead: only ${got.size} of ${window.size} upcoming tracks analysed, keeping the order")
-            decidedFor = current
             return
         }
-        val settingsNow = settings.value
         val played = s.playedBefore(HISTORY).toSet()
         val scored =
             withContext(compute) {
                 val rec = HeuristicRecommender(planner, context = RecommendContext(history = played))
                 got.map { (id, a) -> id to rec.score(from, a, settingsNow) }
             }
-        val nextId = window.first()
         val nextScore = scored.firstOrNull { it.first == nextId }?.second?.score ?: 0f
-        val best = scored.maxByOrNull { it.second.score }!!
-        val bestId = best.first
         val line = scored.joinToString { "${it.first}=${"%.2f".format(it.second.score)}" }
-        decidedFor = current
-        if (bestId == nextId || best.second.score < nextScore + MIN_GAIN || best.second.score < MIN_SCORE) {
-            log("look-ahead: keeping $nextId next (scores $line)")
+        // The queued next does not beat-match, so a challenger needs no score margin over it: it only has to beat-match
+        // itself and clear the floor. A challenger that would not beat-match either is never worth a reorder.
+        val best =
+            scored
+                .filter { it.first != nextId && it.second.plan?.kind == PlanKind.BEAT_MATCHED && it.second.score >= MIN_SCORE }
+                .maxByOrNull { it.second.score }
+        if (best == null) {
+            log("look-ahead: no upcoming track beat-matches either; keeping $nextId next (scores $line)")
             return
         }
+        val bestId = best.first
         val moved = withContext(NonCancellable) { port.moveToNext(bestId) }
         log(
-            if (moved) "look-ahead: moved $bestId next, ahead of $nextId: ${"%.2f".format(best.second.score)} vs ${"%.2f".format(nextScore)} (scores $line) — ${best.second.reason}"
+            if (moved) "look-ahead: moved $bestId next, ahead of $nextId (which would not beat-match): ${"%.2f".format(best.second.score)} vs ${"%.2f".format(nextScore)} (scores $line) — ${best.second.reason}"
             else "look-ahead: could not move $bestId up (scores $line)",
         )
     }
@@ -141,13 +158,12 @@ class QueueLookAhead(
 
     companion object {
         /** Tracks after the current one that are considered (the next one included). */
-        // 3, not 4: each candidate is a full analysis (~35 s of CPU); the 4th rarely won and made the start of a radio
-        // a burst of three back-to-back analyses.
-        const val WINDOW = 3
+        // Each challenger is a full analysis (~30 s of CPU), but they are only analysed when the queued next would not
+        // beat-match, and then a 4th candidate is one more chance to find a track that does.
+        const val WINDOW = 4
         const val HISTORY = 30
 
-        /** The challenger must beat the queued next track by this much, or the order stays. */
-        const val MIN_GAIN = 0.08f
+        /** Floor a challenger must clear to take the next slot from a queued track that would not beat-match. */
         const val MIN_SCORE = 0.30f
     }
 }
