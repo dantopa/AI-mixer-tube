@@ -25,6 +25,9 @@ interface SpliceHandle {
     /** Window time the deck emits at its source time [sourceMs]; null when it plays its own audio there. */
     fun windowTimeAt(sourceMs: Double): Double?
 
+    /** Format, last flush and capture-ring state, for the log. */
+    val diagnostics: String get() = ""
+
     /** [lengthMs] of captured input from source time [fromMs], or null when not (all) captured. */
     fun captureSlice(fromMs: Double, lengthMs: Double): CapturedAudio?
 }
@@ -82,6 +85,23 @@ class SpliceEngine(
     private var ringStartMs = Double.NaN // source time of sample index 0 of the current run
     private val ringLock = Any()
 
+    /** Times a capture run found the ring stale and restarted it (diagnostics). */
+    @Volatile
+    var ringRestarts = 0
+        private set
+
+    /** The last pipeline flush, for the log: `source ms (expected ms) jump|re-anchor`. */
+    @Volatile
+    var lastFlush: String = "none"
+        private set
+
+    override val diagnostics: String
+        get() {
+            val ring = synchronized(ringLock) { if (ringStartMs.isNaN()) "empty" else "%.0f..%.0f ms".format(ringStartMs, ringStartMs + ringWrite * 1000.0 / rate.coerceAtLeast(1)) }
+            return "${rate} Hz x$channels${if (isSupported) "" else " (unsupported)"}, processed ${"%.0f".format(processedMs)} ms, " +
+                "last flush $lastFlush, capture $ring, ring restarts $ringRestarts"
+        }
+
     fun configure(sampleRate: Int, channelCount: Int, pcm16: Boolean): Boolean {
         rate = sampleRate
         channels = channelCount
@@ -104,6 +124,9 @@ class SpliceEngine(
                 ringWrite = 0
                 ringStartMs = Double.NaN
             }
+        }
+        if (positionUs != 0L || expected.isNaN()) {
+            lastFlush = "%.1f (expected %s)%s".format(t, if (expected.isNaN()) "-" else "%.1f".format(expected), if (jumped) " jump" else "")
         }
         nextMs = t
         processedMs = t
@@ -213,7 +236,14 @@ class SpliceEngine(
 
     private fun captureBlock(input: ShortArray, frames: Int, t0: Double) {
         synchronized(ringLock) {
-            val r = ring ?: FloatArray(captureSeconds * rate).also { ring = it }
+            val r = ring?.takeIf { it.size == captureSeconds * rate } ?: FloatArray(captureSeconds * rate).also { ring = it; ringStartMs = Double.NaN }
+            // A capture run continues the ring only if this block starts exactly where the ring ends. Otherwise (capture
+            // switched off and on again, as on a deck that was the previous mix's incoming, or the time base re-anchored by
+            // a flush) the ring is restarted: appending would label every new sample with a time minutes off.
+            if (!ringStartMs.isNaN() && abs(t0 - (ringStartMs + ringWrite * 1000.0 / rate)) > 1000.0 / rate) {
+                ringRestarts++
+                ringStartMs = Double.NaN
+            }
             if (ringStartMs.isNaN()) {
                 ringStartMs = t0
                 ringWrite = 0

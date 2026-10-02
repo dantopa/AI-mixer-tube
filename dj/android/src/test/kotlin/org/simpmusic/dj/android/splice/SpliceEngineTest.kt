@@ -139,6 +139,35 @@ class SpliceEngineTest {
     }
 
     @Test
+    fun aSecondCaptureRunAfterPassthroughRestartsTheRing() {
+        // build aa's device bug: a deck that captured as the incoming deck of one mix and captured again as the outgoing
+        // deck of the next appended the second run to the first, labelling it minutes off ("no capture of the outgoing deck")
+        val e = SpliceEngine({ null })
+        e.configure(rate, 2, true)
+        e.onFlush(0)
+        fun feed(frames: Int, from: Long) {
+            var f = 0
+            while (f < frames) {
+                val n = minOf(1000, frames - f)
+                val inp = ShortArray(n * 2) { i -> (((from + f + i / 2) % 1000)).toShort() }
+                e.process(inp, n, ShortArray(n * 2))
+                f += n
+            }
+        }
+        e.setCommand(SpliceCommand.Run(WindowMap(0.0), capture = true, allowSeek = true))
+        feed(48_000 * 3, 0)
+        e.setCommand(SpliceCommand.Passthrough)
+        feed(48_000 * 60, 48_000L * 3)
+        e.setCommand(SpliceCommand.Run(WindowMap(0.0), capture = true))
+        feed(48_000 * 4, 48_000L * 63)
+        val c = e.captureSlice(64_000.0, 2000.0)
+        assertNotNull(c)
+        assertEquals(64_000.0, c!!.startMs, 1e-6)
+        assertEquals(((48_000L * 64) % 1000) / 32768f, c.samples[0], 1e-6f)
+        assertEquals(1, e.ringRestarts)
+    }
+
+    @Test
     fun theHistoryMapsTheSpeakerPositionToTheCommandThatProducedIt() {
         val e = SpliceEngine({ indexWindow(100_000) })
         e.configure(rate, 2, true)

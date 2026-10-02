@@ -104,28 +104,42 @@ class SpliceController(
 
     /** This deck's seek lag as measured by its last re-seek in THIS mix (exact, unlike the smoothed calibrator). */
     private var measuredSeekLag = Double.NaN
+    private var seekLagSum = 0.0
+    private var seekLagCount = 0
     private var aligned = false
     private var lastError = Double.NaN
-    private val steady = SteadyError()
+
+    /** The last fast reading of the incoming offset (NaN after a start or seek moved the deck). */
+    private var lastCoarse = Double.NaN
+    private var skewSeen = false
+    private val steady = SteadyError(spanMs = COARSE_SPAN_MS)
+    private val fine = SteadyError(spanMs = FINE_SPAN_MS)
     private var outStalledSince = Double.NaN
 
     /** For tests and logs: the outgoing deck's pointer, and the incoming deck's current command. */
     val outgoingPointerMs: Double get() = kOut
     val incomingCommand: SpliceCommand.Run? get() = incomingCmd
 
-    private fun kJoin(): Double = schedule.incomingOffsetMs + (inSkew?.takeIf { it.confidence >= MIN_CONFIDENCE }?.deltaMs ?: 0.0)
+    private fun kJoin(): Double = schedule.incomingOffsetMs + (inSkew?.takeIf { it.trusted && it.confidence >= MIN_CONFIDENCE }?.deltaMs ?: 0.0)
 
     fun start() {
         check(phase == Phase.IDLE)
         val now = clock.nowMs()
         startedAt = now
         outgoingSplice.setCommand(SpliceCommand.Run(WindowMap(kOut), capture = true, spliceInAtMs = Double.POSITIVE_INFINITY))
-        log("splice: start, $schedule")
+        log("splice: start, $schedule; outgoing deck ${outgoingSplice.diagnostics}")
         setPhase(Phase.OUT_CAPTURE, now)
     }
 
     /** Window time the outgoing deck is at (its own audio before the splice is the same music at this pointer). */
-    private fun outgoingWindowMs(): Double = outgoing.positionMs() + kOut
+    private fun outgoingWindowMs(): Double = outClock.positionAt(clock.nowMs(), outgoing) + kOut
+
+    /**
+     * The outgoing deck's position, smoothed: it plays steadily for the whole time it matters, so its reported position
+     * minus the wall clock is a constant plus noise, and the median of the last second of that removes the device's
+     * +-10-30 ms poll-to-poll noise from every aim (a single reading put each silent re-seek up to 15 ms off).
+     */
+    private val outClock = SmoothedClock()
 
     /** Incoming track position for the UI once it is the current track. */
     fun uiPositionMs(): Long? {
@@ -174,11 +188,11 @@ class SpliceController(
             val cap = outgoingSplice.captureSlice(out0 + CAPTURE_FROM_MS, CAPTURE_LEN_MS)
             val ref = windowReference(CAPTURE_FROM_MS - REF_MARGIN_MS, CAPTURE_LEN_MS + 2 * REF_MARGIN_MS)
             if (cap == null) {
-                log("splice: no capture of the outgoing deck, assuming no skew")
+                log("splice: no capture of the outgoing deck (${outgoingSplice.diagnostics}), assuming no skew")
                 outSkewDone = true
             } else {
                 background {
-                    outSkew = runCatching { Correlator.skew(cap, ref) }.getOrNull()
+                    outSkew = runCatching { Correlator.skewRobust(cap, ref) }.getOrNull()
                     outSkewDone = true
                 }
             }
@@ -186,17 +200,18 @@ class SpliceController(
         val w = outgoingWindowMs()
         if (!outSkewDone && w < schedule.spliceInMs - SKEW_DEADLINE_BEFORE_SPLICE_MS) return
         val r = outSkew
-        val trusted = r != null && r.confidence >= MIN_CONFIDENCE
+        val trusted = r != null && r.trusted && r.confidence >= MIN_CONFIDENCE
         val delta = if (trusted) r!!.deltaMs else 0.0
         kOut = delta - out0
         steady.reset()
+        fine.reset()
         val spliceAt = schedule.spliceInMs - kOut
         if (outgoingSplice.processedMs > spliceAt - 30) return fail("too late to splice the outgoing deck")
         outgoingSplice.setCommand(
             SpliceCommand.Run(WindowMap(kOut), spliceInAtMs = spliceAt, xfadeMs = if (trusted) SPLICE_XFADE_MS else UNSURE_XFADE_MS),
         )
         log(
-            "splice: outgoing skew ${r?.let { "%.2f ms (corr %.3f)".format(it.deltaMs, it.confidence) } ?: "unknown"}" +
+            "splice: outgoing skew ${r?.let { "%.2f ms (corr %.3f%s)".format(it.deltaMs, it.confidence, if (it.wide) ", wide search" else "") } ?: "unknown"}" +
                 "${if (trusted) "" else " -> assumed 0"}; enters the window at source ${"%.1f".format(spliceAt)} ms",
         )
         host.onEvent(TransitionEvent.LockedOut(delta, 0, w))
@@ -236,23 +251,39 @@ class SpliceController(
         // The pointer the incoming deck needs to emit what the outgoing deck emits: window time out - position in. Both
         // advance at rate 1, so it is constant once the incoming deck's start transient has settled.
         val p = inc.positionMs()
-        if (inc.isPlaying) steady.add(now, wOut - p)
-        val kHand = steady.result(now)
-        if (kHand != null) {
+        if (inc.isPlaying) {
+            steady.add(now, wOut - p)
+            fine.add(now, wOut - p)
+        }
+        // Two readings of the same offset: a fast one (300 ms median) for what a start or seek did, acted on only when it
+        // is far off, and a slow one (1 s median) for the last few ms, because the device's positions read +-10-30 ms apart
+        // poll to poll and a fast reading moved the pointer after noise (build aa: -4, +10, -7, +14 ms).
+        var kCoarse = steady.result(now)
+        if (kCoarse != null) lastCoarse = kCoarse
+        // the incoming skew decides the join pointer, hence whether a re-seek is needed: the moment it is known, judge it
+        // on the last reading instead of waiting for the next one (that wait is what left no time for the re-seek)
+        if (!skewSeen && (inSkewDone || incomingReference == null)) {
+            skewSeen = true
+            if (kCoarse == null && aimedBy == null && !lastCoarse.isNaN()) kCoarse = lastCoarse
+        }
+        if (kCoarse != null) {
             // Where the deck landed against where it was aimed teaches this phone's start / seek latency (persisted), so
             // the next aim (a re-seek now, the start of the next mix) lands closer.
             when (aimedBy) {
-                "start" -> calibrator.observeStart(kHand - aimedK)
+                "start" -> calibrator.observeStart(kCoarse - aimedK)
                 "seek" -> {
-                    calibrator.observeSeek(aimedK - kHand)
-                    measuredSeekLag = aimedSeekBias + (kHand - aimedK)
+                    calibrator.observeSeek(aimedK - kCoarse)
+                    // averaged over this mix's seeks: each landing reading carries a few ms of noise and the tail of
+                    // the reporting transient, and replacing the estimate made consecutive seeks bounce around the truth
+                    val lag = aimedSeekBias + (kCoarse - aimedK)
+                    seekLagSum += lag
+                    seekLagCount++
+                    measuredSeekLag = seekLagSum / seekLagCount
                 }
             }
-            if (aimedBy != null) log("splice: incoming landed ${"%.1f".format(kHand - aimedK)} ms from its aim after the $aimedBy (calibrator $calibrator)")
+            if (aimedBy != null) log("splice: incoming landed ${"%.1f".format(kCoarse - aimedK)} ms from its aim after the $aimedBy (calibrator $calibrator)")
             aimedBy = null
-            val kEmitted = h.windowTimeAt(p)?.minus(p)
-            lastError = if (kEmitted != null) kEmitted - kHand else Double.NaN
-            val g = kJoin() - kHand
+            val g = kJoin() - kCoarse
             val maxGlide = GLIDE_RATE * (schedule.joinMs - maxOf(wOut, schedule.handoffMs) - GLIDE_MARGIN_MS)
             val kCmd = incomingCmd!!.map.k0
             val skewKnown = inSkewDone || incomingReference == null
@@ -270,24 +301,42 @@ class SpliceController(
                     inc.seekTo(target.toLong())
                     aimedK = kJoin()
                     aimedBy = "seek"
+                    lastCoarse = Double.NaN
                     aligned = false
+                    goodReadings = 0
+                    fine.reset()
                     log("splice: incoming ${"%.1f".format(g)} ms from its join pointer, re-seeking it (silent) to ${target.toLong()} ms")
                 }
-                abs(kCmd - kHand) > MOVE_THRESHOLD_MS -> {
-                    setIncoming(incomingCmd!!.copy(map = WindowMap(kHand)))
+                abs(kCmd - kCoarse) > COARSE_MOVE_MS -> {
+                    setIncoming(incomingCmd!!.copy(map = WindowMap(kCoarse)))
                     aligned = false
-                    log("splice: incoming pointer moved by ${"%.2f".format(kHand - kCmd)} ms (silent)")
-                }
-                else -> {
-                    // two settled readings in a row: the first one after a start or seek can still carry the end of
-                    // Media3's smoothing transient (a couple of ms that a single reading cannot tell from the truth)
-                    val good = !lastError.isNaN() && abs(lastError) <= LOCK_TOLERANCE_MS
-                    goodReadings = if (good) goodReadings + 1 else 0
-                    aligned = goodReadings >= 2
+                    goodReadings = 0
+                    fine.reset()
+                    log("splice: incoming pointer moved by ${"%.2f".format(kCoarse - kCmd)} ms (silent)")
                 }
             }
-            if (!aligned && abs(kCmd - kHand) > MOVE_THRESHOLD_MS) goodReadings = 0
             steady.reset()
+        }
+        val kFine = fine.result(now)
+        if (kFine != null) {
+            val kEmitted = h.windowTimeAt(p)?.minus(p)
+            lastError = if (kEmitted != null) kEmitted - kFine else Double.NaN
+            val kCmd = incomingCmd!!.map.k0
+            // what this reading can tell apart from noise: at least the fixed bars, more when the positions scatter
+            val noiseBar = NOISE_SIGMAS * fine.lastMedianSe
+            if (abs(kCmd - kFine) > maxOf(MOVE_THRESHOLD_MS, noiseBar)) {
+                setIncoming(incomingCmd!!.copy(map = WindowMap(kFine)))
+                aligned = false
+                goodReadings = 0
+                log("splice: incoming pointer trimmed by ${"%.2f".format(kFine - kCmd)} ms (silent)")
+            } else {
+                // two settled readings in a row: the first one after a start or seek can still carry the end of
+                // Media3's smoothing transient (a couple of ms that a single reading cannot tell from the truth)
+                val good = !lastError.isNaN() && abs(lastError) <= maxOf(LOCK_TOLERANCE_MS, noiseBar)
+                goodReadings = if (good) goodReadings + 1 else 0
+                aligned = goodReadings >= 2
+            }
+            fine.reset()
         }
         val deadline = handoffDeadline()
         val ready = aligned && (inSkewDone || incomingReference == null)
@@ -314,7 +363,7 @@ class SpliceController(
         val cap = h.captureSlice(from, IN_CAPTURE_LEN_MS) ?: return
         inSkewStarted = true
         background {
-            inSkew = runCatching { Correlator.skew(cap, ref) }.getOrNull()
+            inSkew = runCatching { Correlator.skewRobust(cap, ref) }.getOrNull()
             inSkewDone = true
         }
     }
@@ -354,8 +403,8 @@ class SpliceController(
         val s = inSkew
         log(
             "splice: HAND-OFF ${if (forced) "forced " else ""}at window ${"%.0f".format(outgoingWindowMs())}: pointer error ${"%.2f".format(lastError)} ms, " +
-                "incoming skew ${s?.let { "%.2f ms (corr %.3f)".format(it.deltaMs, it.confidence) } ?: "unknown"}, glide ${"%.1f".format(kEnd - kCur)} of ${"%.1f".format(g)} ms" +
-                (if (abs(kEnd - kJ) > 0.5) ", ${"%.1f".format(kJ - kEnd)} ms left at the join" else "") + ", joins its own audio at source ${"%.1f".format(joinAt)} ms",
+                "incoming skew ${s?.let { "%.2f ms (corr %.3f%s%s)".format(it.deltaMs, it.confidence, if (it.wide) ", wide search" else "", if (it.trusted && it.confidence >= MIN_CONFIDENCE) "" else ", not trusted") } ?: "unknown"}, glide ${"%.1f".format(kEnd - kCur)} of ${"%.1f".format(g)} ms" +
+                (if (abs(kEnd - kJ) > 0.5) ", ${"%.1f".format(kJ - kEnd)} ms left at the join" else "") + ", joins its own audio at source ${"%.1f".format(joinAt)} ms; incoming deck ${h.diagnostics}",
         )
         if (!host.commit { uiPositionMs() }) return fail("host refused the commit")
         committed = true
@@ -441,8 +490,8 @@ class SpliceController(
         /** Window time (lead-in, plain outgoing audio) captured to measure the outgoing deck's skew. */
         const val CAPTURE_FROM_MS = 4000.0
         const val CAPTURE_LEN_MS = 2500.0
-        const val IN_CAPTURE_LEN_MS = 2000.0
-        const val REF_MARGIN_MS = 80.0
+        const val IN_CAPTURE_LEN_MS = 1500.0
+        const val REF_MARGIN_MS = 250.0
         const val MIN_CONFIDENCE = 0.8
 
         /** Without a skew by this long before the splice, enter with an assumed 0 and a longer fade. */
@@ -455,13 +504,28 @@ class SpliceController(
         /** Largest pointer glide while audible, as a fraction of read rate (0.006 = 10 cents). */
         const val GLIDE_RATE = 0.006
         const val GLIDE_MARGIN_MS = 800.0
-        const val MAX_RESEEKS = 2
+        const val MAX_RESEEKS = 3
 
         /** Incoming pointer considered on the outgoing one within this (ms): a 100 ms fade between two copies this close is clean. */
         const val LOCK_TOLERANCE_MS = 2.0
 
-        /** Pointer corrections smaller than this are measurement noise (each deck's position reads +-1-2 ms). */
-        const val MOVE_THRESHOLD_MS = 1.2
+        /**
+         * Median window over the two decks' reported positions. The device reads them +-10-30 ms apart from one poll to the
+         * next (build aa's log: pointer moves of -134, +54, -4, +10, -7, +14 ms), so a 300 ms median chased noise.
+         */
+        const val FINE_SPAN_MS = 1000.0
+
+        /** Window of the fast reading: long enough to tell a start transient's slope from the device's position noise. */
+        const val COARSE_SPAN_MS = 600.0
+
+        /** A fine reading moves or confirms the pointer only beyond this many standard errors of its median. */
+        const val NOISE_SIGMAS = 2.5
+
+        /** A fast reading further than this from the pointer is a real landing error (a start or seek), not noise. */
+        const val COARSE_MOVE_MS = 15.0
+
+        /** Pointer corrections smaller than this are measurement noise (a 1 s median of the device's positions). */
+        const val MOVE_THRESHOLD_MS = 2.0
 
         /** Join mismatch (ms) left by an incomplete glide below which a re-seek is not worth its risk. */
         const val RESEEK_WORTH_MS = 6.0
@@ -470,7 +534,7 @@ class SpliceController(
         const val RESEEK_COST_MS = 2800.0
 
         /** How long past the planned hand-off a not-yet-aligned incoming deck is waited for. */
-        const val HANDOFF_LATE_MS = 4000.0
+        const val HANDOFF_LATE_MS = 6000.0
         const val MIN_GLIDE_AFTER_FORCED_MS = 1500.0
         const val OUTGOING_STALL_LIMIT_MS = 400.0
     }
@@ -489,6 +553,10 @@ class SteadyError(
     private val t = ArrayDeque<Double>()
     private val e = ArrayDeque<Double>()
     private var since = Double.NaN
+
+    private companion object {
+        const val SLOPE_SIGMAS = 3.0
+    }
 
     fun reset() {
         t.clear()
@@ -520,8 +588,51 @@ class SteadyError(
             den += dt * dt
         }
         val slope = if (den > 0) num / den else 0.0
-        if (abs(slope) > maxSlope && now - since < maxWaitMs) return null
+        // How well the slope is known from these readings: on the device positions read +-10-30 ms apart poll to poll, and
+        // a fixed bar then either never passes or passes on noise in the middle of a start transient (the build-aa
+        // simulation with that noise measured landings 50-130 ms off). A slope is "moving" only when it is clearly more than
+        // its own standard error.
+        var rss = 0.0
+        for (i in 0 until n) {
+            val r = e[i] - (me + slope * (t[i] - mt))
+            rss += r * r
+        }
+        val se = if (den > 0 && n > 2) kotlin.math.sqrt(rss / (n - 2) / den) else 0.0
+        if (abs(slope) > maxSlope + SLOPE_SIGMAS * se && now - since < maxWaitMs) return null
+        // standard error of a median of n readings with this scatter (1.2533 = sqrt(pi / 2))
+        lastMedianSe = 1.2533 * kotlin.math.sqrt(rss / (n - 2).coerceAtLeast(1)) / kotlin.math.sqrt(n.toDouble())
         val sorted = e.sorted()
         return if (n % 2 == 1) sorted[n / 2] else (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+    }
+
+    /** How uncertain the last [result] is (ms), from the scatter of the readings it was taken over. */
+    var lastMedianSe = 0.0
+        private set
+}
+
+/** Median of (reported position - wall clock) over the last [spanMs] of a steadily playing deck; see [positionAt]. */
+class SmoothedClock(private val spanMs: Double = 1000.0) {
+    private val t = ArrayDeque<Double>()
+    private val d = ArrayDeque<Double>()
+
+    /** Smoothed position of [deck] at [now]; falls back to the raw reading (and forgets) while the deck is not playing. */
+    fun positionAt(now: Double, deck: Deck): Double {
+        if (!deck.isPlaying) {
+            t.clear()
+            d.clear()
+            return deck.positionMs()
+        }
+        if (t.isEmpty() || t.last() != now) {
+            t.addLast(now)
+            d.addLast(deck.positionMs() - now)
+            while (now - t.first() > spanMs) {
+                t.removeFirst()
+                d.removeFirst()
+            }
+        }
+        val sorted = d.sorted()
+        val n = sorted.size
+        val med = if (n % 2 == 1) sorted[n / 2] else (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+        return now + med
     }
 }

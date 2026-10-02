@@ -485,7 +485,9 @@ class DjEngine(
 
         _debug.update { it.copy(phase = "decoding") }
         val out = timeline.outgoingDecodeRange()
-        val inn = timeline.incomingDecodeRange()
+        val spliceOutcome = org.simpmusic.dj.android.splice.SpliceSchedule.plan(timeline, from.durationMs)
+        val splice = (spliceOutcome as? org.simpmusic.dj.android.splice.SpliceSchedule.Companion.Outcome.Ok)?.schedule
+        val inn = incomingDecodeRange(timeline, splice)
         DjLog.i(TAG, "decoding windows: outgoing $fromId src ${out.first}..${out.last} ms, incoming $toId src ${inn.first}..${inn.last} ms (window plan time ${timeline.startRelMs}..${timeline.endRelMs})")
         val tDec = System.nanoTime()
         val outgoingTail = decoder.decodeStereoRange(fromId, out.first, out.last, cancel)
@@ -517,8 +519,6 @@ class DjEngine(
             file.delete()
             return
         }
-        val spliceOutcome = org.simpmusic.dj.android.splice.SpliceSchedule.plan(timeline, from.durationMs)
-        val splice = (spliceOutcome as? org.simpmusic.dj.android.splice.SpliceSchedule.Companion.Outcome.Ok)?.schedule
         val reference = splice?.let { referenceAround(incomingHead, it.incomingStartSourceMs - 300.0, 7000.0) }
         DjLog.i(
             TAG,
@@ -536,6 +536,20 @@ class DjEngine(
                 "window player must start at src ${"%.0f".format(prepared.triggerSourceMs(calibrator.startLatencyMs))} ms (${plan.kind}: ${plan.reason})",
         )
         listener?.invoke(prepared)
+    }
+
+    /**
+     * The incoming track's decode range: what the renderer needs, widened so it also covers where the spliced incoming
+     * deck starts silently (its reference audio must come from the SAME decode the window was rendered from, or the join
+     * inherits that decode's own offset). A range starting in the first [DECODE_FROM_ZERO_BELOW_MS] decodes from 0
+     * instead: a decode from the start needs no extractor seek, whose landing is the one thing not exact here.
+     */
+    private fun incomingDecodeRange(timeline: org.simpmusic.dj.android.window.WindowTimeline, splice: org.simpmusic.dj.android.splice.SpliceSchedule?): LongRange {
+        val r = timeline.incomingDecodeRange()
+        var first = r.first
+        if (splice != null) first = minOf(first, (splice.incomingStartSourceMs - REFERENCE_LEAD_MS).toLong())
+        if (first < DECODE_FROM_ZERO_BELOW_MS) first = 0L
+        return first.coerceAtLeast(0L)..r.last
     }
 
     /** Mono copy of [pcm] over [fromMs, fromMs + lengthMs] (clipped to what was decoded), or null when too little is left. */
@@ -641,3 +655,9 @@ class FallbackOnlyPlanner : TransitionPlanner {
             reason = "no TransitionPlanner installed",
         )
 }
+
+/** The spliced incoming deck's reference starts 300 ms before its start; decode a little more than that. */
+private const val REFERENCE_LEAD_MS = 1000.0
+
+/** An incoming decode range starting before this decodes from 0 (no extractor seek): a few seconds at 10x+ real time. */
+private const val DECODE_FROM_ZERO_BELOW_MS = 30_000L

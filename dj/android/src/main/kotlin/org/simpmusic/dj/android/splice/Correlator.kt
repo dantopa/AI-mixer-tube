@@ -26,6 +26,10 @@ object Correlator {
         val deltaMs: Double,
         /** Normalised correlation at the peak, 0..1. */
         val confidence: Double,
+        /** Clear enough to act on. [skew] leaves this to the caller's threshold; [skewRobust] decides it. */
+        val trusted: Boolean = true,
+        /** Found by [skewRobust]'s wide search. */
+        val wide: Boolean = false,
     )
 
     fun skew(
@@ -99,6 +103,29 @@ object Correlator {
         }
         val lag = bestK + sub - frac
         return Result(lag * 1000.0 / rate, bestV.coerceIn(0.0, 1.0))
+    }
+
+    /**
+     * [skew] over +-[narrowMs]; when that is not a clear match, once more over +-[wideMs], accepted only at [wideMinConfidence].
+     * The two decodes are of the same bytes, so a low peak means the lag is beyond the narrow search (a deck whose time
+     * base came from a seek has landed 50+ ms off on the device), not that the audio differs. A wide search can lock onto
+     * a repeat of the music a beat away, hence the stricter bar; a beat is 300+ ms, outside [wideMs].
+     */
+    fun skewRobust(
+        captured: CapturedAudio,
+        reference: ReferenceAudio,
+        narrowMs: Double = 60.0,
+        wideMs: Double = 200.0,
+        narrowMinConfidence: Double = 0.8,
+        wideMinConfidence: Double = 0.9,
+    ): Result? {
+        val narrow = skew(captured, reference, narrowMs)
+        if (narrow != null && narrow.confidence >= narrowMinConfidence) return narrow
+        val wide = skew(captured, reference, wideMs) ?: return narrow?.let { Result(it.deltaMs, it.confidence, trusted = false) }
+        if (wide.confidence >= wideMinConfidence) return Result(wide.deltaMs, wide.confidence, wide = true)
+        // neither is trusted: report the better one, marked untrusted (the caller logs it and assumes no skew)
+        val best = if (narrow == null || wide.confidence > narrow.confidence) wide else narrow
+        return Result(best.deltaMs, best.confidence, trusted = false, wide = best === wide)
     }
 
     private fun energy(a: FloatArray, from: Int, to: Int): Double {

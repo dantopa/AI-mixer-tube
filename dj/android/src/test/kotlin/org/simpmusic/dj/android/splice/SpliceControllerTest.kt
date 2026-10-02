@@ -106,6 +106,7 @@ class SpliceControllerTest {
         inSkew: Double,
         calibrator: LatencyCalibrator = LatencyCalibrator(),
         verbose: Boolean = false,
+        jitterMs: Double = 2.0,
     ): Outcome {
         val rng = Random(seed)
         val schedule = (SpliceSchedule.plan(timeline, 240_000) as SpliceSchedule.Companion.Outcome.Ok).schedule
@@ -113,7 +114,7 @@ class SpliceControllerTest {
         val outMusic = music(11L + seed)
         val inMusic = music(97L + seed)
         val outStart = schedule.outgoingStartSourceMs
-        val outDeck = FakeDeck("out", clock, outStart - 50.0, startPlaying = true, jitterMs = 2.0, seed = seed)
+        val outDeck = FakeDeck("out", clock, outStart - 50.0, startPlaying = true, jitterMs = jitterMs, seed = seed)
         val outHandle = FakeHandle(outDeck, leadMs = 250.0 + rng.nextDouble() * 400, signal = outMusic, skewMs = outSkew)
         val outWatched = SeekWatch(outDeck) { outHandle.onSeek() }
         var inDeck: FakeDeck? = null
@@ -130,7 +131,7 @@ class SpliceControllerTest {
                             "in", clock, seekSourceMs.toDouble(),
                             startLatencyMs = 80.0 + rng.nextDouble() * 250,
                             seekLatencyMs = 120.0 + rng.nextDouble() * 150,
-                            jitterMs = 2.0, seed = seed + 7,
+                            jitterMs = jitterMs, seed = seed + 7,
                             smoothMinMs = 30.0, smoothMaxMs = 160.0,
                         )
                     d.play()
@@ -161,6 +162,7 @@ class SpliceControllerTest {
             }
         val incomingRef =
             ReferenceAudio(48_000, schedule.incomingStartSourceMs - 300, FloatArray(7000 * 48) { i -> inMusic(((schedule.incomingStartSourceMs - 300) * 48).roundToLong() + i) })
+        var ctl: SpliceController? = null
         val c =
             SpliceController(
                 timeline = timeline,
@@ -173,8 +175,15 @@ class SpliceControllerTest {
                 clock = clock,
                 userVolume = { 1f },
                 calibrator = calibrator,
-                log = { if (verbose) println("%.0f ".format(clock.now) + it) },
+                log = {
+                    if (verbose) {
+                        val d = inDeck
+                        val truth = if (d != null && d.isPlaying) " [true offset %.1f, in report err %.1f]".format(outDeck.truePositionMs + ctl!!.outgoingPointerMs - d.truePositionMs, d.reportingErrorMs()) else ""
+                        println("%.0f ".format(clock.now) + it + truth)
+                    }
+                },
             )
+        ctl = c
         c.start()
         val end = clock.now + timeline.windowMs + 5000
         while (clock.now < end && !c.isFinished) {
@@ -236,6 +245,34 @@ class SpliceControllerTest {
             assertTrue("seed $seed hand-off ${o.handoffErrorMs}", abs(o.handoffErrorMs) < 6.0)
             assertTrue("seed $seed join ${o.joinErrorMs}", abs(o.joinErrorMs) < 8.0)
         }
+    }
+
+    @Test
+    fun device_like_position_noise_and_skews_beyond_the_narrow_search_still_land_close() {
+        // build aa's device log: positions read +-10-30 ms apart poll to poll, and decks whose time base came from a seek
+        // carried ~50-60 ms of skew, at the edge of the old +-60 ms search
+        var worstHandoff = 0.0
+        var worstJoin = 0.0
+        for (seed in 1..30) {
+            val rng = Random(seed * 17)
+            val outSkew = (if (rng.nextBoolean()) 1 else -1) * rng.nextDouble(45.0, 140.0)
+            val inSkew = (if (rng.nextBoolean()) 1 else -1) * rng.nextDouble(45.0, 140.0)
+            val o = simulate(seed, earlyEntryPlan, outSkew = outSkew, inSkew = inSkew, jitterMs = 15.0)
+            if (abs(o.joinErrorMs) > 8 || abs(o.handoffErrorMs) > 8) {
+                println("BAD noisy seed $seed (out skew ${"%.1f".format(outSkew)}, in skew ${"%.1f".format(inSkew)}): hand-off ${o.handoffErrorMs} join ${o.joinErrorMs}")
+                simulate(seed, earlyEntryPlan, outSkew = outSkew, inSkew = inSkew, jitterMs = 15.0, verbose = true)
+            }
+            assertNull("seed $seed: ${o.failed}", o.failed)
+            assertTrue("seed $seed outgoing entry ${o.spliceErrorMs} (skew $outSkew)", abs(o.spliceErrorMs) < 0.05)
+            worstHandoff = maxOf(worstHandoff, abs(o.handoffErrorMs))
+            worstJoin = maxOf(worstJoin, abs(o.joinErrorMs))
+        }
+        println("device-like noise: hand-off worst ${"%.2f".format(worstHandoff)} ms, join worst ${"%.2f".format(worstJoin)} ms")
+        // measured: hand-off worst 3.9 ms; joins exact in most seeds, worst 11 ms (a 60 ms incoming skew found late, after
+        // the silent re-seeks had used their time). Before build ab these skews were beyond the search and assumed 0, i.e.
+        // the join missed by the whole skew (45-140 ms).
+        assertTrue("hand-off $worstHandoff ms", worstHandoff < 6.0)
+        assertTrue("join $worstJoin ms", worstJoin < 15.0)
     }
 
     @Test
