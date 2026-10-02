@@ -33,6 +33,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered
 import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered_description
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere
+import simpmusic.composeapp.generated.resources.ai_dj_precise_splice
+import simpmusic.composeapp.generated.resources.ai_dj_precise_splice_description
 import simpmusic.composeapp.generated.resources.ai_dj_simple_mode
 import simpmusic.composeapp.generated.resources.ai_dj_simple_mode_description
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere_description
@@ -267,6 +269,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                     subtitle = stringResource(Res.string.ai_dj_mix_anywhere_description),
                     smallSubtitle = true,
                     switch = ((settings.mixPoint == MixPoint.ANYWHERE) to { on -> scope.launch { repo.setMixAnywhere(on) }; Unit }),
+                    isEnable = notCasting,
+                )
+                SettingItem(
+                    title = stringResource(Res.string.ai_dj_precise_splice),
+                    subtitle = stringResource(Res.string.ai_dj_precise_splice_description),
+                    smallSubtitle = true,
+                    switch = (settings.preciseSplice to { on -> scope.launch { repo.setPreciseSplice(on) }; Unit }),
                     isEnable = notCasting,
                 )
                 SettingItem(

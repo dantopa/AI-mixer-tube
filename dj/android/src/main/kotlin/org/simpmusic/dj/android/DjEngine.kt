@@ -57,6 +57,10 @@ class PreparedTransition(
     val window: RenderedWindow,
     /** Duration of the incoming track (analysis), for the session's duration while the window is audible. */
     val toDurationMs: Long = 0L,
+    /** How to splice this window into the two players' own audio; null = only the three-player path. */
+    val splice: org.simpmusic.dj.android.splice.SpliceSchedule? = null,
+    /** Our decode of the incoming track where its player will start (to measure that player's decode skew). */
+    val incomingReference: org.simpmusic.dj.android.splice.ReferenceAudio? = null,
 ) {
     /** Outgoing source position at which the window player must start playing (silently) so it is running at window sample 0. */
     fun triggerSourceMs(startLatencyMs: Double): Double = timeline.outgoingSourceAtWindowStart - startLatencyMs
@@ -173,6 +177,18 @@ interface DjHooks {
     /** The user asked for the mix to happen as soon as possible (UI, main thread). See [MixNowResult]. */
     fun mixNow(): MixNowResult = MixNowResult.DISABLED
 
+    /** Splice mode: one audio processor per player, first in its chain (null = none, the three-player path only). */
+    fun createSplicer(): androidx.media3.common.audio.AudioProcessor? = null
+
+    /** The adapter built [player] with [splicer] in its chain. */
+    fun bindSplicer(player: androidx.media3.exoplayer.ExoPlayer, splicer: androidx.media3.common.audio.AudioProcessor) {}
+
+    /** The players' splicers, for the transition runner. */
+    val splicers: org.simpmusic.dj.android.splice.SplicerRegistry? get() = null
+
+    /** Splice mode allowed by the user (the three-player path is used otherwise). */
+    val spliceEnabled: Boolean get() = false
+
     val debug: StateFlow<DjDebugState>
 
     /** The picture of the mix being prepared / played (null = nothing to show). */
@@ -204,7 +220,17 @@ class DjEngine(
     private val analysisWaitMs: Long = 10 * 60_000L,
     /** Human title of a track for the mix picture; null = show the id. */
     private val titleOf: suspend (String) -> String? = { null },
+    private val splicerRegistry: org.simpmusic.dj.android.splice.SplicerRegistry = org.simpmusic.dj.android.splice.SplicerRegistry(),
 ) : DjHooks {
+    override fun createSplicer(): androidx.media3.common.audio.AudioProcessor = splicerRegistry.create()
+
+    override fun bindSplicer(player: androidx.media3.exoplayer.ExoPlayer, splicer: androidx.media3.common.audio.AudioProcessor) =
+        splicerRegistry.bind(player, splicer)
+
+    override val splicers: org.simpmusic.dj.android.splice.SplicerRegistry get() = splicerRegistry
+
+    override val spliceEnabled: Boolean get() = settingsFlow.value.preciseSplice
+
     private val _debug = MutableStateFlow(DjDebugState())
     override val debug: StateFlow<DjDebugState> = _debug.asStateFlow()
 
@@ -491,7 +517,15 @@ class DjEngine(
             file.delete()
             return
         }
-        val prepared = PreparedTransition(fromId, toId, plan, timeline, rendered, to.durationMs)
+        val spliceOutcome = org.simpmusic.dj.android.splice.SpliceSchedule.plan(timeline, from.durationMs)
+        val splice = (spliceOutcome as? org.simpmusic.dj.android.splice.SpliceSchedule.Companion.Outcome.Ok)?.schedule
+        val reference = splice?.let { referenceAround(incomingHead, it.incomingStartSourceMs - 300.0, 7000.0) }
+        DjLog.i(
+            TAG,
+            if (splice != null) "splice plan: $splice, reference ${reference?.let { "%.0f..%.0f ms".format(it.startMs, it.endMs) } ?: "none"}"
+            else "splice not possible: ${(spliceOutcome as org.simpmusic.dj.android.splice.SpliceSchedule.Companion.Outcome.Rejected).reason} (three-player path)",
+        )
+        val prepared = PreparedTransition(fromId, toId, plan, timeline, rendered, to.durationMs, splice, reference)
         ready = prepared
         val titles = (runCatching { titleOf(fromId) }.getOrNull() ?: fromId) to (runCatching { titleOf(toId) }.getOrNull() ?: toId)
         _mixView.value = runCatching { DjMixViewBuilder.build(plan, from, to, titles) }.onFailure { DjLog.w(TAG, "mix view could not be built: ${it.message}") }.getOrNull()
@@ -502,6 +536,22 @@ class DjEngine(
                 "window player must start at src ${"%.0f".format(prepared.triggerSourceMs(calibrator.startLatencyMs))} ms (${plan.kind}: ${plan.reason})",
         )
         listener?.invoke(prepared)
+    }
+
+    /** Mono copy of [pcm] over [fromMs, fromMs + lengthMs] (clipped to what was decoded), or null when too little is left. */
+    private fun referenceAround(pcm: org.simpmusic.dj.android.render.StereoPcm, fromMs: Double, lengthMs: Double): org.simpmusic.dj.android.splice.ReferenceAudio? {
+        val rate = pcm.sampleRate
+        val first = ((fromMs - pcm.startMs) * rate / 1000.0).toLong().coerceIn(0L, pcm.frames.toLong())
+        val last = ((fromMs + lengthMs - pcm.startMs) * rate / 1000.0).toLong().coerceIn(0L, pcm.frames.toLong())
+        val n = (last - first).toInt()
+        if (n < rate * 2) return null
+        val out = FloatArray(n)
+        val src = pcm.interleaved
+        for (i in 0 until n) {
+            val f = ((first + i) * 2).toInt()
+            out[i] = (src[f] + src[f + 1]) * 0.5f
+        }
+        return org.simpmusic.dj.android.splice.ReferenceAudio(rate, pcm.startMs + first * 1000.0 / rate, out)
     }
 
     private fun checkBounds(timeline: WindowTimeline, from: TrackAnalysis, to: TrackAnalysis): String? {

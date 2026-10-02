@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 2 Oct 2026 08:13:25 +0000
+Subject: [PATCH] media3: AI DJ splice mode (window spliced into the players'
+ own audio)
+
+- every player built with dj hooks gets a splicer AudioProcessor first in its chain (pass-through until armed)
+  and is registered with the DJ (bindSplicer)
+- DjPlayerPort: startIncomingSilently (incoming player playing silently next to the outgoing one, queue not
+  moved), commitIncomingPlaying (flip the queue adopting that playing player as session delegate),
+  releaseIncomingSilent (abort before the commit)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LjDCXJJeuBALofdjqC8qgu
+---
+ .../exoplayer/CrossfadeExoPlayerAdapter.kt    | 86 ++++++++++++++++++-
+ 1 file changed, 85 insertions(+), 1 deletion(-)
+
+diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+index c077213..92c8c7e 100644
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -554,6 +554,8 @@ internal class CrossfadeExoPlayerAdapter(
+         val equalizer = EqualizerAudioProcessor { internalEqualizerCurve }
+         val echo = EchoAudioProcessor { internalAudioEffects }
+         val reverb = ConvolutionReverbAudioProcessor { internalAudioEffects }
++        // AI DJ: splices a pre-rendered mix into this player's own audio at exact frames (pass-through otherwise).
++        val djSplicer = dj?.createSplicer()
+ 
+         val perPlayerRenderers =
+             object : DefaultRenderersFactory(context) {
+@@ -577,7 +579,7 @@ internal class CrossfadeExoPlayerAdapter(
+                                 // crossfade has to be able to sweep them out along with it rather
+                                 // than the other way round. The sleep fade stays last, because it
+                                 // is the master attenuation and has to survive everything above.
+-                                arrayOf(equalizer, echo, reverb, crossfadeFilter, sleepFade),
++                                listOfNotNull(djSplicer, equalizer, echo, reverb, crossfadeFilter, sleepFade).toTypedArray(),
+                                 SilenceSkippingAudioProcessor(
+                                     2_000_000,
+                                     (20_000 / 2_000_000).toFloat(),
+@@ -610,6 +612,7 @@ internal class CrossfadeExoPlayerAdapter(
+                 .setMediaSourceFactory(mediaSourceFactory)
+                 .setRenderersFactory(perPlayerRenderers)
+                 .build()
++        if (djSplicer != null) dj?.bindSplicer(player, djSplicer)
+ 
+         return PlayerWithFilter(player, crossfadeFilter)
+     }
+@@ -2902,6 +2905,10 @@ internal class CrossfadeExoPlayerAdapter(
+ 
+     @Volatile
+     private var djRunner: DjTransitionRunner? = null
++
++    /** Splice mode: the incoming player playing silently next to the outgoing one before the commit. */
++    private var djSilentIncoming: ExoPlayer? = null
++    private var djSilentIncomingFilter: CrossfadeFilterAudioProcessor? = null
+     private var djLastContext: DjQueueContext? = null
+     private var djLastLoggedTrack: String? = null
+     private var djLastExplainMs = 0L
+@@ -3126,6 +3133,83 @@ internal class CrossfadeExoPlayerAdapter(
+                 return nextPlayer
+             }
+ 
++            override val supportsSplice: Boolean get() = true
++
++            override fun startIncomingSilently(seekSourceMs: Long): ExoPlayer? {
++                if (isCrossfading || isCastActive || !hasNextMediaItem()) return null
++                val nextItem = playlist.getOrNull(getNextMediaItemIndex()) ?: return null
++                if (nextItem.mediaId != djRunner?.prepared?.toId) return null
++                val cached = precachedPlayers.remove(nextItem.mediaId)
++                val player: ExoPlayer
++                val filter: CrossfadeFilterAudioProcessor?
++                if (cached != null) {
++                    player = cached.player
++                    filter = cached.filter
++                } else {
++                    val pwf = createExoPlayerInstance()
++                    player = pwf.player
++                    filter = pwf.filter
++                    player.setMediaItem(nextItem.toMedia3MediaItem())
++                    player.prepare()
++                }
++                // Plays SILENTLY next to the outgoing player, carrying the mix; the queue does not move yet.
++                player.setSeekParameters(SeekParameters.EXACT)
++                player.skipSilenceEnabled = false
++                player.volume = 0f
++                player.seekTo(seekSourceMs)
++                player.playWhenReady = true
++                djSilentIncoming = player
++                djSilentIncomingFilter = filter
++                return player
++            }
++
++            override fun commitIncomingPlaying(
++                player: ExoPlayer,
++                uiPosition: () -> Long?,
++            ): Boolean {
++                if (player !== djSilentIncoming) return false
++                if (isCrossfading || isCastActive || !hasNextMediaItem()) return false
++                val nextIndex = getNextMediaItemIndex()
++                val nextItem = playlist.getOrNull(nextIndex) ?: return false
++                if (nextItem.mediaId != djRunner?.prepared?.toId) return false
++                val prepared = djRunner?.prepared
++                secondaryPlayer = player
++                secondaryPlayerFilter = djSilentIncomingFilter
++                djSilentIncoming = null
++                djSilentIncomingFilter = null
++                setupPlayerListenerInternal(player)
++                forwardingPlayer.positionOverride =
++                    DelegatingForwardingPlayer.SessionPositionOverride(
++                        position = { uiPosition() ?: player.currentPosition },
++                        duration = { player.duration.takeIf { it > 0 } ?: prepared?.toDurationMs ?: 0L },
++                    )
++                forwardingPlayer.overrideSeekHandler = { ms -> seekTo(ms) }
++                forwardingPlayer.swapDelegate(player)
++
++                requestAudioFocusInternal()
++                forwardingPlayer.suppressPlaybackEnded = false
++                crossfadeFromIndex = localCurrentMediaItemIndex
++                localCurrentMediaItemIndex = nextIndex
++                setCrossfading(true)
++                listeners.forEach {
++                    it.onMediaItemTransition(nextItem, PlayerConstants.MEDIA_ITEM_TRANSITION_REASON_AUTO)
++                }
++                forwardingPlayer.notifyMediaItemChanged()
++                return true
++            }
++
++            override fun releaseIncomingSilent(player: ExoPlayer) {
++                if (djSilentIncoming === player) {
++                    djSilentIncoming = null
++                    djSilentIncomingFilter = null
++                }
++                try {
++                    player.stop()
++                    player.release()
++                } catch (_: Exception) {
++                }
++            }
++
+             override fun onWindowRetired() {
+                 val next = secondaryPlayer ?: return
+                 forwardingPlayer.positionOverride = null
+-- 
+2.43.0
+

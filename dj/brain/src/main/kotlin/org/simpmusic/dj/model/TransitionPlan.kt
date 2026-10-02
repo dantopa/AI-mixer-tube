@@ -217,6 +217,11 @@ data class DjSettings(
     val mixPoint: MixPoint = MixPoint.ANYWHERE,
     /** With [MixPoint.ANYWHERE]: the outgoing track must have played at least min(this fraction of its length, 75 s). */
     val minPlayedFraction: Float = 0.55f,
+    /**
+     * Execute mixes by splicing the rendered window into the two players' own audio at exact frames (two players,
+     * pointer-locked) instead of a third player locked by position. Off = the three-player path.
+     */
+    val preciseSplice: Boolean = true,
 )
 
 /** Shape of the energy over an Auto DJ session; feeds [org.simpmusic.dj.recommend.RecommendContext.energyTrend]. */

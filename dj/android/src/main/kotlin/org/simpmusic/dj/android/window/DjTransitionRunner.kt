@@ -54,6 +54,26 @@ interface DjPlayerPort {
     fun onFailed(reason: String, result: AbortResult)
 
     fun log(message: String)
+
+    // ---- splice mode (two players, the mix spliced into their own audio). Defaults: not supported. ----
+
+    /** The adapter implements the splice-mode calls below. */
+    val supportsSplice: Boolean get() = false
+
+    /**
+     * Starts the INCOMING track's player silently (volume 0, playing) from [seekSourceMs], without moving the queue.
+     * Null when that is not possible.
+     */
+    fun startIncomingSilently(seekSourceMs: Long): ExoPlayer? = null
+
+    /**
+     * Point of no return in splice mode: flip the queue to the incoming track, adopting [player] (already playing, from
+     * [startIncomingSilently]) as the incoming player and session delegate. False when that is not possible.
+     */
+    fun commitIncomingPlaying(player: ExoPlayer, uiPosition: () -> Long?): Boolean = false
+
+    /** Splice mode, abort before the commit: release the player from [startIncomingSilently]. */
+    fun releaseIncomingSilent(player: ExoPlayer) {}
 }
 
 /**
@@ -93,6 +113,7 @@ class DjTransitionRunner(
         private set
 
     private var incomingPlayer: ExoPlayer? = null
+    private var splice: org.simpmusic.dj.android.splice.SpliceController? = null
 
     /** Builds and prepares the window player (paused at 0). Cheap; called as soon as the render finished. */
     fun prepareWindow(): Boolean {
@@ -135,6 +156,8 @@ class DjTransitionRunner(
     /** Starts the transition: window plays silently next to the outgoing player. False when it cannot start. */
     fun start(): Boolean {
         val outPlayer = port.currentPlayer() ?: return false
+        if (isDone) return false
+        if (startSplice(outPlayer)) return true
         val wDeck = windowDeck ?: return false
         val wPlayer = windowPlayer ?: return false
         if (!wDeck.isReady || isDone) return false
@@ -188,6 +211,14 @@ class DjTransitionRunner(
      * was running; otherwise what the adapter needs to adopt the incoming player.
      */
     fun abort(): AbortResult? {
+        splice?.let { sc ->
+            if (isDone) return null
+            tickJob?.cancel()
+            val result = sc.abort()
+            isDone = true
+            isRunning = false
+            return result
+        }
         val c = controller
         if (c == null || isDone) {
             if (!isRunning) discard()
@@ -201,11 +232,109 @@ class DjTransitionRunner(
     }
 
     /** UI position on the incoming track once it is the current track, else null. */
-    fun uiPositionMs(): Long? = controller?.uiPositionMs()
+    fun uiPositionMs(): Long? = splice?.uiPositionMs() ?: controller?.uiPositionMs()
 
     fun outgoingUiPositionMs(): Long? = controller?.outgoingUiPositionMs()
 
     val phase: TransitionController.Phase? get() = controller?.phase
+
+    /**
+     * Splice mode: the window is spliced into the outgoing and incoming players' own audio (see SpliceController).
+     * False when this transition or these players cannot do it; the three-player path runs instead.
+     */
+    private fun startSplice(outPlayer: ExoPlayer): Boolean {
+        val schedule = prepared.splice ?: return false
+        val registry = hooks.splicers ?: return false
+        if (!hooks.spliceEnabled || !port.supportsSplice) return false
+        val outEngine = registry.engineOf(outPlayer)
+        if (outEngine == null || !outEngine.isSupported) {
+            hooks.log("xition", "splice: outgoing player has no usable splicer (${if (outEngine == null) "none" else "format"}); three-player path")
+            return false
+        }
+        val pcm =
+            try {
+                org.simpmusic.dj.android.splice.MappedWindowPcm.open(prepared.window.file)
+            } catch (e: Exception) {
+                null
+            }
+        if (pcm == null) {
+            hooks.log("xition", "splice: window file unreadable; three-player path")
+            return false
+        }
+        registry.currentWindow = pcm
+        // The prepared window player is not needed: the mix plays inside the two track players.
+        windowDeck?.release()
+        windowDeck = null
+        windowPlayer = null
+        var silentIncoming: ExoPlayer? = null
+        val host =
+            object : org.simpmusic.dj.android.splice.SpliceHost {
+                override fun startIncoming(seekSourceMs: Long): Pair<Deck, org.simpmusic.dj.android.splice.SpliceHandle>? {
+                    val p = port.startIncomingSilently(seekSourceMs) ?: return null
+                    val engine = registry.engineOf(p)
+                    if (engine == null) {
+                        port.releaseIncomingSilent(p)
+                        return null
+                    }
+                    silentIncoming = p
+                    incomingPlayer = p
+                    return ExoDeck("live-in", p) to engine
+                }
+
+                override fun commit(uiPosition: () -> Long?): Boolean {
+                    val p = silentIncoming ?: return false
+                    return port.commitIncomingPlaying(p, uiPosition)
+                }
+
+                override fun releaseIncoming() {
+                    silentIncoming?.let { port.releaseIncomingSilent(it) }
+                    silentIncoming = null
+                }
+
+                override fun onFinished() = finish(failed = null, result = null)
+
+                override fun onFailed(reason: String, result: AbortResult) {
+                    tickJob?.cancel()
+                    finish(failed = reason, result = result)
+                }
+
+                override fun onEvent(event: TransitionEvent) {
+                    hooks.log("xition", "event: $event (calibrator ${hooks.calibrator})")
+                }
+            }
+        val sc =
+            org.simpmusic.dj.android.splice.SpliceController(
+                timeline = prepared.timeline,
+                schedule = schedule,
+                window = pcm,
+                incomingReference = prepared.incomingReference,
+                outgoing = ExoDeck("live-out", outPlayer),
+                outgoingSplice = outEngine,
+                host = host,
+                clock = clock,
+                userVolume = port::userVolume,
+                calibrator = hooks.calibrator,
+                log = { hooks.log("xition", it) },
+                background = { work -> scope.launch(kotlinx.coroutines.Dispatchers.Default) { work() } },
+            )
+        splice = sc
+        isRunning = true
+        hooks.log("xition", "START (spliced) ${prepared.fromId} -> ${prepared.toId} ${prepared.plan.kind}: outgoing position=${outPlayer.currentPosition} ms")
+        sc.start()
+        tickJob =
+            scope.launch {
+                while (isActive && !sc.isFinished) {
+                    if (sc.phase.ordinal < org.simpmusic.dj.android.splice.SpliceController.Phase.HANDOFF.ordinal && port.currentPlayer() !== outPlayer) {
+                        val result = sc.abort()
+                        finish(failed = "outgoing player replaced", result = result)
+                        return@launch
+                    }
+                    sc.tick()
+                    delay(tickMs)
+                }
+            }
+        return true
+    }
 
     private fun finish(failed: String?, result: AbortResult?) {
         if (isDone && failed == null) return
