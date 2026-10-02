@@ -97,6 +97,23 @@ class PlannerAnywhereTest {
     }
 
     @Test
+    fun mixNowLandsInsideTheShortSpanFromEarlyInTheTrack() {
+        // "mix now" 30 s into the track: earliest = position + lead, latest = earliest + 20 s, nothing played required
+        val from = ana(124f, "a", longTrack)
+        val to = ana(126f, "b")
+        val now = anywhere.copy(minPlayedFraction = 0f)
+        for (position in listOf(30_000L, 70_000L, 110_000L)) {
+            val earliest = position + 25_000L
+            val latest = earliest + 20_000L
+            val p = planner.plan(from, to, now, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest))
+            println("mix now at $position: ${p.kind} exit ${p.exitPointMs} in [$earliest, $latest]: ${p.reason}")
+            assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+            assertTrue(p.exitPointMs in earliest..latest, "exit ${p.exitPointMs} outside [$earliest, $latest]")
+            assertTrue(p.exitPointMs + p.preRollMs >= earliest)
+        }
+    }
+
+    @Test
     fun theSamePlanComesOutTwice() {
         val from = ana(124f, "a", longTrack)
         val to = ana(150f, "b")

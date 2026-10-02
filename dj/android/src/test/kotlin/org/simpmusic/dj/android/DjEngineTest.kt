@@ -29,6 +29,7 @@ import org.simpmusic.dj.android.scheduler.DjAnalysisScheduler
 import org.simpmusic.dj.android.store.AnalysisStore
 import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.PcmAudio
+import org.simpmusic.dj.model.PlanConstraints
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalyzer
@@ -79,6 +80,12 @@ class DjEngineTest {
 
     private class Planner(var plan: (TrackAnalysis?, TrackAnalysis?) -> TransitionPlan) : TransitionPlanner {
         var calls = 0
+        val constraints = ArrayList<PlanConstraints>()
+
+        override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
+            this.constraints += constraints
+            return plan(from, to, settings)
+        }
 
         override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan {
             calls++
@@ -156,6 +163,60 @@ class DjEngineTest {
             r.engine.onQueueContext(DjQueueContext("A", "B"))
             advanceUntilIdle()
             assertEquals(1, r.renderer.requests.size)
+        }
+
+    @Test
+    fun mixNowReplansWithAShortSpanAndPublishesTheEarlierMix() =
+        runTest {
+            // the regular plan exits at 180 s; a "mix now" plan exits 5 s after its earliest allowed point
+            val r = rig()
+            r.engine.onPosition(30_000)
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            assertEquals(180_000L, r.engine.prepared("A", "B")!!.plan.exitPointMs)
+            assertEquals(Long.MAX_VALUE, r.planner.constraints.single().latestExitMs)
+
+            r.planner.plan = { a, b ->
+                val c = r.planner.constraints.last()
+                fakePlan(a!!.videoId, b!!.videoId, exit = c.earliestExitMs + 5_000)
+            }
+            assertEquals(MixNowResult.STARTED, r.engine.mixNow())
+            advanceUntilIdle()
+            val c = r.planner.constraints.last()
+            assertEquals(55_000L, c.earliestExitMs)
+            assertEquals(75_000L, c.latestExitMs)
+            val p = r.engine.prepared("A", "B")!!
+            assertEquals(60_000L, p.plan.exitPointMs)
+            assertEquals(2, r.prepared.size)
+            // the new window is close now: a second tap keeps it
+            assertEquals(MixNowResult.ALREADY_SOON, r.engine.mixNow())
+        }
+
+    @Test
+    fun mixNowWithNothingMixableSoonKeepsTheRegularPlan() =
+        runTest {
+            val r = rig()
+            r.engine.onPosition(30_000)
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            // every "mix now" attempt lands beyond the span (e.g. only the end-of-track fallback mixes)
+            assertEquals(MixNowResult.STARTED, r.engine.mixNow())
+            advanceUntilIdle()
+            assertEquals(180_000L, r.engine.prepared("A", "B")!!.plan.exitPointMs)
+            assertEquals("mix now: no good point soon", r.engine.debug.value.lastOutcome)
+        }
+
+    @Test
+    fun mixNowWithoutAPairOrWhileMixingSaysSo() =
+        runTest {
+            val r = rig()
+            assertEquals(MixNowResult.NO_PAIR, r.engine.mixNow())
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            r.engine.onMixStarted(r.engine.prepared("A", "B")!!)
+            assertEquals(MixNowResult.ALREADY_MIXING, r.engine.mixNow())
+            r.settings.value = DjSettings(enabled = false)
+            assertEquals(MixNowResult.DISABLED, r.engine.mixNow())
         }
 
     @Test

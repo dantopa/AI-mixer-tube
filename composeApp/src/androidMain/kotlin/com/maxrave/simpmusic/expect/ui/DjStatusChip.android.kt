@@ -1,6 +1,7 @@
 package com.maxrave.simpmusic.expect.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -27,6 +29,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
+import com.maxrave.simpmusic.ui.icon.FastForward
 import com.maxrave.simpmusic.ui.icon.GraphicEq
 import com.maxrave.simpmusic.ui.icon.SimpIcons
 import com.maxrave.simpmusic.ui.theme.typo
@@ -35,6 +38,7 @@ import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import org.simpmusic.dj.android.DjDebugState
 import org.simpmusic.dj.android.DjHooks
+import org.simpmusic.dj.android.MixNowResult
 import org.simpmusic.dj.android.scheduler.AnalysisStatus
 import org.simpmusic.dj.android.scheduler.BlockReason
 import org.simpmusic.dj.android.settings.DjSettingsRepository
@@ -58,6 +62,11 @@ import simpmusic.composeapp.generated.resources.dj_chip_last
 import simpmusic.composeapp.generated.resources.dj_chip_mix_playing
 import simpmusic.composeapp.generated.resources.dj_chip_mix_playing_simple
 import simpmusic.composeapp.generated.resources.dj_chip_mixing
+import simpmusic.composeapp.generated.resources.dj_mix_now
+import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
+import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
+import simpmusic.composeapp.generated.resources.dj_mix_now_soon
+import simpmusic.composeapp.generated.resources.dj_mix_now_started
 import simpmusic.composeapp.generated.resources.dj_chip_planning
 import simpmusic.composeapp.generated.resources.dj_chip_ready
 import simpmusic.composeapp.generated.resources.dj_chip_rendering
@@ -83,6 +92,14 @@ actual fun DjStatusChip(modifier: Modifier) {
     val mix by hooks.mixView.collectAsStateWithLifecycle()
     var showLog by remember { mutableStateOf(false) }
     var showMix by remember { mutableStateOf(false) }
+    // Answer to the last "mix now" tap, shown in the chip for a few seconds.
+    var mixNowAnswer by remember { mutableStateOf<MixNowResult?>(null) }
+    LaunchedEffect(mixNowAnswer) {
+        if (mixNowAnswer != null) {
+            delay(3500)
+            mixNowAnswer = null
+        }
+    }
 
     val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
     val mixing = debug.isMixing
@@ -93,11 +110,20 @@ actual fun DjStatusChip(modifier: Modifier) {
             delay(500)
         }
     }
-    val text = chipText(debug, positionMs, nowMs)
+    val answer =
+        when (mixNowAnswer) {
+            MixNowResult.STARTED -> stringResource(Res.string.dj_mix_now_started)
+            MixNowResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
+            MixNowResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
+            MixNowResult.ALREADY_SOON -> stringResource(Res.string.dj_mix_now_soon)
+            MixNowResult.DISABLED, null -> null
+        }
+    val text = answer ?: chipText(debug, positionMs, nowMs)
 
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     Surface(
         // Tap: the picture of the mix (both tracks overlapping) when there is one, else the log. Long-press: always the log.
-        modifier = modifier.combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
+        modifier = Modifier.weight(1f, fill = false).combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
         shape = CircleShape,
         // Unmistakable while a mix is actually playing: the accent colour instead of the quiet dark pill.
         color = if (mixing) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
@@ -122,6 +148,22 @@ actual fun DjStatusChip(modifier: Modifier) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+    // "Mix now": the next good phrase start within ~20-45 s, instead of where the DJ would have chosen.
+    if (!mixing) {
+        Surface(
+            modifier = Modifier.clickable { mixNowAnswer = hooks.mixNow() },
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.45f),
+        ) {
+            androidx.compose.foundation.Image(
+                imageVector = SimpIcons.FastForward,
+                contentDescription = stringResource(Res.string.dj_mix_now),
+                modifier = Modifier.padding(5.dp).size(16.dp),
+                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
+            )
+        }
+    }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
     // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.

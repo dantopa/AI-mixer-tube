@@ -31,6 +31,7 @@ import org.simpmusic.dj.mixview.DjMixViewData
 import org.simpmusic.dj.model.AnalysisPriority
 import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.DjSettings
+import org.simpmusic.dj.model.MixPoint
 import org.simpmusic.dj.model.PlanConstraints
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
@@ -120,6 +121,20 @@ data class DjDebugState(
         }
 }
 
+/** What a "mix now" request did. */
+enum class MixNowResult {
+    /** Re-planning for the next good phrase within the short span; the chip follows it as usual. */
+    STARTED,
+    /** AI DJ is off. */
+    DISABLED,
+    /** No next track to mix into (blocked, end of queue), or this pair was already played. */
+    NO_PAIR,
+    /** A mix is playing right now. */
+    ALREADY_MIXING,
+    /** The prepared mix starts within the same span anyway. */
+    ALREADY_SOON,
+}
+
 /**
  * Everything the player adapter sees of the DJ. Narrow on purpose: the adapter patch stays tiny and every
  * decision (analysis, planning, rendering, thresholds) lives here.
@@ -154,6 +169,9 @@ interface DjHooks {
 
     /** Playback position of the CURRENT track, from the adapter's 50 ms poll. The planner may not touch what is already gone. */
     fun onPosition(positionMs: Long) {}
+
+    /** The user asked for the mix to happen as soon as possible (UI, main thread). See [MixNowResult]. */
+    fun mixNow(): MixNowResult = MixNowResult.DISABLED
 
     val debug: StateFlow<DjDebugState>
 
@@ -201,6 +219,10 @@ class DjEngine(
     override val fallbackCrossfadeMs: Long get() = settingsFlow.value.fallbackCrossfadeMs
 
     private var pairKey: String? = null
+    private var pairFrom: String? = null
+    private var pairTo: String? = null
+    /** The running pipeline serves a "mix now" request (cleared when the pair changes). */
+    private var mixNowKey: String? = null
     private var pipeline: Job? = null
     private var pipelineCancel: AtomicBoolean? = null
     private var ready: PreparedTransition? = null
@@ -253,8 +275,36 @@ class DjEngine(
         ready?.let { deleteWindow(it) }
         ready = null
         pairKey = null
+        mixNowKey = null
         consumedKey = null
         stopMixView()
+    }
+
+    override fun mixNow(): MixNowResult {
+        if (!settingsFlow.value.enabled) return MixNowResult.DISABLED
+        val k = pairKey
+        val from = pairFrom
+        val to = pairTo
+        if (k == null || from == null || to == null || k == consumedKey) {
+            DjLog.i(TAG, "mix now: no pair to mix (pair=$k consumed=$consumedKey)")
+            return MixNowResult.NO_PAIR
+        }
+        if (_debug.value.isMixing) return MixNowResult.ALREADY_MIXING
+        val r = ready
+        if (r != null) {
+            val inMs = r.triggerSourceMs(calibrator.startLatencyMs) - playbackPositionMs
+            if (inMs <= EARLIEST_EXIT_AHEAD_MS + MIX_NOW_SPAN_MS) {
+                DjLog.i(TAG, "mix now: the prepared mix starts in ${inMs.toLong()} ms anyway, keeping it")
+                return MixNowResult.ALREADY_SOON
+            }
+        }
+        DjLog.i(TAG, "mix now: re-planning $from -> $to for the next good point (position $playbackPositionMs ms)")
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        mixNowKey = k
+        startPipeline(from, to)
+        return MixNowResult.STARTED
     }
 
     private var lastLoggedContext: String? = null
@@ -274,6 +324,7 @@ class DjEngine(
         if (context.blockedReason != null || next == null) {
             if (pairKey != null) cancelPipeline()
             pairKey = null
+            mixNowKey = null
             ready?.let { deleteWindow(it) }
             ready = null
             _mixView.value = null
@@ -293,6 +344,9 @@ class DjEngine(
         ready?.let { deleteWindow(it) }
         ready = null
         pairKey = k
+        pairFrom = context.currentId
+        pairTo = next
+        mixNowKey = null
         startPipeline(context.currentId, next)
     }
 
@@ -357,9 +411,28 @@ class DjEngine(
         _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
         val settings = settingsFlow.value
         // The window needs the outgoing audio decoded and rendered before it plays, so the mix cannot start sooner than that.
-        val constraints = PlanConstraints(earliestExitMs = playbackPositionMs + EARLIEST_EXIT_AHEAD_MS)
-        DjLog.i(TAG, "planning with mixPoint=${settings.mixPoint}, earliest exit ${constraints.earliestExitMs} ms (position $playbackPositionMs ms)")
-        val plan = withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
+        val earliest = playbackPositionMs + EARLIEST_EXIT_AHEAD_MS
+        val constraints = PlanConstraints(earliestExitMs = earliest)
+        val plan =
+            if (mixNowKey == key(fromId, toId)) {
+                // "Mix now": anywhere in the track, nothing has to have played, and only the next MIX_NOW_SPAN_MS of exits count.
+                val now = settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
+                val latest = earliest + MIX_NOW_SPAN_MS
+                DjLog.i(TAG, "planning MIX NOW: exit between $earliest and $latest ms (position $playbackPositionMs ms)")
+                val p = withContext(heavyDispatcher) { planner.plan(from, to, now, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest)) }
+                if (p.kind != PlanKind.SIMPLE_CROSSFADE && p.exitPointMs <= latest) {
+                    p
+                } else {
+                    // nothing that mixes in the short span: keep the regular mix, and say why
+                    DjLog.i(TAG, "mix now: no mixable point before $latest ms (${p.kind} exit ${p.exitPointMs}: ${p.reason}); keeping the regular plan")
+                    mixNowKey = null
+                    _debug.update { it.copy(lastOutcome = "mix now: no good point soon") }
+                    withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
+                }
+            } else {
+                DjLog.i(TAG, "planning with mixPoint=${settings.mixPoint}, earliest exit $earliest ms (position $playbackPositionMs ms)")
+                withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
+            }
         publishPlan(from, to, plan)
         if (plan.kind == PlanKind.SIMPLE_CROSSFADE) {
             DjLog.i(TAG, "plan is SIMPLE_CROSSFADE (${plan.reason}): the app's normal crossfade will do this transition")
@@ -498,6 +571,9 @@ private const val TAG = "engine"
 
 /** Time the pipeline needs (decode + render + player warm-up; measured 9.4 s end to end on a Pixel 10 Pro, 2026-09-30) between "now" and the earliest audible instant of a mix. */
 private const val EARLIEST_EXIT_AHEAD_MS = 25_000L
+
+/** "Mix now": how far past the earliest possible exit the planner may look for a good phrase start. */
+private const val MIX_NOW_SPAN_MS = 20_000L
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {

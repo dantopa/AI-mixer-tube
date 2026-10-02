@@ -179,6 +179,12 @@ data class PlanConstraints(
      * needed to decode and render the window (>= 40 s).
      */
     val earliestExitMs: Long = 0L,
+    /**
+     * Latest `exitPointMs` an ANYWHERE candidate may use ("mix now": the next good point within a short span). Long.MAX_VALUE
+     * = no limit. Only the anywhere search honours it; a plan whose exit lands later (the end-of-track fallback) is the
+     * caller's to reject.
+     */
+    val latestExitMs: Long = Long.MAX_VALUE,
 )
 
 /** Knobs the user (or the app) controls. */

@@ -48,8 +48,9 @@ class DjTransitionPlanner : TransitionPlanner {
         val to = toRaw?.let(GridRepair::cached)
         val s = sanitise(settings)
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
+        val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
-            planUnsafe(from, to, s, earliest)
+            planUnsafe(from, to, s, earliest, latest)
         } catch (e: Exception) {
             try {
                 simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), s, "planner error (${e.javaClass.simpleName}): ${e.message}", earliest)
@@ -84,7 +85,7 @@ class DjTransitionPlanner : TransitionPlanner {
     /** Everything about a pair of tracks that does not depend on the chosen exit and entry. */
     private class Ctx(
         val from: TrackAnalysis, val to: TrackAnalysis, val out: TrackContext, val inc: TrackContext,
-        val settings: DjSettings, val earliest: Long, val barsMode: Boolean, val conf: Float, val notes: List<String>,
+        val settings: DjSettings, val earliest: Long, val latest: Long, val barsMode: Boolean, val conf: Float, val notes: List<String>,
         val key: KeyDecision, val requestedUnits: Int, val minUnits: Int, val softFloor: Int,
     ) {
         val fromId: String get() = out.id
@@ -121,7 +122,7 @@ class DjTransitionPlanner : TransitionPlanner {
         return KeyDecision(shiftOut, shiftIn, clash, keyNote, confMin)
     }
 
-    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long): TransitionPlan {
+    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long = Long.MAX_VALUE): TransitionPlan {
         val fromId = from?.videoId.orEmpty()
         val toId = to?.videoId.orEmpty()
         if (from == null || to == null) {
@@ -158,7 +159,7 @@ class DjTransitionPlanner : TransitionPlanner {
         conf = min(conf, key.confMin)
         val requestedUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
         val c = Ctx(
-            from, to, out, inc, settings, earliest, barsMode, conf, notes, key, requestedUnits,
+            from, to, out, inc, settings, earliest, latest, barsMode, conf, notes, key, requestedUnits,
             minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8,
         )
         if (settings.mixPoint == MixPoint.ANYWHERE) {
@@ -249,7 +250,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val bar = out.beatsPerBar * beat
         val minPlayed = min(settings.minPlayedFraction.toDouble() * out.audibleEndMs, MixScoring.MIN_PLAYED_CAP_MS.toDouble()).toLong()
         val lower = max(max(c.earliest, minPlayed), (4 * beat + 250.0).toLong())
-        val upper = out.audibleEndMs - (bar + MARGIN_MS).toLong()
+        val upper = min(out.audibleEndMs - (bar + MARGIN_MS).toLong(), c.latest)
         if (upper < lower) return null
         val overlapWanted = c.requestedUnits * if (c.barsMode) bar else beat
         val endPick = pickExit(out, out.audibleEndMs, overlapWanted + MARGIN_MS, bar + MARGIN_MS, lower.toDouble(), out.outro()?.range?.startMs)
