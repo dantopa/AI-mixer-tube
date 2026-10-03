@@ -105,6 +105,13 @@ internal class TrackContext(val analysis: TrackAnalysis) {
         cleanTimes(snapped, MAX_DURATION_MS)
     }
 
+    /** Starts of the 16-bar blocks when `PhraseGrid` is sure of them (or the owner marked one); empty otherwise. */
+    val blockTimes: Set<Long> =
+        analysis.phrases?.takeIf { barsTrusted && it.blocksTrusted }?.blockStartsMs?.map { beats.getOrNull(nearestBeatIndex(it)) ?: it }?.toHashSet() ?: emptySet()
+
+    /** The 8-bar phrases are `PhraseGrid`'s (sure, or marked by the owner), not the counted convention. */
+    val phrasesFound: Boolean = barsTrusted && analysis.phrases?.phrasesTrusted == true
+
     val sections: List<Section>? = analysis.sections?.takeIf { it.confidence >= Trust.SECTIONS }?.value
     val sectionsConf: Float = analysis.sections?.confidence ?: 0f
 

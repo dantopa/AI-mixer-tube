@@ -132,13 +132,15 @@ class DjAnalysisScheduler(
 
     /**
      * A full analysis stored before the tracker kept its per-beat downbeat logits (build ac) cannot tell which beat is the 1
-     * (see `BarPhase`): the playing and the next track are analysed again, once per process each, so a "Perfect" mix
+     * (see `BarPhase`), and one stored before the structure frames (build ae) gives `PhraseGrid` only loudness and bass to
+     * find the phrases with: the playing and the next track are analysed again, once per process each, so a "Perfect" mix
      * becomes possible for them. The library keeps its old analyses (they still rank and beat-match).
      */
     private fun needsBarEvidence(videoId: String): Boolean {
         if (synchronized(upgraded) { videoId in upgraded }) return false
         val a = store.get(videoId, analyzer.id) ?: return false
-        return a.beatTimesMs != null && a.beatDownbeatLogits == null && "beat-this" in analyzer.id
+        if (a.beatTimesMs == null) return false
+        return (a.beatDownbeatLogits == null && "beat-this" in analyzer.id) || a.structureFrames.isEmpty()
     }
 
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
@@ -492,7 +494,7 @@ class DjAnalysisScheduler(
 
     private fun summary(a: TrackAnalysis): String =
         "bpm=${a.bpm?.let { "%.1f(c%.2f)".format(it.value, it.confidence) }} beats=${a.beatTimesMs?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} " +
-            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.BarPhase.describe(org.simpmusic.dj.analysis.AnalysisRefiner.cached(a))}"
+            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.AnalysisRefiner.cached(a).let { r -> org.simpmusic.dj.analysis.BarPhase.describe(r) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(r) }}"
 
     private fun queueSummary(): String = queue.values.joinToString(prefix = "[", postfix = "]") { "${it.videoId}/${it.priority}" }
 

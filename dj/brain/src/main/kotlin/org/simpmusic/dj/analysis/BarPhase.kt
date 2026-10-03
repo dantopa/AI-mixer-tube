@@ -275,18 +275,18 @@ object BarPhase {
 
 /**
  * The grid every consumer reads: [GridRepair] (fix the beats), then [BarPhase] (decide the 1). Cached like the repair,
- * keyed by the stored analysis and the owner's tapped 1.
+ * then [PhraseGrid] (find the phrases). Cached, keyed by the stored analysis and the owner's tapped 1 and phrase mark.
  */
 object AnalysisRefiner {
     private val cache =
-        object : LinkedHashMap<Pair<TrackAnalysis, Long?>, TrackAnalysis>(64, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Pair<TrackAnalysis, Long?>, TrackAnalysis>?) = size > 256
+        object : LinkedHashMap<Triple<TrackAnalysis, Long?, Long?>, TrackAnalysis>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<TrackAnalysis, Long?, Long?>, TrackAnalysis>?) = size > 256
         }
 
     fun cached(raw: TrackAnalysis): TrackAnalysis {
-        val key = raw to BarPhase.anchors(raw.videoId)
+        val key = Triple(raw, BarPhase.anchors(raw.videoId), PhraseGrid.anchors(raw.videoId))
         synchronized(cache) { cache[key]?.let { return it } }
-        val r = BarPhase.apply(GridRepair.cached(raw), raw)
+        val r = PhraseGrid.apply(BarPhase.apply(GridRepair.cached(raw), raw))
         synchronized(cache) { cache[key] = r }
         return r
     }

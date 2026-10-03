@@ -8,6 +8,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.simpmusic.dj.analysis.AnalysisRefiner
 import org.simpmusic.dj.analysis.BarPhase
+import org.simpmusic.dj.analysis.PhraseGrid
 import org.simpmusic.dj.model.*
 import org.simpmusic.dj.planner.DjTransitionPlanner
 import kotlin.random.Random
@@ -24,6 +25,7 @@ class BarPhaseTest {
     @AfterTest
     fun noAnchors() {
         BarPhase.anchors = { null }
+        PhraseGrid.anchors = { null }
     }
 
     /**
@@ -196,5 +198,30 @@ class BarPhaseTest {
         // without evidence at all
         val r = planner.plan(a0, b0, s, c)
         assertTrue(r.reason.startsWith(PlanConstraints.PERFECT_REFUSED) && "no bar-phase evidence" in r.reason, r.reason)
+    }
+
+    @Test
+    fun withMarkedPhrasesPerfectPutsTheSixteenOnTheSixteen() {
+        val planner = DjTransitionPlanner()
+        val s = DjSettings(enabled = true, minPlayedFraction = 0f)
+        val a0 = track("qa")
+        val b0 = track("qb", bpm = 126f)
+        val a = a0.copy(beatDownbeatLogits = logits(a0, 3f, -3f, 1f))
+        val b = b0.copy(beatDownbeatLogits = logits(b0, 3f, -3f, 1f, seed = 2))
+        // the owner marked a phrase start on bar 3 of each (an odd offset the counted phrases would never hit)
+        val markA = a0.beatTimesMs!!.value[a0.downbeatBeatIndices!!.value[3]].toLong()
+        val markB = b0.beatTimesMs!!.value[b0.downbeatBeatIndices!!.value[3]].toLong()
+        PhraseGrid.anchors = { when (it) { "qa" -> markA; "qb" -> markB; else -> null } }
+        val ra = AnalysisRefiner.cached(a)
+        val rb = AnalysisRefiner.cached(b)
+        println(PhraseGrid.describe(ra) + " | " + PhraseGrid.describe(rb))
+        assertTrue(markA in ra.phrases!!.blockStartsMs && markB in rb.phrases!!.blockStartsMs)
+        val c = PlanConstraints(earliestExitMs = 40_000L, latestExitMs = 160_000L, perfect = true)
+        val p = planner.plan(a, b, s, c)
+        println("perfect: ${p.kind} exit ${p.exitPointMs} entry ${p.entryPointMs}: ${p.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+        assertTrue("16 on 16" in p.reason, p.reason)
+        assertTrue(p.exitPointMs in ra.phrases!!.blockStartsMs, "exit ${p.exitPointMs} not on a 16 line")
+        assertTrue(p.entryPointMs in rb.phrases!!.blockStartsMs, "entry ${p.entryPointMs} not on a 16 line")
     }
 }

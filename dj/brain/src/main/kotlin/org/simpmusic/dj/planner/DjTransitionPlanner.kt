@@ -273,6 +273,22 @@ class DjTransitionPlanner : TransitionPlanner {
     // ---------------------------------------------------------------------------------------------
     // ANYWHERE: candidate exits and entries across the whole tracks, scored as pairs
 
+    private fun perfectBonus(out: TrackContext, inc: TrackContext, e: Pick, n: Pick): Double {
+        if (e.levelName != "phrase" || n.levelName != "phrase") return 0.0
+        var b = PERFECT_PHRASE_BONUS
+        if (out.phrasesFound && inc.phrasesFound) b += PERFECT_FOUND_PHRASE_BONUS
+        if (e.timeMs in out.blockTimes && n.timeMs in inc.blockTimes) b += PERFECT_BLOCK_BONUS
+        return b
+    }
+
+    /** "16 on 16", "phrase on phrase (found)", ... for the Perfect reason. */
+    private fun perfectLevel(out: TrackContext, inc: TrackContext, e: Pick, n: Pick): String = when {
+        e.levelName == "phrase" && n.levelName == "phrase" && e.timeMs in out.blockTimes && n.timeMs in inc.blockTimes -> "16 on 16"
+        e.levelName == "phrase" && n.levelName == "phrase" && out.phrasesFound && inc.phrasesFound -> "phrase on phrase (found)"
+        e.levelName == "phrase" && n.levelName == "phrase" -> "phrase on phrase (counted)"
+        else -> "${e.levelName} on ${n.levelName}"
+    }
+
     private fun planAnywhere(c: Ctx): TransitionPlan? {
         val out = c.out
         val inc = c.inc
@@ -306,8 +322,9 @@ class DjTransitionPlanner : TransitionPlanner {
         for (n in entries) perIn[n.timeMs] = localPeriod(inc, n.timeMs, ahead = true)
         for (e in exits) for (n in entries) {
             val t = chooseTempo(perOut.getValue(e.timeMs), perIn.getValue(n.timeMs), bend)
-            // perfect: phrase on phrase first (a phrase of one track ends where the other's starts), then bar on bar
-            val base = MixCandidates.score(e, n) + if (c.perfect && e.pick.levelName == "phrase" && n.pick.levelName == "phrase") PERFECT_PHRASE_BONUS else 0.0
+            // perfect: the 16 on the 16 first, then phrase on phrase (one track's phrase ends where the other's starts), then
+            // bar on bar; a found (or marked) phrase counts more than a counted one
+            val base = MixCandidates.score(e, n) + if (c.perfect) perfectBonus(out, inc, e.pick, n.pick) else 0.0
             val tempoTerm = if (t == null) 0.0 else MixScoring.W_TEMPO * (1.0 - 0.5 * min(1.0, max(abs(t.rateOut - 1.0), abs(t.rateIn - 1.0)) / max(bend, 1e-6)))
             all += Cand(MixCandidates.ScoredPair(e, n, base + tempoTerm), t)
         }
@@ -341,7 +358,7 @@ class DjTransitionPlanner : TransitionPlanner {
                 val mo = BarPhase.marginAt(c.from, cand.pair.exit.timeMs) ?: 0f
                 val mi = BarPhase.marginAt(c.to, cand.pair.entry.timeMs) ?: 0f
                 return it.withReason(
-                    PlanConstraints.PERFECT_OK + "${cand.pair.exit.pick.levelName} on ${cand.pair.entry.pick.levelName}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
+                    PlanConstraints.PERFECT_OK + "${perfectLevel(out, inc, cand.pair.exit.pick, cand.pair.entry.pick)}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
                         mo, mi, c.from.barPhase?.source, c.to.barPhase?.source,
                     ) + where,
                 )
@@ -1003,6 +1020,8 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** Perfect mode: a phrase-on-phrase pair outranks a bar-on-bar one of up to this much better score. */
         private const val PERFECT_PHRASE_BONUS = 0.15
+        private const val PERFECT_FOUND_PHRASE_BONUS = 0.1
+        private const val PERFECT_BLOCK_BONUS = 0.15
 
         /** The variety pick never enters the incoming track later than this share of its length (unless the best pair already does). */
         private const val VARIETY_ENTRY_FRACTION = 0.15

@@ -127,8 +127,47 @@ class DspTrackAnalyzer : TrackAnalyzer {
         return base.copy(
             bpm = bpm, beatTimesMs = beatsC, downbeatBeatIndices = downC, beatsPerBar = bpb,
             phraseStartsMs = phrases, key = key, sections = sectionsC, timbre = timbre,
+            highBandEnergy = highBandGrid(on, eNorm.size),
+            structureHopMs = STRUCTURE_HOP_MS,
+            structureFrames = structureFrames(sp),
         )
     }
+
+    /** Mean high-band level ([OnsetFeatures.levelHigh], log) per 100 ms block, scaled 0..1 over the track, 3 decimals. */
+    private fun highBandGrid(on: OnsetFeatures, blocks: Int): List<Float> {
+        val per = Grid.SPEC_HOP_MS / 1000.0 * Grid.FPS
+        val v = FloatArray(blocks) { b ->
+            val f0 = (b * per).toInt()
+            val f1 = min(on.nFrames, ((b + 1) * per).toInt())
+            if (f1 <= f0) Float.NaN else { var s = 0f; for (f in f0 until f1) s += on.levelHigh[f]; s / (f1 - f0) }
+        }
+        val ok = v.filter { !it.isNaN() }
+        if (ok.isEmpty()) return emptyList()
+        val lo = ok.min()
+        val hi = ok.max()
+        return v.map { if (it.isNaN() || hi <= lo) 0f else round3((it - lo) / (hi - lo)) }
+    }
+
+    /** Chroma (12) + MFCC c1..c5 per [STRUCTURE_HOP_MS], averaged over the active spectral frames, 2 decimals. */
+    private fun structureFrames(sp: SpectralFeatures): List<Float> {
+        val per = STRUCTURE_HOP_MS / Grid.SPEC_HOP_MS
+        val n = sp.nFrames / per
+        val out = ArrayList<Float>(n * TrackAnalysis.STRUCTURE_DIM)
+        for (b in 0 until n) {
+            val acc = DoubleArray(TrackAnalysis.STRUCTURE_DIM)
+            var cnt = 0
+            for (j in b * per until (b + 1) * per) {
+                if (!sp.active[j]) continue
+                for (k in 0 until 12) acc[k] += sp.chroma[j * 12 + k]
+                for (k in 0 until 5) acc[12 + k] += sp.mfcc[j * SpectralFeatures.MFCC_N + k]
+                cnt++
+            }
+            for (k in acc.indices) out += if (cnt == 0) 0f else Math.round(acc[k] / cnt * 100).toFloat() / 100f
+        }
+        return out
+    }
+
+    private fun round3(x: Float) = Math.round(x * 1000f) / 1000f
 
     /** [1 2 1]/4 smoothing: removes the beat-phase flutter of 100 ms RMS blocks without blurring section edges. */
     private fun smooth121(a: FloatArray): FloatArray {
@@ -212,6 +251,8 @@ class DspTrackAnalyzer : TrackAnalyzer {
 
     companion object {
         const val ID = "dsp-1"
+        /** Hop of [TrackAnalysis.structureFrames]: half a second resolves a bar (>= 1.5 s) into 3+ frames. */
+        const val STRUCTURE_HOP_MS = 500
         private const val SILENCE_DB = -75f
     }
 }

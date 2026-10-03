@@ -106,9 +106,24 @@ data class TrackAnalysis(
     val beatDownbeatLogits: List<Float>? = null,
     /** How the bar phase was decided; set on read by `BarPhase`, never by an analyzer. */
     val barPhase: BarPhaseInfo? = null,
+    /**
+     * Level above ~6 kHz (hats, cymbals, crashes), same hop and normalisation as [energy]. Phrase evidence: a crash or an
+     * open hat pattern starting on the line. Empty for analyses made before it was stored.
+     */
+    val highBandEnergy: List<Float> = emptyList(),
+    /** Hop of [structureFrames] (ms); 0 when they are absent. */
+    val structureHopMs: Int = 0,
+    /**
+     * Per [structureHopMs] frame, [STRUCTURE_DIM] values: the chroma (12, L1-normalised: what is being played) then MFCC
+     * c1..c5 (the timbre: which instruments). What changes at a phrase line beyond loudness. Rounded to 2 decimals.
+     */
+    val structureFrames: List<Float> = emptyList(),
+    /** Where the phrases and 16-bar blocks start; set on read by `PhraseGrid`, never by an analyzer. */
+    val phrases: PhraseInfo? = null,
 ) {
     companion object {
         const val SCHEMA_VERSION = 1
+        const val STRUCTURE_DIM = 17
     }
 }
 
@@ -131,6 +146,28 @@ data class BarPhaseInfo(
     /** Bars where the 1 moved compared with the tracker's own downbeats. */
     val changedBars: Int,
     val barMarginLogits: List<Float> = emptyList(),
+)
+
+/**
+ * The phrase lattice found by `PhraseGrid` on the decided bars: per bar, its position in a 16-bar block. The 8-bar phrase
+ * starts are also in [TrackAnalysis.phraseStartsMs].
+ */
+@Serializable
+data class PhraseInfo(
+    /** "detected" or "anchored" (the owner marked a phrase start). */
+    val source: String,
+    /** How much better the lattice explains the evidence than any shift other than half a block. */
+    val phraseMargin: Float,
+    /** How much better than the same lattice shifted by half a block (8 bars): is the 16 really the 16. */
+    val blockMargin: Float,
+    val phrasesTrusted: Boolean,
+    val blocksTrusted: Boolean,
+    /** Blocks that started somewhere other than a 4-bar boundary of the previous one (pickups, odd intros, stretched breaks). */
+    val irregular: Int,
+    /** Start (ms) of every 16-bar block. */
+    val blockStartsMs: List<Long>,
+    /** Per bar (same order as the downbeats): its position in its block, 0..15. */
+    val barPositions: List<Int>,
 )
 
 /** Lowest confidence at which each fact is trusted for a beat-matched transition. */

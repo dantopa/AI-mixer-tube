@@ -282,11 +282,14 @@ fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, S
             put("titles.tsv", names.entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
             // The owner's tapped 1s (videoId -> source ms): ground truth for the bar-phase vote.
             put("taps.tsv", org.simpmusic.dj.android.perfect.UserDownbeats.all().entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
+            // The owner's phrase marks (videoId -> source ms): ground truth for the phrase lines.
+            put("phrases.tsv", org.simpmusic.dj.android.perfect.UserPhrases.all().entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
             // One phasegram per analysis that carries the bar-phase evidence: does the "1" sit where the network hears it?
             File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
                 runCatching {
                     val a = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString(org.simpmusic.dj.model.TrackAnalysis.serializer(), f.readText())
                     org.simpmusic.dj.android.perfect.Phasegram.png(a, names[a.videoId])?.let { put("phasegram/${a.videoId}.png", it) }
+                    org.simpmusic.dj.android.perfect.Phrasegram.png(a, names[a.videoId])?.let { put("phrasegram/${a.videoId}.png", it) }
                 }
             }
         }

@@ -230,6 +230,35 @@ actual fun DjStatusChip(modifier: Modifier) {
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             )
         }
+        // Where the bar is in its phrase: "5/16" once the 16-bar lines are found or marked, "5/8" when only the 8-bar
+        // phrases are, amber with "?" while it is a guess. Tap it when a new phrase starts (a drop, the bass coming back:
+        // timing within a bar is enough); long-press forgets the mark.
+        val inBlock = bar.barInBlock
+        if (inBlock != null) {
+            val label =
+                when {
+                    bar.blockSure || bar.phraseMarked -> "${inBlock + 1}/16"
+                    bar.phraseSure -> "${inBlock % 8 + 1}/8"
+                    else -> "${inBlock + 1}/16?"
+                }
+            val lineNow = if (bar.blockSure || bar.phraseMarked || !bar.phraseSure) inBlock == 0 else inBlock % 8 == 0
+            Surface(
+                modifier = Modifier.combinedClickable(
+                    onClick = { if (hooks.markPhrase(positionMs) != null) tapped++ },
+                    onLongClick = { hooks.clearPhrase(); tapped++ },
+                ),
+                shape = CircleShape,
+                color = if (lineNow && bar.beatInBar == 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+            ) {
+                Text(
+                    text = label,
+                    style = typo().labelMedium,
+                    fontWeight = if (lineNow) FontWeight.Bold else null,
+                    color = if (bar.phraseSure || bar.phraseMarked) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+        }
     }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })

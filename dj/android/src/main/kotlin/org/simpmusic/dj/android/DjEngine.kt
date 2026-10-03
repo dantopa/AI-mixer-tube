@@ -131,7 +131,19 @@ data class DjDebugState(
 }
 
 /** Where the playing track is in its bar: [beatInBar] 0 = the 1. [sure] = the bars are trusted; [anchored] = the owner set the 1. */
-data class BarBeat(val beatInBar: Int, val beatsPerBar: Int, val sure: Boolean, val anchored: Boolean)
+data class BarBeat(
+    val beatInBar: Int,
+    val beatsPerBar: Int,
+    val sure: Boolean,
+    val anchored: Boolean,
+    /** Bar of the 16-bar block the beat is in (0..15); null without a phrase lattice. */
+    val barInBlock: Int? = null,
+    /** The 8-bar phrases / the 16-bar line are found or marked (not just a guess). */
+    val phraseSure: Boolean = false,
+    val blockSure: Boolean = false,
+    /** The owner marked where a phrase starts on this track. */
+    val phraseMarked: Boolean = false,
+)
 
 /** What a "mix now" request did. */
 enum class MixNowResult {
@@ -207,6 +219,12 @@ interface DjHooks {
 
     /** Which beat of the bar the playing track is on at [positionMs], for the 1-2-3-4 counter; null when unknown. */
     fun barBeatAt(positionMs: Long): BarBeat? = null
+
+    /** "A phrase starts here": the owner heard a new phrase begin at [positionMs]; snapped to the nearest bar line. */
+    fun markPhrase(positionMs: Long): Long? = null
+
+    /** Forget the owner's phrase mark for the playing track (back to detection). */
+    fun clearPhrase() {}
 
     /** Playback position of the current track (ms), for countdowns. */
     val positionMs: Long get() = 0L
@@ -308,7 +326,7 @@ class DjEngine(
     @Volatile private var currentRaw: TrackAnalysis? = null
     @Volatile private var currentRawAtMs = 0L
     @Volatile private var refreshingCurrent = false
-    private var refinedFor: Pair<TrackAnalysis, Long?>? = null
+    private var refinedFor: Triple<TrackAnalysis, Long?, Long?>? = null
     private var refined: TrackAnalysis? = null
 
     /** The playing track's grid as the planner sees it (repaired, bar phase decided, tapped 1 applied). Main thread. */
@@ -328,8 +346,8 @@ class DjEngine(
             }
         }
         if (raw == null || raw.videoId != id) return null
-        val key = raw to BarPhase.anchors(id)
-        if (refinedFor?.first !== raw || refinedFor?.second != key.second) {
+        val key = Triple(raw, BarPhase.anchors(id), org.simpmusic.dj.analysis.PhraseGrid.anchors(id))
+        if (refinedFor?.first !== raw || refinedFor?.second != key.second || refinedFor?.third != key.third) {
             refined = AnalysisRefiner.cached(raw)
             refinedFor = key
         }
@@ -345,7 +363,36 @@ class DjEngine(
         val k = downs.binarySearch(bi).let { if (it >= 0) it else -it - 2 }
         if (k < 0) return null
         val info = r.barPhase
-        return BarBeat(bi - downs[k], r.beatsPerBar ?: 4, sure = info?.trusted == true, anchored = info?.source == "anchored")
+        val ph = r.phrases
+        return BarBeat(
+            bi - downs[k],
+            r.beatsPerBar ?: 4,
+            sure = info?.trusted == true,
+            anchored = info?.source == "anchored",
+            barInBlock = ph?.barPositions?.getOrNull(k),
+            phraseSure = ph?.phrasesTrusted == true,
+            blockSure = ph?.blocksTrusted == true,
+            phraseMarked = ph?.source == "anchored",
+        )
+    }
+
+    override fun markPhrase(positionMs: Long): Long? {
+        val id = pairFrom ?: return null
+        val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
+        val r = currentRefined()
+        val beats = r?.beatTimesMs?.value
+        val downs = r?.downbeatBeatIndices?.value
+        // the nearest bar line (a phrase starts on a 1); without bars yet the raw time is kept and snapped later
+        val t = if (beats.isNullOrEmpty() || downs.isNullOrEmpty()) heard else downs.map { beats[it].toLong() }.minBy { kotlin.math.abs(it - heard) }
+        org.simpmusic.dj.android.perfect.UserPhrases.set(id, t, "marked at $heard ms")
+        _debug.update { it.copy(lastOutcome = "phrase marked: the 16 starts here") }
+        return t
+    }
+
+    override fun clearPhrase() {
+        val id = pairFrom ?: return
+        org.simpmusic.dj.android.perfect.UserPhrases.clear(id)
+        _debug.update { it.copy(lastOutcome = "phrases back to automatic") }
     }
 
     /** Taps of the current session: (beat index, tap time). */
@@ -644,7 +691,7 @@ class DjEngine(
         val plan =
             if (perfectKey == key(fromId, toId)) {
                 val latest = earliest + PERFECT_SPAN_MS
-                DjLog.i(TAG, "planning PERFECT: exit between $earliest and $latest ms (position $playbackPositionMs ms); ${BarPhase.describe(AnalysisRefiner.cached(from))} | ${BarPhase.describe(AnalysisRefiner.cached(to))}")
+                DjLog.i(TAG, "planning PERFECT: exit between $earliest and $latest ms (position $playbackPositionMs ms); ${AnalysisRefiner.cached(from).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }} | ${AnalysisRefiner.cached(to).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }}")
                 val p = withContext(heavyDispatcher) { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest, perfect = true)) }
                 if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) {
                     DjLog.i(TAG, "perfect: ${p.reason}")
