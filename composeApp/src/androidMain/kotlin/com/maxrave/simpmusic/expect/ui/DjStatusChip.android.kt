@@ -30,6 +30,7 @@ import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
 import com.maxrave.simpmusic.ui.icon.FastForward
+import com.maxrave.simpmusic.ui.icon.Star
 import com.maxrave.simpmusic.ui.icon.GraphicEq
 import com.maxrave.simpmusic.ui.icon.SimpIcons
 import com.maxrave.simpmusic.ui.theme.typo
@@ -67,6 +68,12 @@ import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
 import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
 import simpmusic.composeapp.generated.resources.dj_mix_now_soon
 import simpmusic.composeapp.generated.resources.dj_mix_now_started
+import simpmusic.composeapp.generated.resources.dj_perfect_already
+import simpmusic.composeapp.generated.resources.dj_perfect_mix
+import simpmusic.composeapp.generated.resources.dj_perfect_ready
+import simpmusic.composeapp.generated.resources.dj_perfect_started
+import simpmusic.composeapp.generated.resources.dj_tap_one
+import simpmusic.composeapp.generated.resources.dj_tap_one_done
 import simpmusic.composeapp.generated.resources.dj_chip_planning
 import simpmusic.composeapp.generated.resources.dj_chip_ready
 import simpmusic.composeapp.generated.resources.dj_chip_rendering
@@ -94,10 +101,14 @@ actual fun DjStatusChip(modifier: Modifier) {
     var showMix by remember { mutableStateOf(false) }
     // Answer to the last "mix now" tap, shown in the chip for a few seconds.
     var mixNowAnswer by remember { mutableStateOf<MixNowResult?>(null) }
-    LaunchedEffect(mixNowAnswer) {
-        if (mixNowAnswer != null) {
+    // Which button the answer belongs to (the same results serve "mix now" and "perfect mix"), and the "tap the 1" ack.
+    var answerIsPerfect by remember { mutableStateOf(false) }
+    var tapped by remember { mutableStateOf(0) }
+    LaunchedEffect(mixNowAnswer, tapped) {
+        if (mixNowAnswer != null || tapped > 0) {
             delay(3500)
             mixNowAnswer = null
+            tapped = 0
         }
     }
 
@@ -112,13 +123,14 @@ actual fun DjStatusChip(modifier: Modifier) {
     }
     val answer =
         when (mixNowAnswer) {
-            MixNowResult.STARTED -> stringResource(Res.string.dj_mix_now_started)
+            MixNowResult.STARTED -> stringResource(if (answerIsPerfect) Res.string.dj_perfect_started else Res.string.dj_mix_now_started)
+            MixNowResult.ALREADY_PERFECT -> stringResource(Res.string.dj_perfect_already)
             MixNowResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
             MixNowResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
             MixNowResult.ALREADY_SOON -> stringResource(Res.string.dj_mix_now_soon)
             MixNowResult.DISABLED, null -> null
         }
-    val text = answer ?: chipText(debug, positionMs, nowMs)
+    val text = (if (tapped > 0) stringResource(Res.string.dj_tap_one_done) else null) ?: answer ?: chipText(debug, positionMs, nowMs)
 
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     Surface(
@@ -152,7 +164,7 @@ actual fun DjStatusChip(modifier: Modifier) {
     // "Mix now": the next good phrase start within ~20-45 s, instead of where the DJ would have chosen.
     if (!mixing) {
         Surface(
-            modifier = Modifier.clickable { mixNowAnswer = hooks.mixNow() },
+            modifier = Modifier.clickable { answerIsPerfect = false; mixNowAnswer = hooks.mixNow() },
             shape = CircleShape,
             color = Color.Black.copy(alpha = 0.45f),
         ) {
@@ -163,6 +175,33 @@ actual fun DjStatusChip(modifier: Modifier) {
                 colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
             )
         }
+        // "Perfect mix": the best point within ~2 minutes where both 1s are trusted, phrase on phrase first; or why not.
+        Surface(
+            modifier = Modifier.clickable { answerIsPerfect = true; mixNowAnswer = hooks.perfectMix() },
+            shape = CircleShape,
+            color = if (debug.perfect) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
+        ) {
+            androidx.compose.foundation.Image(
+                imageVector = SimpIcons.Star,
+                contentDescription = stringResource(Res.string.dj_perfect_mix),
+                modifier = Modifier.padding(5.dp).size(16.dp),
+                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
+            )
+        }
+    }
+    // "Tap the 1": tap on a 1 you hear; the DJ remembers it for this song (and settles 1-or-3 for good).
+    Surface(
+        modifier = Modifier.clickable { if (hooks.tapTheOne() != null) tapped++ },
+        shape = CircleShape,
+        color = Color.Black.copy(alpha = 0.45f),
+    ) {
+        Text(
+            text = "1",
+            style = typo().labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = Color.White.copy(alpha = 0.9f),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+        )
     }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
@@ -195,7 +234,11 @@ private fun chipText(d: DjDebugState, positionMs: Long, nowMs: Long): String {
                 stringResource(Res.string.dj_chip_mixing)
             } else {
                 val facts = mixFacts(d).let { if (it.isEmpty()) "" else " ($it)" }
-                stringResource(Res.string.dj_chip_ready, formatMinSec(remaining.coerceAtLeast(0L)), facts)
+                if (d.perfect) {
+                    stringResource(Res.string.dj_perfect_ready, formatMinSec(remaining.coerceAtLeast(0L)), facts)
+                } else {
+                    stringResource(Res.string.dj_chip_ready, formatMinSec(remaining.coerceAtLeast(0L)), facts)
+                }
             }
         }
         "fallback" -> stringResource(Res.string.dj_chip_fallback, d.reason ?: d.kind?.name?.lowercase().orEmpty())

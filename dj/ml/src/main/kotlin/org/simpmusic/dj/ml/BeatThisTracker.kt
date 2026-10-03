@@ -18,6 +18,8 @@ class BeatGrid(
     val bpmConfidence: Float,
     val downbeatConfidence: Float,
     val phraseStartsMs: List<Long>,
+    /** Per beat (same order as [beatTimesMs]): the network's downbeat logit, or null when the source has none. */
+    val downbeatLogits: List<Float>? = null,
 )
 
 /** Where a [BeatGrid] comes from; lets [CompositeAnalyzer] overlay any neural (or other) beat source. */
@@ -97,7 +99,8 @@ object BeatGridBuilder {
         val beatsPerBar = barLen?.takeIf { it == 3 || it == 4 }
 
         val phrases = phraseStarts(beatsMs, dIdx, beatsPerBar, bpm)
-        return BeatGrid(beatsMs.toList(), dIdx, beatsPerBar, bpm, beatConf, bpmConf, downConf, phrases)
+        val logits = picks.beatDownbeatLogit.takeIf { it.size == n }?.map { if (it.isFinite()) it else -20f }
+        return BeatGrid(beatsMs.toList(), dIdx, beatsPerBar, bpm, beatConf, bpmConf, downConf, phrases, logits)
     }
 
     /**

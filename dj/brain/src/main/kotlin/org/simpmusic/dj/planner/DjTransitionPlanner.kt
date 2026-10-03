@@ -1,6 +1,7 @@
 package org.simpmusic.dj.planner
 
-import org.simpmusic.dj.analysis.GridRepair
+import org.simpmusic.dj.analysis.AnalysisRefiner
+import org.simpmusic.dj.analysis.BarPhase
 
 import org.simpmusic.dj.model.Camelot
 import org.simpmusic.dj.model.DeckPlan
@@ -44,13 +45,13 @@ class DjTransitionPlanner : TransitionPlanner {
     override fun plan(fromRaw: TrackAnalysis?, toRaw: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
         // Beat grids that lose the beat (dropped beats, a switch to the tresillo subdivision) are rebuilt from the
         // bar first; regular grids pass through untouched (see GridRepair).
-        val from = fromRaw?.let(GridRepair::cached)
-        val to = toRaw?.let(GridRepair::cached)
+        val from = fromRaw?.let(AnalysisRefiner::cached)
+        val to = toRaw?.let(AnalysisRefiner::cached)
         val s = sanitise(settings)
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
-            planUnsafe(from, to, s, earliest, latest)
+            if (constraints.perfect) planPerfect(from, to, s, earliest, latest) else planUnsafe(from, to, s, earliest, latest)
         } catch (e: Exception) {
             try {
                 simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), s, "planner error (${e.javaClass.simpleName}): ${e.message}", earliest)
@@ -87,6 +88,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val from: TrackAnalysis, val to: TrackAnalysis, val out: TrackContext, val inc: TrackContext,
         val settings: DjSettings, val earliest: Long, val latest: Long, val barsMode: Boolean, val conf: Float, val notes: List<String>,
         val key: KeyDecision, val requestedUnits: Int, val minUnits: Int, val softFloor: Int,
+        val perfect: Boolean = false,
     ) {
         val fromId: String get() = out.id
         val toId: String get() = inc.id
@@ -122,7 +124,32 @@ class DjTransitionPlanner : TransitionPlanner {
         return KeyDecision(shiftOut, shiftIn, clash, keyNote, confMin)
     }
 
-    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long = Long.MAX_VALUE): TransitionPlan {
+    /**
+     * [PlanConstraints.perfect]: both tracks must have a bar phase the vote trusts (see `BarPhase`), and the anywhere
+     * search then only considers exits and entries on trusted 1s. Anything short of that is refused, never downgraded
+     * silently: the caller shows the owner why.
+     */
+    private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long): TransitionPlan {
+        val why = ArrayList<String>()
+        for ((a, name) in listOf(from to "outgoing", to to "incoming")) {
+            val info = a?.barPhase
+            when {
+                a == null -> why += "$name track not analysed"
+                info == null -> why += "$name track has no bar-phase evidence yet (re-analysis pending)"
+                !info.trusted -> why += "$name track's 1 is unsure (margin ${fmt1(info.margin.toDouble())} < ${BarPhase.PERFECT_MARGIN})"
+            }
+        }
+        if (from != null && to != null && from.beatsPerBar != to.beatsPerBar) why += "different metres (${from.beatsPerBar} vs ${to.beatsPerBar} beats per bar)"
+        if (why.isEmpty()) {
+            val p = planUnsafe(from, to, settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, latest, perfect = true)
+            if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) return p
+            why += p.reason
+        }
+        val base = simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), settings, PlanConstraints.PERFECT_REFUSED + why.joinToString("; "), earliest)
+        return base.copy(reason = PlanConstraints.PERFECT_REFUSED + why.joinToString("; "))
+    }
+
+    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long = Long.MAX_VALUE, perfect: Boolean = false): TransitionPlan {
         val fromId = from?.videoId.orEmpty()
         val toId = to?.videoId.orEmpty()
         if (from == null || to == null) {
@@ -160,8 +187,12 @@ class DjTransitionPlanner : TransitionPlanner {
         val requestedUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
         val c = Ctx(
             from, to, out, inc, settings, earliest, latest, barsMode, conf, notes, key, requestedUnits,
-            minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8,
+            minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8, perfect = perfect,
         )
+        if (perfect) {
+            if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest)
+            return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair on trusted 1s in range", earliest)
+        }
         if (settings.mixPoint == MixPoint.ANYWHERE) {
             planAnywhere(c)?.let { return it }
             // nothing anywhere worked out (or nothing is allowed by the constraints): the classic end-of-track mix, else a crossfade
@@ -254,10 +285,16 @@ class DjTransitionPlanner : TransitionPlanner {
         if (upper < lower) return null
         val overlapWanted = c.requestedUnits * if (c.barsMode) bar else beat
         val endPick = pickExit(out, out.audibleEndMs, overlapWanted + MARGIN_MS, bar + MARGIN_MS, lower.toDouble(), out.outro()?.range?.startMs)
-        val exits = MixCandidates.exits(out, lower, upper, endPick, overlapWanted, settings.minPlayedFraction)
+        var exits = MixCandidates.exits(out, lower, upper, endPick, overlapWanted, settings.minPlayedFraction)
         val minAfterIn = 2.0 * inc.beatsPerBar * inc.medianBeatMs + MARGIN_MS
         val firstPick = pickEntry(inc, inc.firstAudibleMs, minAfterIn)
-        val entries = MixCandidates.entries(inc, minAfterIn, firstPick)
+        var entries = MixCandidates.entries(inc, minAfterIn, firstPick)
+        if (c.perfect) {
+            // only 1s the vote is sure of, locally (the margin of the bar the point sits in), on bars or phrases
+            fun sure(a: TrackAnalysis, t: Long) = (BarPhase.marginAt(a, t) ?: 0f) >= BarPhase.PERFECT_MARGIN
+            exits = exits.filter { it.pick.levelName != "beat" && sure(c.from, it.timeMs) }
+            entries = entries.filter { it.pick.levelName != "beat" && sure(c.to, it.timeMs) }
+        }
         if (exits.isEmpty() || entries.isEmpty()) return null
 
         val bend = settings.maxTempoBend.toDouble()
@@ -269,7 +306,8 @@ class DjTransitionPlanner : TransitionPlanner {
         for (n in entries) perIn[n.timeMs] = localPeriod(inc, n.timeMs, ahead = true)
         for (e in exits) for (n in entries) {
             val t = chooseTempo(perOut.getValue(e.timeMs), perIn.getValue(n.timeMs), bend)
-            val base = MixCandidates.score(e, n)
+            // perfect: phrase on phrase first (a phrase of one track ends where the other's starts), then bar on bar
+            val base = MixCandidates.score(e, n) + if (c.perfect && e.pick.levelName == "phrase" && n.pick.levelName == "phrase") PERFECT_PHRASE_BONUS else 0.0
             val tempoTerm = if (t == null) 0.0 else MixScoring.W_TEMPO * (1.0 - 0.5 * min(1.0, max(abs(t.rateOut - 1.0), abs(t.rateIn - 1.0)) / max(bend, 1e-6)))
             all += Cand(MixCandidates.ScoredPair(e, n, base + tempoTerm), t)
         }
@@ -297,9 +335,20 @@ class DjTransitionPlanner : TransitionPlanner {
             if (cand.tempo == null) continue
             if (tries++ >= MixScoring.MAX_BEAT_TRIES) break
             val a = beatAttempt(c, cand.pair.exit.pick, cand.pair.entry.pick, cand.tempo)
-            a.plan?.let { return it.withReason("mix point ${(100.0 * cand.pair.exit.timeMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track (pair score ${fmt(cand.pair.score.toFloat())}); ") }
+            a.plan?.let {
+                val where = "mix point ${(100.0 * cand.pair.exit.timeMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track (pair score ${fmt(cand.pair.score.toFloat())}); "
+                if (!c.perfect) return it.withReason(where)
+                val mo = BarPhase.marginAt(c.from, cand.pair.exit.timeMs) ?: 0f
+                val mi = BarPhase.marginAt(c.to, cand.pair.entry.timeMs) ?: 0f
+                return it.withReason(
+                    PlanConstraints.PERFECT_OK + "${cand.pair.exit.pick.levelName} on ${cand.pair.entry.pick.levelName}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
+                        mo, mi, c.from.barPhase?.source, c.to.barPhase?.source,
+                    ) + where,
+                )
+            }
             if (lastFail == null) lastFail = a.fail
         }
+        if (c.perfect) return null // a perfect mix is beat-matched or nothing
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
         val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
         var echoTries = 0
@@ -951,6 +1000,9 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** Pair scores this close to the best count as equally good (see the variety pick in planAnywhere). */
         private const val VARIETY_BAND = 0.05
+
+        /** Perfect mode: a phrase-on-phrase pair outranks a bar-on-bar one of up to this much better score. */
+        private const val PERFECT_PHRASE_BONUS = 0.15
 
         /** The variety pick never enters the incoming track later than this share of its length (unless the best pair already does). */
         private const val VARIETY_ENTRY_FRACTION = 0.15

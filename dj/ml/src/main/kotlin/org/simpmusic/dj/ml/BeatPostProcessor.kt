@@ -9,6 +9,12 @@ class BeatPicks(
     val downbeatsSec: DoubleArray,
     val beatProb: DoubleArray,
     val downbeatProb: DoubleArray,
+    /**
+     * Per beat: the network's downbeat logit (log-odds that this beat is a "1"), the max within +-2 frames of the beat.
+     * The peak picker keeps only downbeats whose logit clears 0 and throws the rest away; summed over a track these say
+     * which beat of the bar is the 1 far more reliably than the picks (cumbia/dembow downbeats hover around 0).
+     */
+    val beatDownbeatLogit: FloatArray = FloatArray(0),
 )
 
 /**
@@ -41,7 +47,13 @@ object BeatPostProcessor {
         downs = downs.distinct().sorted().toDoubleArray()
         val bp = DoubleArray(beats.size) { sigmoid(logits.beat[nearestFrame(beatF[it], logits.frames)]) }
         val dp = DoubleArray(downs.size) { sigmoid(logits.downbeat[nearestFrame(downs[it] * fps, logits.frames)]) }
-        return BeatPicks(beats, downs, bp, dp)
+        val dl = FloatArray(beats.size) { i ->
+            val f = nearestFrame(beatF[i], logits.frames)
+            var m = Float.NEGATIVE_INFINITY
+            for (k in maxOf(0, f - 2)..minOf(logits.frames - 1, f + 2)) m = maxOf(m, logits.downbeat[k])
+            m
+        }
+        return BeatPicks(beats, downs, bp, dp, dl)
     }
 
     private fun nearestFrame(frame: Double, n: Int): Int = Math.round(frame).toInt().coerceIn(0, n - 1)

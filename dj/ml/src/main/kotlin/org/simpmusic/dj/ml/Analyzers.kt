@@ -42,6 +42,7 @@ class CompositeAnalyzer(
             downbeatBeatIndices = if (g.downbeatBeatIndices.isEmpty()) null else Confident(g.downbeatBeatIndices, g.downbeatConfidence),
             beatsPerBar = g.beatsPerBar,
             phraseStartsMs = snapped.phraseStartsMs,
+            beatDownbeatLogits = g.downbeatLogits?.takeIf { it.size == snapped.beatTimesMs.size },
         )
     }
 }

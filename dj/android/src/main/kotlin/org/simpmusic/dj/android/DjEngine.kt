@@ -1,5 +1,8 @@
 package org.simpmusic.dj.android
 
+import org.simpmusic.dj.analysis.AnalysisRefiner
+import org.simpmusic.dj.analysis.BarPhase
+
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
@@ -106,6 +109,8 @@ data class DjDebugState(
     /** While [phase] is "mixing": wall-clock time the window started and how long it runs until the overlap is over. */
     val mixStartedAtEpochMs: Long? = null,
     val mixDurationMs: Long? = null,
+    /** The prepared / playing plan is a "Perfect" one (1 on 1 on trusted bars, see `PlanConstraints.perfect`). */
+    val perfect: Boolean = false,
 ) {
     /** A DJ mix is audible right now (the adapter started the window). */
     val isMixing: Boolean get() = phase == "mixing"
@@ -137,6 +142,8 @@ enum class MixNowResult {
     ALREADY_MIXING,
     /** The prepared mix starts within the same span anyway. */
     ALREADY_SOON,
+    /** "Perfect mix": the prepared mix already is a perfect one. */
+    ALREADY_PERFECT,
 }
 
 /**
@@ -176,6 +183,18 @@ interface DjHooks {
 
     /** The user asked for the mix to happen as soon as possible (UI, main thread). See [MixNowResult]. */
     fun mixNow(): MixNowResult = MixNowResult.DISABLED
+
+    /**
+     * "Perfect mix": re-plan for the best point within the next couple of minutes where BOTH 1s are trusted, phrase on
+     * phrase first. The answer (planned, or why not) arrives in [debug] (`perfect`, `lastOutcome`). UI, main thread.
+     */
+    fun perfectMix(): MixNowResult = MixNowResult.DISABLED
+
+    /** "Tap the 1": the owner heard a 1 now on the playing track. Returns the stored source time, or null. UI, main thread. */
+    fun tapTheOne(): Long? = null
+
+    /** Playback position of the current track (ms), for countdowns. */
+    val positionMs: Long get() = 0L
 
     /** Splice mode: one audio processor per player, first in its chain (null = none, the three-player path only). */
     fun createSplicer(): androidx.media3.common.audio.AudioProcessor? = null
@@ -249,6 +268,8 @@ class DjEngine(
     private var pairTo: String? = null
     /** The running pipeline serves a "mix now" request (cleared when the pair changes). */
     private var mixNowKey: String? = null
+    /** The running pipeline serves a "perfect mix" request (cleared when the pair changes). */
+    private var perfectKey: String? = null
     private var pipeline: Job? = null
     private var pipelineCancel: AtomicBoolean? = null
     private var ready: PreparedTransition? = null
@@ -265,6 +286,36 @@ class DjEngine(
 
     override fun onPosition(positionMs: Long) {
         playbackPositionMs = positionMs
+    }
+
+    override val positionMs: Long get() = playbackPositionMs
+
+    override fun tapTheOne(): Long? {
+        val id = pairFrom ?: return null
+        val t = org.simpmusic.dj.android.perfect.UserDownbeats.tap(id, playbackPositionMs)
+        _debug.update { it.copy(lastOutcome = "1 marked at ${t / 1000}.${(t % 1000) / 100} s") }
+        return t
+    }
+
+    override fun perfectMix(): MixNowResult {
+        if (!settingsFlow.value.enabled) return MixNowResult.DISABLED
+        val k = pairKey
+        val from = pairFrom
+        val to = pairTo
+        if (k == null || from == null || to == null || k == consumedKey) {
+            DjLog.i(TAG, "perfect: no pair to mix (pair=$k consumed=$consumedKey)")
+            return MixNowResult.NO_PAIR
+        }
+        if (_debug.value.isMixing) return MixNowResult.ALREADY_MIXING
+        if (ready != null && _debug.value.perfect) return MixNowResult.ALREADY_PERFECT
+        DjLog.i(TAG, "perfect: re-planning $from -> $to for a perfect point (position $playbackPositionMs ms)")
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        mixNowKey = null
+        perfectKey = k
+        startPipeline(from, to)
+        return MixNowResult.STARTED
     }
 
     override fun setOnPrepared(listener: ((PreparedTransition) -> Unit)?) {
@@ -284,7 +335,7 @@ class DjEngine(
         if (ready === prepared) ready = null
         deleteWindow(prepared)
         stopMixView()
-        _debug.update { it.copy(phase = "idle", lastOutcome = outcome, mixStartedAtEpochMs = null, mixDurationMs = null, mixAtMs = null) }
+        _debug.update { it.copy(phase = "idle", lastOutcome = outcome, mixStartedAtEpochMs = null, mixDurationMs = null, mixAtMs = null, perfect = false) }
     }
 
     override fun onMixStarted(prepared: PreparedTransition) {
@@ -302,6 +353,7 @@ class DjEngine(
         ready = null
         pairKey = null
         mixNowKey = null
+        perfectKey = null
         consumedKey = null
         stopMixView()
     }
@@ -329,6 +381,7 @@ class DjEngine(
         ready?.let { deleteWindow(it) }
         ready = null
         mixNowKey = k
+        perfectKey = null
         startPipeline(from, to)
         return MixNowResult.STARTED
     }
@@ -351,6 +404,7 @@ class DjEngine(
             if (pairKey != null) cancelPipeline()
             pairKey = null
             mixNowKey = null
+            perfectKey = null
             ready?.let { deleteWindow(it) }
             ready = null
             _mixView.value = null
@@ -373,6 +427,7 @@ class DjEngine(
         pairFrom = context.currentId
         pairTo = next
         mixNowKey = null
+        perfectKey = null
         startPipeline(context.currentId, next)
     }
 
@@ -440,7 +495,20 @@ class DjEngine(
         val earliest = playbackPositionMs + EARLIEST_EXIT_AHEAD_MS
         val constraints = PlanConstraints(earliestExitMs = earliest)
         val plan =
-            if (mixNowKey == key(fromId, toId)) {
+            if (perfectKey == key(fromId, toId)) {
+                val latest = earliest + PERFECT_SPAN_MS
+                DjLog.i(TAG, "planning PERFECT: exit between $earliest and $latest ms (position $playbackPositionMs ms); ${BarPhase.describe(AnalysisRefiner.cached(from))} | ${BarPhase.describe(AnalysisRefiner.cached(to))}")
+                val p = withContext(heavyDispatcher) { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest, perfect = true)) }
+                if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) {
+                    DjLog.i(TAG, "perfect: ${p.reason}")
+                    p
+                } else {
+                    DjLog.i(TAG, "perfect: refused (${p.reason}); keeping the regular plan")
+                    perfectKey = null
+                    _debug.update { it.copy(lastOutcome = p.reason.removePrefix(PlanConstraints.PERFECT_REFUSED).let { r -> "no perfect point: " + r.take(140) }) }
+                    withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
+                }
+            } else if (mixNowKey == key(fromId, toId)) {
                 // "Mix now": anywhere in the track, nothing has to have played, and only the next MIX_NOW_SPAN_MS of exits count.
                 val now = settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
                 val latest = earliest + MIX_NOW_SPAN_MS
@@ -589,6 +657,7 @@ class DjEngine(
                 fromKey = from.key?.value?.camelot(),
                 toKey = to.key?.value?.camelot(),
                 confidence = plan.confidence,
+                perfect = plan.reason.startsWith(PlanConstraints.PERFECT_OK),
             )
         }
     }
@@ -638,6 +707,9 @@ private const val EARLIEST_EXIT_AHEAD_MS = 25_000L
 
 /** "Mix now": how far past the earliest possible exit the planner may look for a good phrase start. */
 private const val MIX_NOW_SPAN_MS = 20_000L
+
+/** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
+private const val PERFECT_SPAN_MS = 120_000L
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {

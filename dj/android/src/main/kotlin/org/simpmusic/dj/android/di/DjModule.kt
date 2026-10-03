@@ -102,7 +102,7 @@ val djModule =
             DjLog.i("boot", "DJ log installed: file=${File(androidContext().filesDir, "dj/dj-debug.log").path} pid=${android.os.Process.myPid()} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} abi=${android.os.Build.SUPPORTED_ABIS.joinToString()}")
             DjLogInstaller
         }
-        single { DjSettingsRepository(androidContext()) }
+        single { DjSettingsRepository(androidContext()).also { org.simpmusic.dj.android.perfect.UserDownbeats.install(androidContext()) } }
         single<StateFlow<DjSettings>>(named("djSettings")) {
             get<DjLogInstaller>()
             get<DjSettingsRepository>().settings.stateIn(get<CoroutineScope>(named(SERVICE_SCOPE)), SharingStarted.Eagerly, DjSettings())

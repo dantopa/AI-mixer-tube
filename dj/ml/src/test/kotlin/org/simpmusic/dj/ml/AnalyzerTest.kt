@@ -65,6 +65,34 @@ class AnalyzerTest {
     }
 
     @Test
+    fun theDownbeatEvidenceOfEveryBeatReachesTheStoredAnalysis() {
+        // frames at 50 fps: a beat every 25 frames (120 bpm), downbeat logit +3 on every 4th beat, -2 elsewhere,
+        // and a weak +0.4 on the half bar that the peak picker drops but the bar-phase vote needs
+        val frames = 25 * 64
+        val beat = FloatArray(frames) { -5f }
+        val down = FloatArray(frames) { -6f }
+        for (k in 0 until 64) {
+            val f = 10 + k * 25
+            if (f >= frames) break
+            beat[f] = 4f
+            down[f] = when (k % 4) { 0 -> 3f; 2 -> -0.4f; else -> -2f }
+        }
+        val p = BeatPostProcessor.pick(FrameLogits(beat, down))
+        assertEquals(p.beatsSec.size, p.beatDownbeatLogit.size)
+        assertEquals(3f, p.beatDownbeatLogit[0], 1e-6f)
+        assertEquals(-0.4f, p.beatDownbeatLogit[2], 1e-6f)
+        val g = assertNotNull(BeatGridBuilder.build(p))
+        val provider = object : BeatProvider {
+            override val id = "fake-beats"
+            override fun grid(audio: PcmAudio) = g
+        }
+        val a = CompositeAnalyzer(FakeBase(), provider, clock = { 42L }).analyze("vid", audio)
+        val logits = assertNotNull(a.beatDownbeatLogits)
+        assertEquals(a.beatTimesMs!!.value.size, logits.size)
+        assertEquals(3f, logits[4], 1e-6f)
+    }
+
+    @Test
     fun tooFewBeatsGiveNoGrid() {
         assertNull(BeatGridBuilder.build(picks(120.0, 3, 4)))
     }

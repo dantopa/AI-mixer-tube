@@ -99,11 +99,39 @@ data class TrackAnalysis(
     val loudnessDb: Float,
     /** Mean spectral timbre (13 MFCCs, first is the level-free shape). For recommendation similarity. */
     val timbre: List<Float> = emptyList(),
+    /**
+     * Per beat (same order as [beatTimesMs]): the neural tracker's downbeat log-odds. The evidence `BarPhase` votes the
+     * bar phase from. Null for analyses made before it was stored (and for DSP-only analyses).
+     */
+    val beatDownbeatLogits: List<Float>? = null,
+    /** How the bar phase was decided; set on read by `BarPhase`, never by an analyzer. */
+    val barPhase: BarPhaseInfo? = null,
 ) {
     companion object {
         const val SCHEMA_VERSION = 1
     }
 }
+
+/**
+ * The result of voting which beat of the bar is the "1" (see `BarPhase`).
+ *
+ * [barMarginLogits] holds, per bar of the decided lattice (bar k starts at downbeat k), how much better the chosen 1 explains
+ * the network's evidence than the best other beat of the bar, averaged over the bars around it (log-odds per bar).
+ */
+@Serializable
+data class BarPhaseInfo(
+    /** "voted", "anchored" (the owner tapped the 1) or "none" (no evidence: the tracker's own downbeats are kept). */
+    val source: String,
+    /** Median of [barMarginLogits]. */
+    val margin: Float,
+    /** The 1 is trusted for a "Perfect" mix on this track (median margin over `BarPhase.PERFECT_MARGIN`, or anchored). */
+    val trusted: Boolean,
+    /** Places where the decided lattice skips or repeats a beat (metric irregularities or grid errors). */
+    val slips: Int,
+    /** Bars where the 1 moved compared with the tracker's own downbeats. */
+    val changedBars: Int,
+    val barMarginLogits: List<Float> = emptyList(),
+)
 
 /** Lowest confidence at which each fact is trusted for a beat-matched transition. */
 object Trust {

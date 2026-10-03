@@ -185,7 +185,19 @@ data class PlanConstraints(
      * caller's to reject.
      */
     val latestExitMs: Long = Long.MAX_VALUE,
-)
+    /**
+     * "Perfect mix": only an exit and an entry that both sit on a "1" the bar-phase vote trusts locally
+     * (`BarPhase.PERFECT_MARGIN`, or the owner's tapped 1), on bars or phrases, beat-matched. Nothing else: when no such
+     * pair exists the plan is a SIMPLE_CROSSFADE whose reason starts with [PERFECT_REFUSED], and a plan that qualifies
+     * has a reason starting with [PERFECT_OK].
+     */
+    val perfect: Boolean = false,
+) {
+    companion object {
+        const val PERFECT_OK = "PERFECT: "
+        const val PERFECT_REFUSED = "perfect not possible: "
+    }
+}
 
 /** Knobs the user (or the app) controls. */
 @Serializable
