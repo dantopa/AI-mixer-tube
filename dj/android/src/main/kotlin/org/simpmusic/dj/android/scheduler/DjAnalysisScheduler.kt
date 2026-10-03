@@ -140,7 +140,8 @@ class DjAnalysisScheduler(
         if (synchronized(upgraded) { videoId in upgraded }) return false
         val a = store.get(videoId, analyzer.id) ?: return false
         if (a.beatTimesMs == null) return false
-        return (a.beatDownbeatLogits == null && "beat-this" in analyzer.id) || a.structureFrames.isEmpty()
+        // only the device's full analyzer (Beat This! over the DSP pass) produces both; any other would re-analyse for nothing
+        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty())
     }
 
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
