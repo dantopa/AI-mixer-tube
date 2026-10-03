@@ -166,6 +166,8 @@ data class PhraseInfo(
     val irregular: Int,
     /** Start (ms) of every 16-bar block. */
     val blockStartsMs: List<Long>,
+    /** Start (ms) of every 8-bar phrase of the lattice (used by a Perfect mix when [phrasesTrusted]). */
+    val phraseStartsMs: List<Long> = emptyList(),
     /** Per bar (same order as the downbeats): its position in its block, 0..15. */
     val barPositions: List<Int>,
 )

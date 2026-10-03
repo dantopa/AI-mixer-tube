@@ -141,7 +141,9 @@ class DjTransitionPlanner : TransitionPlanner {
         }
         if (from != null && to != null && from.beatsPerBar != to.beatsPerBar) why += "different metres (${from.beatsPerBar} vs ${to.beatsPerBar} beats per bar)"
         if (why.isEmpty()) {
-            val p = planUnsafe(from, to, settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, latest, perfect = true)
+            // plan on the found (or marked) phrase lines where PhraseGrid is sure of them, the counted ones otherwise
+            fun found(a: TrackAnalysis) = a.phrases?.takeIf { it.phrasesTrusted && it.phraseStartsMs.isNotEmpty() }?.let { a.copy(phraseStartsMs = it.phraseStartsMs) } ?: a
+            val p = planUnsafe(found(from!!), found(to!!), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, latest, perfect = true)
             if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) return p
             why += p.reason
         }

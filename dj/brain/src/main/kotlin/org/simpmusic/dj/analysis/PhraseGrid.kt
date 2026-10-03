@@ -125,10 +125,12 @@ object PhraseGrid {
                 blocksTrusted = barsSure && blocksSure(r),
                 irregular = r.irregular,
                 blockStartsMs = blockStarts,
+                phraseStartsMs = phraseStarts,
                 barPositions = r.position.toList(),
             )
-        // An unsure lattice is shown (the counter's "?") but does not replace the counted phrases the planner scores on.
-        return a.copy(phraseStartsMs = if (info.phrasesTrusted) phraseStarts else a.phraseStartsMs, phrases = info)
+        // The counted phrases stay what the ordinary planner scores on (its behaviour is tuned and device-tested on them);
+        // only a Perfect mix plans on the found ones (`DjTransitionPlanner.planPerfect`).
+        return a.copy(phrases = info)
     }
 
     /** What [detect] reads from an analysis: the 100 ms level envelopes and the optional structure frames. */
