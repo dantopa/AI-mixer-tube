@@ -136,7 +136,7 @@ class DjTransitionPlanner : TransitionPlanner {
             when {
                 a == null -> why += "$name track not analysed"
                 info == null -> why += "$name track has no bar-phase evidence yet (re-analysis pending)"
-                !info.trusted -> why += "$name track's 1 is unsure (margin ${fmt1(info.margin.toDouble())} < ${BarPhase.PERFECT_MARGIN})"
+                !info.trusted -> why += "$name track's 1 is unsure (margin ${fmt1(info.margin.toDouble())}, need ${BarPhase.TRUST_MARGIN}; ${info.slips} slips)"
             }
         }
         if (from != null && to != null && from.beatsPerBar != to.beatsPerBar) why += "different metres (${from.beatsPerBar} vs ${to.beatsPerBar} beats per bar)"
@@ -191,7 +191,7 @@ class DjTransitionPlanner : TransitionPlanner {
         )
         if (perfect) {
             if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest)
-            return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair on trusted 1s in range", earliest)
+            return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair in range where both 1s are sure (local margin >= ${BarPhase.PERFECT_MARGIN})", earliest)
         }
         if (settings.mixPoint == MixPoint.ANYWHERE) {
             planAnywhere(c)?.let { return it }

@@ -31,6 +31,13 @@ object BarPhase {
     /** Log-odds lost for each skipped or repeated beat in the lattice. */
     const val SLIP_PENALTY = 12.0
 
+    /**
+     * With the owner's tapped 1 the lattice never slips: the tap says the evidence is wrong about the phase, and a finite
+     * penalty let confident (wrong) evidence pull the lattice back after a few bars (a 40 log-odds penalty slipped 4 times
+     * on a synthetic track whose network evidence sat on beat 3). A real 5-beat bar after the tap is the owner's to re-tap.
+     */
+    const val ANCHORED_SLIP_PENALTY = Double.POSITIVE_INFINITY
+
     /** Logits are clipped to +-this: one wildly sure beat must not outvote a bar of evidence. */
     const val EVIDENCE_CLIP = 8.0
 
@@ -43,8 +50,12 @@ object BarPhase {
     /** Local margin both mix points need for a "Perfect" mix (see [TrackAnalysis.barPhase]). */
     const val PERFECT_MARGIN = 4.0f
 
-    /** At most one slip per this many bars, or the lattice is not trusted. */
-    const val BARS_PER_SLIP = 16
+    /**
+     * At most one slip per this many bars, or the lattice is not trusted. Real cumbia has them (a 5-beat bar where the band
+     * stretches a break, a 2-beat pickup): the first device phasegrams showed clean column-1 stripes with 4-7 slips over
+     * 32-71 bars, which a 1-per-16 rule refused.
+     */
+    const val BARS_PER_SLIP = 8
 
     /** A repaired beat takes the evidence of an original beat within this distance. */
     private const val MATCH_MS = 45
@@ -78,7 +89,7 @@ object BarPhase {
      * Decides the lattice from per-beat [evidence] (downbeat log-odds; 0 = no evidence) for [beatsPerBar] beats per bar,
      * optionally forcing beat [anchorIndex] to be a 1.
      */
-    fun decide(evidence: FloatArray, beatsPerBar: Int, anchorIndex: Int? = null): Decision {
+    fun decide(evidence: FloatArray, beatsPerBar: Int, anchorIndex: Int? = null, slipPenalty: Double = if (anchorIndex != null) ANCHORED_SLIP_PENALTY else SLIP_PENALTY): Decision {
         val n = evidence.size
         val b = beatsPerBar
         val e = DoubleArray(n) { evidence[it].toDouble().coerceIn(-EVIDENCE_CLIP, EVIDENCE_CLIP) }
@@ -96,7 +107,7 @@ object BarPhase {
                     val step =
                         when (s) {
                             (p + 1) % b -> 0.0
-                            p, (p + 2) % b -> -SLIP_PENALTY
+                            p, (p + 2) % b -> -slipPenalty
                             else -> continue
                         }
                     val c = score[p] + step
@@ -185,7 +196,8 @@ object BarPhase {
             BarPhaseInfo(
                 source = if (d.anchored) "anchored" else "voted",
                 margin = margin,
-                trusted = trusted && (d.anchored || margin >= PERFECT_MARGIN),
+                // the track may host a Perfect mix; each mix point must still clear PERFECT_MARGIN locally (see the planner)
+                trusted = trusted,
                 slips = d.slips,
                 changedBars = changed,
                 barMarginLogits = d.barMargins.toList(),
@@ -224,7 +236,11 @@ object BarPhase {
         val i = a.barPhase ?: return "bar-phase: no evidence (tracker downbeats kept)"
         return "bar-phase: ${i.source} margin %.1f %s slips=${i.slips} moved=${i.changedBars}/${a.downbeatBeatIndices?.value?.size ?: 0} bars".format(
             i.margin,
-            if (i.trusted) "PERFECT-ready" else if ((a.downbeatBeatIndices?.confidence ?: 0f) >= 0.45f) "bars ok" else "bars unsure",
+            when {
+                i.trusted && (i.source == "anchored" || i.margin >= PERFECT_MARGIN) -> "PERFECT-ready"
+                i.trusted -> "bars ok (Perfect only where the local margin >= $PERFECT_MARGIN)"
+                else -> "bars unsure"
+            },
         )
     }
 

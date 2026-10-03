@@ -30,16 +30,16 @@ object UserDownbeats {
 
     fun get(videoId: String): Long? = prefs?.let { p -> if (p.contains(videoId)) p.getLong(videoId, 0L) else null }
 
-    /** Records a tap made while [videoId] played at reported position [positionMs]; returns the stored source time. */
-    fun tap(videoId: String, positionMs: Long): Long {
-        val t = (positionMs - TAP_DELAY_MS).coerceAtLeast(0L)
-        prefs?.edit()?.putLong(videoId, t)?.apply()
-        DjLog.i("perfect", "tapped the 1 of $videoId at $t ms (position $positionMs ms)")
-        return t
+    /** Stores [timeMs] (source time of a beat that is a 1) for [videoId]; [why] is logged. Returns it. */
+    fun set(videoId: String, timeMs: Long, why: String): Long {
+        prefs?.edit()?.putLong(videoId, timeMs)?.apply()
+        DjLog.i("perfect", "the 1 of $videoId set at $timeMs ms ($why)")
+        return timeMs
     }
 
     fun clear(videoId: String) {
         prefs?.edit()?.remove(videoId)?.apply()
+        DjLog.i("perfect", "the 1 of $videoId cleared (back to the vote)")
     }
 
     /** All taps (videoId -> ms), for the export. */

@@ -124,7 +124,7 @@ data class BarPhaseInfo(
     val source: String,
     /** Median of [barMarginLogits]. */
     val margin: Float,
-    /** The 1 is trusted for a "Perfect" mix on this track (median margin over `BarPhase.PERFECT_MARGIN`, or anchored). */
+    /** The bars of this track are trusted (median margin >= `BarPhase.TRUST_MARGIN`, few slips, or anchored); a "Perfect" mix point must also clear `BarPhase.PERFECT_MARGIN` locally. */
     val trusted: Boolean,
     /** Places where the decided lattice skips or repeats a beat (metric irregularities or grid errors). */
     val slips: Int,

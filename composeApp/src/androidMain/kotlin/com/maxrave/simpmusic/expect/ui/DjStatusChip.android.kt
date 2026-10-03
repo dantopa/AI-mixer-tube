@@ -72,7 +72,6 @@ import simpmusic.composeapp.generated.resources.dj_perfect_already
 import simpmusic.composeapp.generated.resources.dj_perfect_mix
 import simpmusic.composeapp.generated.resources.dj_perfect_ready
 import simpmusic.composeapp.generated.resources.dj_perfect_started
-import simpmusic.composeapp.generated.resources.dj_tap_one
 import simpmusic.composeapp.generated.resources.dj_tap_one_done
 import simpmusic.composeapp.generated.resources.dj_chip_planning
 import simpmusic.composeapp.generated.resources.dj_chip_ready
@@ -130,7 +129,7 @@ actual fun DjStatusChip(modifier: Modifier) {
             MixNowResult.ALREADY_SOON -> stringResource(Res.string.dj_mix_now_soon)
             MixNowResult.DISABLED, null -> null
         }
-    val text = (if (tapped > 0) stringResource(Res.string.dj_tap_one_done) else null) ?: answer ?: chipText(debug, positionMs, nowMs)
+    val text = (if (tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: chipText(debug, positionMs, nowMs)
 
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     Surface(
@@ -189,19 +188,48 @@ actual fun DjStatusChip(modifier: Modifier) {
             )
         }
     }
-    // "Tap the 1": tap on a 1 you hear; the DJ remembers it for this song (and settles 1-or-3 for good).
-    Surface(
-        modifier = Modifier.clickable { if (hooks.tapTheOne() != null) tapped++ },
-        shape = CircleShape,
-        color = Color.Black.copy(alpha = 0.45f),
-    ) {
-        Text(
-            text = "1",
-            style = typo().labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = Color.White.copy(alpha = 0.9f),
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-        )
+    // The 1-2-3-4 counter follows the DJ's bars: if its "1" does not light up on the 1 you hear, tap "»" to move it one
+    // beat later (no timing needed). Tapping the counter on the 1s you hear (a few times) sets it too; long-press forgets.
+    val bar = hooks.barBeatAt(positionMs)
+    if (bar != null) {
+        Surface(
+            modifier = Modifier.combinedClickable(
+                onClick = { if (hooks.tapTheOne(positionMs) != null) tapped++ },
+                onLongClick = { hooks.clearTheOne(); tapped++ },
+            ),
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.45f),
+        ) {
+            Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                for (i in 0 until bar.beatsPerBar) {
+                    val on = i == bar.beatInBar
+                    Text(
+                        text = "${i + 1}",
+                        style = typo().labelMedium,
+                        fontWeight = if (on) FontWeight.Bold else null,
+                        color =
+                            when {
+                                on && i == 0 -> if (bar.anchored || bar.sure) MaterialTheme.colorScheme.primary else Color(0xFFFFB74D)
+                                on -> Color.White
+                                else -> Color.White.copy(alpha = 0.35f)
+                            },
+                    )
+                }
+            }
+        }
+        Surface(
+            modifier = Modifier.clickable { if (hooks.shiftTheOne(positionMs) != null) tapped++ },
+            shape = CircleShape,
+            color = Color.Black.copy(alpha = 0.45f),
+        ) {
+            Text(
+                text = "»",
+                style = typo().labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = Color.White.copy(alpha = 0.9f),
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+        }
     }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })

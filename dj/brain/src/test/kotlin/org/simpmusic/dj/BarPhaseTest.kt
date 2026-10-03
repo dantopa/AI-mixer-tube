@@ -127,6 +127,22 @@ class BarPhaseTest {
     }
 
     @Test
+    fun aTappedOneHoldsForTheWholeTrackEvenAgainstConfidentEvidence() {
+        // the network is sure (and wrong): its 1 is on beat 3. The owner taps the real 1 once, in bar 30.
+        val t = track("stubborn", bpm = 90f)
+        val n = t.beatTimesMs!!.value.size
+        val downs = t.downbeatBeatIndices!!.value.toHashSet()
+        val ev = List(n) { i -> if ((i - 2) in downs) 3f else -2f }
+        val a = t.copy(beatDownbeatLogits = ev)
+        val tapped = t.downbeatBeatIndices!!.value[30]
+        BarPhase.anchors = { if (it == "stubborn") t.beatTimesMs!!.value[tapped].toLong() else null }
+        val r = AnalysisRefiner.cached(a)
+        println(BarPhase.describe(r))
+        assertEquals(0, r.barPhase!!.slips)
+        assertEquals(t.downbeatBeatIndices!!.value, r.downbeatBeatIndices!!.value)
+    }
+
+    @Test
     fun anInsertedTwoBeatBarIsFollowed() {
         val t = track("slip")
         val n = t.beatTimesMs!!.value.size

@@ -130,6 +130,9 @@ data class DjDebugState(
         }
 }
 
+/** Where the playing track is in its bar: [beatInBar] 0 = the 1. [sure] = the bars are trusted; [anchored] = the owner set the 1. */
+data class BarBeat(val beatInBar: Int, val beatsPerBar: Int, val sure: Boolean, val anchored: Boolean)
+
 /** What a "mix now" request did. */
 enum class MixNowResult {
     /** Re-planning for the next good phrase within the short span; the chip follows it as usual. */
@@ -190,8 +193,20 @@ interface DjHooks {
      */
     fun perfectMix(): MixNowResult = MixNowResult.DISABLED
 
-    /** "Tap the 1": the owner heard a 1 now on the playing track. Returns the stored source time, or null. UI, main thread. */
-    fun tapTheOne(): Long? = null
+    /**
+     * "Tap the 1": the owner heard a 1 at [positionMs] of the playing track. Taps a few seconds apart form one session, and
+     * the beat of the bar most of them land on wins, so one early or late tap does not decide. Returns the stored time.
+     */
+    fun tapTheOne(positionMs: Long): Long? = null
+
+    /** "Shifted": the DJ's 1 is one beat early; move it to the next beat of the bar. Returns the new 1, or null. */
+    fun shiftTheOne(positionMs: Long): Long? = null
+
+    /** Forget the owner's 1 for the playing track (back to the vote). */
+    fun clearTheOne() {}
+
+    /** Which beat of the bar the playing track is on at [positionMs], for the 1-2-3-4 counter; null when unknown. */
+    fun barBeatAt(positionMs: Long): BarBeat? = null
 
     /** Playback position of the current track (ms), for countdowns. */
     val positionMs: Long get() = 0L
@@ -290,11 +305,125 @@ class DjEngine(
 
     override val positionMs: Long get() = playbackPositionMs
 
-    override fun tapTheOne(): Long? {
+    @Volatile private var currentRaw: TrackAnalysis? = null
+    @Volatile private var currentRawAtMs = 0L
+    @Volatile private var refreshingCurrent = false
+    private var refinedFor: Pair<TrackAnalysis, Long?>? = null
+    private var refined: TrackAnalysis? = null
+
+    /** The playing track's grid as the planner sees it (repaired, bar phase decided, tapped 1 applied). Main thread. */
+    private fun currentRefined(): TrackAnalysis? {
         val id = pairFrom ?: return null
-        val t = org.simpmusic.dj.android.perfect.UserDownbeats.tap(id, playbackPositionMs)
-        _debug.update { it.copy(lastOutcome = "1 marked at ${t / 1000}.${(t % 1000) / 100} s") }
+        val raw = currentRaw
+        val now = System.currentTimeMillis()
+        if ((raw == null || raw.videoId != id || now - currentRawAtMs > CURRENT_REFRESH_MS) && !refreshingCurrent) {
+            refreshingCurrent = true
+            scope.launch {
+                try {
+                    scheduler.get(id)?.let { currentRaw = it }
+                    currentRawAtMs = System.currentTimeMillis()
+                } finally {
+                    refreshingCurrent = false
+                }
+            }
+        }
+        if (raw == null || raw.videoId != id) return null
+        val key = raw to BarPhase.anchors(id)
+        if (refinedFor?.first !== raw || refinedFor?.second != key.second) {
+            refined = AnalysisRefiner.cached(raw)
+            refinedFor = key
+        }
+        return refined
+    }
+
+    override fun barBeatAt(positionMs: Long): BarBeat? {
+        val r = currentRefined() ?: return null
+        val beats = r.beatTimesMs?.value ?: return null
+        val downs = r.downbeatBeatIndices?.value ?: return null
+        val bi = lastAtOrBefore(beats, positionMs)
+        if (bi < 0 || downs.isEmpty()) return null
+        val k = downs.binarySearch(bi).let { if (it >= 0) it else -it - 2 }
+        if (k < 0) return null
+        val info = r.barPhase
+        return BarBeat(bi - downs[k], r.beatsPerBar ?: 4, sure = info?.trusted == true, anchored = info?.source == "anchored")
+    }
+
+    /** Taps of the current session: (beat index, tap time). */
+    private val tapSession = ArrayList<Pair<Int, Long>>()
+    private var tapSessionTrack: String? = null
+    private var lastTapAtMs = 0L
+
+    override fun tapTheOne(positionMs: Long): Long? {
+        val id = pairFrom ?: return null
+        val r = currentRefined()
+        val beats = r?.beatTimesMs?.value
+        val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
+        if (beats.isNullOrEmpty()) {
+            // no grid yet: keep the raw time, BarPhase snaps it when the analysis exists
+            return org.simpmusic.dj.android.perfect.UserDownbeats.set(id, heard, "tap (no grid yet)")
+        }
+        val now = System.currentTimeMillis()
+        if (tapSessionTrack != id || now - lastTapAtMs > TAP_SESSION_GAP_MS) tapSession.clear()
+        tapSessionTrack = id
+        lastTapAtMs = now
+        val bi = nearest(beats, heard)
+        tapSession += bi to heard
+        val bpb = r.beatsPerBar ?: 4
+        // the beat of the bar most taps agree on (ties: the latest tap's)
+        val votes = tapSession.groupingBy { it.first % bpb }.eachCount()
+        val best = votes.maxByOrNull { (ph, n) -> n * 1000 + if (ph == bi % bpb) 1 else 0 }!!.key
+        val pick = tapSession.last { it.first % bpb == best }.first
+        val t = beats[pick].toLong()
+        DjLog.i(TAG, "tap the 1: tap ${tapSession.size} at $heard ms -> beat $bi (bar position ${bi % bpb}); votes $votes -> 1 at $t ms")
+        org.simpmusic.dj.android.perfect.UserDownbeats.set(id, t, "tap ${tapSession.size}")
+        _debug.update { it.copy(lastOutcome = "1 marked (${tapSession.size} tap${if (tapSession.size > 1) "s" else ""})") }
         return t
+    }
+
+    override fun shiftTheOne(positionMs: Long): Long? {
+        val id = pairFrom ?: return null
+        val r = currentRefined() ?: return null
+        val beats = r.beatTimesMs?.value ?: return null
+        val downs = r.downbeatBeatIndices?.value ?: return null
+        val bi = lastAtOrBefore(beats, positionMs)
+        if (bi < 0 || downs.isEmpty()) return null
+        val k = downs.binarySearch(bi).let { if (it >= 0) it else -it - 2 }.coerceAtLeast(0)
+        val next = downs[k] + 1
+        if (next >= beats.size) return null
+        val t = beats[next].toLong()
+        org.simpmusic.dj.android.perfect.UserDownbeats.set(id, t, "shift +1 beat")
+        _debug.update { it.copy(lastOutcome = "1 moved one beat later") }
+        return t
+    }
+
+    override fun clearTheOne() {
+        val id = pairFrom ?: return
+        org.simpmusic.dj.android.perfect.UserDownbeats.clear(id)
+        tapSession.clear()
+        _debug.update { it.copy(lastOutcome = "1 back to automatic") }
+    }
+
+    private fun lastAtOrBefore(beats: List<Int>, t: Long): Int {
+        var lo = 0
+        var hi = beats.size - 1
+        var ans = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (beats[mid] <= t) {
+                ans = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return ans
+    }
+
+    private fun nearest(beats: List<Int>, t: Long): Int {
+        val i = lastAtOrBefore(beats, t)
+        if (i < 0) return 0
+        if (i + 1 < beats.size && beats[i + 1] - t < t - beats[i]) return i + 1
+        return i
     }
 
     override fun perfectMix(): MixNowResult {
@@ -487,8 +616,26 @@ class DjEngine(
                 _debug.update { it.copy(phase = "waiting-analysis", reason = "analysis not available") }
                 return
             }
-        val (from, to) = pair!!
+        var (from, to) = pair!!
         DjLog.i(TAG, "both analyses ready after ${since()} ms")
+        currentRaw = from
+        currentRawAtMs = System.currentTimeMillis()
+        if (perfectKey == key(fromId, toId) && (from.beatDownbeatLogits == null || to.beatDownbeatLogits == null)) {
+            // "Perfect" needs the bar-phase evidence, and the re-analysis that adds it is already queued (NOW_PLAYING / NEXT_UP)
+            DjLog.i(TAG, "perfect: waiting for the bar-phase evidence (re-analysis) of ${listOfNotNull(fromId.takeIf { from.beatDownbeatLogits == null }, toId.takeIf { to.beatDownbeatLogits == null })}")
+            _debug.update { it.copy(lastOutcome = "perfect: analysing the bars first…") }
+            val upgraded =
+                withTimeoutOrNull(PERFECT_EVIDENCE_WAIT_MS) {
+                    combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a?.beatDownbeatLogits != null && b?.beatDownbeatLogits != null) a to b else null }
+                        .first { it != null }
+                }
+            if (upgraded != null) {
+                from = upgraded.first
+                to = upgraded.second
+                currentRaw = from
+                DjLog.i(TAG, "perfect: evidence ready after ${since()} ms")
+            }
+        }
         _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
         val settings = settingsFlow.value
         // The window needs the outgoing audio decoded and rendered before it plays, so the mix cannot start sooner than that.
@@ -710,6 +857,15 @@ private const val MIX_NOW_SPAN_MS = 20_000L
 
 /** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
 private const val PERFECT_SPAN_MS = 120_000L
+
+/** How long a "Perfect" request waits for the re-analysis that adds the bar-phase evidence. */
+private const val PERFECT_EVIDENCE_WAIT_MS = 150_000L
+
+/** The playing track's analysis is re-read this often for the 1-2-3-4 counter (a re-analysis may have replaced it). */
+private const val CURRENT_REFRESH_MS = 20_000L
+
+/** Taps further apart than this start a new "tap the 1" session. */
+private const val TAP_SESSION_GAP_MS = 12_000L
 
 /** Stand-in planner until the real one is bound: always answers "plain crossfade" so DJ mode degrades to the old path. */
 class FallbackOnlyPlanner : TransitionPlanner {
