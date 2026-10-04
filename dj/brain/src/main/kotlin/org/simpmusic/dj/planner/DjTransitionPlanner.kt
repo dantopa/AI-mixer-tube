@@ -283,10 +283,10 @@ class DjTransitionPlanner : TransitionPlanner {
         return b
     }
 
-    /** "16 on 16", "phrase on phrase (found)", ... for the Perfect reason. */
+    /** "block on block (16 bars)", "phrase on phrase (4-bar lines, found)", ... for the Perfect reason. */
     private fun perfectLevel(out: TrackContext, inc: TrackContext, e: Pick, n: Pick): String = when {
-        e.levelName == "phrase" && n.levelName == "phrase" && e.timeMs in out.blockTimes && n.timeMs in inc.blockTimes -> "16 on 16"
-        e.levelName == "phrase" && n.levelName == "phrase" && out.phrasesFound && inc.phrasesFound -> "phrase on phrase (found)"
+        e.levelName == "phrase" && n.levelName == "phrase" && e.timeMs in out.blockTimes && n.timeMs in inc.blockTimes -> "block on block (16 bars)"
+        e.levelName == "phrase" && n.levelName == "phrase" && out.phrasesFound && inc.phrasesFound -> "phrase on phrase (4-bar lines, found)"
         e.levelName == "phrase" && n.levelName == "phrase" -> "phrase on phrase (counted)"
         else -> "${e.levelName} on ${n.levelName}"
     }
@@ -348,6 +348,16 @@ class DjTransitionPlanner : TransitionPlanner {
         }
 
         var lastFail: String? = null
+        // A pair whose overlap had to be cut to a bar or two (the exit sits right before the end of the outgoing track) is
+        // a poor mix, and too short for the precise splice, which then falls back to the clock-locked three-player path:
+        // a device log (build ae) planned a 2-bar overlap at 97 % of the track and the lock aborted to a plain crossfade.
+        // It is kept only when no better-scoring candidate gives a real overlap.
+        fun tooShort(p: TransitionPlan): Boolean {
+            if (!c.barsMode || c.requestedUnits <= SHORT_OVERLAP_BARS) return false
+            val bpm = p.mixBpm?.toDouble()?.takeIf { it > 0 } ?: return false
+            return p.overlapMs < (SHORT_OVERLAP_BARS - 0.5) * out.beatsPerBar * 60000.0 / bpm
+        }
+        var short: TransitionPlan? = null
         // 1. beat-matched, on the best-scoring pairs whose local tempos are compatible
         var tries = 0
         for (cand in all) {
@@ -356,17 +366,24 @@ class DjTransitionPlanner : TransitionPlanner {
             val a = beatAttempt(c, cand.pair.exit.pick, cand.pair.entry.pick, cand.tempo)
             a.plan?.let {
                 val where = "mix point ${(100.0 * cand.pair.exit.timeMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track (pair score ${fmt(cand.pair.score.toFloat())}); "
-                if (!c.perfect) return it.withReason(where)
-                val mo = BarPhase.marginAt(c.from, cand.pair.exit.timeMs) ?: 0f
-                val mi = BarPhase.marginAt(c.to, cand.pair.entry.timeMs) ?: 0f
-                return it.withReason(
-                    PlanConstraints.PERFECT_OK + "${perfectLevel(out, inc, cand.pair.exit.pick, cand.pair.entry.pick)}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
-                        mo, mi, c.from.barPhase?.source, c.to.barPhase?.source,
-                    ) + where,
-                )
+                val done =
+                    if (!c.perfect) {
+                        it.withReason(where)
+                    } else {
+                        val mo = BarPhase.marginAt(c.from, cand.pair.exit.timeMs) ?: 0f
+                        val mi = BarPhase.marginAt(c.to, cand.pair.entry.timeMs) ?: 0f
+                        it.withReason(
+                            PlanConstraints.PERFECT_OK + "${perfectLevel(out, inc, cand.pair.exit.pick, cand.pair.entry.pick)}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
+                                mo, mi, c.from.barPhase?.source, c.to.barPhase?.source,
+                            ) + where,
+                        )
+                    }
+                if (!tooShort(done)) return done
+                if (short == null) short = done
             }
             if (lastFail == null) lastFail = a.fail
         }
+        short?.let { return it }
         if (c.perfect) return null // a perfect mix is beat-matched or nothing
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
         val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
@@ -533,9 +550,13 @@ class DjTransitionPlanner : TransitionPlanner {
         }.let { if (shiftOut != 0 || shiftIn != 0) max(it, 16) else it }
         val outBeatWall = w / tempo2.strideOut
         val inBeatWall = w / tempo2.strideIn
-        // the ramp must fit into the audio before the exit point (the deck plays ~rate during it)
+        // the ramp must fit into the audio before the exit point (the deck plays ~rate during it), and after the earliest
+        // position the plan may touch: a late plan shortens its ramp (down to 4 beats) instead of losing the point (a device
+        // log refused a 151 s exit, 4.4 s after the earliest allowed position, for a 5.8 s ramp, and mixed 2 bars at 97 %)
         val beforeRoom = (exitMs - 250L).coerceAtLeast(0L)
-        val rampOutMs = min(rampBeats * outBeatWall, beforeRoom / ((1.0 + rateOutAtT0) / 2.0)).let { floor(it).toLong() }
+        // (the pre-roll check compares the wall-clock ramp with the source room, so the wall length is capped too)
+        val earliestRoom = (exitMs - c.earliest).coerceAtLeast(0L).toDouble()
+        val rampOutMs = minOf(rampBeats * outBeatWall, beforeRoom / ((1.0 + rateOutAtT0) / 2.0), earliestRoom).let { floor(it).toLong() }
         val minRamp = (4 * outBeatWall).toLong()
         if (rampOutMs < minRamp && (bendOut > 1e-4 || shiftOut != 0)) {
             return Attempt.fail("not enough audio before the exit point for the tempo pre-roll")
@@ -1022,6 +1043,9 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** Perfect mode: a phrase-on-phrase pair outranks a bar-on-bar one of up to this much better score. */
         private const val PERFECT_PHRASE_BONUS = 0.15
+
+        /** An ANYWHERE overlap clamped below this many bars is used only when nothing better beat-matches. */
+        private const val SHORT_OVERLAP_BARS = 4
         private const val PERFECT_FOUND_PHRASE_BONUS = 0.1
         private const val PERFECT_BLOCK_BONUS = 0.15
 

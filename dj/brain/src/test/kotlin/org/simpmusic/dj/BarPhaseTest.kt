@@ -220,7 +220,7 @@ class BarPhaseTest {
         val p = planner.plan(a, b, s, c)
         println("perfect: ${p.kind} exit ${p.exitPointMs} entry ${p.entryPointMs}: ${p.reason}")
         assertEquals(PlanKind.BEAT_MATCHED, p.kind)
-        assertTrue("16 on 16" in p.reason, p.reason)
+        assertTrue("block on block" in p.reason, p.reason)
         assertTrue(p.exitPointMs in ra.phrases!!.blockStartsMs, "exit ${p.exitPointMs} not on a 16 line")
         assertTrue(p.entryPointMs in rb.phrases!!.blockStartsMs, "entry ${p.entryPointMs} not on a 16 line")
     }

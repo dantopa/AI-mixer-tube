@@ -13,6 +13,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -26,9 +27,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.maxrave.domain.manager.DataStoreManager
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
+import com.maxrave.simpmusic.ui.component.rememberSmoothPlayhead
 import com.maxrave.simpmusic.ui.icon.FastForward
 import com.maxrave.simpmusic.ui.icon.Star
 import com.maxrave.simpmusic.ui.icon.GraphicEq
@@ -190,11 +193,18 @@ actual fun DjStatusChip(modifier: Modifier) {
     }
     // The 1-2-3-4 counter follows the DJ's bars: if its "1" does not light up on the 1 you hear, tap "»" to move it one
     // beat later (no timing needed). Tapping the counter on the 1s you hear (a few times) sets it too; long-press forgets.
-    val bar = hooks.barBeatAt(positionMs)
+    // It follows what is HEARD: the 20 Hz position carried forward at frame rate (as the lyrics do), minus the lyrics
+    // timing offset the owner sets for Bluetooth; derived, so the chip recomposes only when the beat changes.
+    val dataStore = koinInject<DataStoreManager>()
+    val outputDelayMs by dataStore.lyricsOffsetMs.collectAsStateWithLifecycle(0)
+    val playhead = rememberSmoothPlayhead(positionMs, enabled = media is SimpleMediaState.Progress)
+    val heard by remember(hooks) { derivedStateOf { (playhead.value - outputDelayMs).coerceAtLeast(0L) } }
+    val barState = remember(hooks) { derivedStateOf { hooks.barBeatAt(heard) } }
+    val bar = barState.value
     if (bar != null) {
         Surface(
             modifier = Modifier.combinedClickable(
-                onClick = { if (hooks.tapTheOne(positionMs) != null) tapped++ },
+                onClick = { if (hooks.tapTheOne(heard) != null) tapped++ },
                 onLongClick = { hooks.clearTheOne(); tapped++ },
             ),
             shape = CircleShape,
@@ -218,7 +228,7 @@ actual fun DjStatusChip(modifier: Modifier) {
             }
         }
         Surface(
-            modifier = Modifier.clickable { if (hooks.shiftTheOne(positionMs) != null) tapped++ },
+            modifier = Modifier.clickable { if (hooks.shiftTheOne(heard) != null) tapped++ },
             shape = CircleShape,
             color = Color.Black.copy(alpha = 0.45f),
         ) {
@@ -230,31 +240,26 @@ actual fun DjStatusChip(modifier: Modifier) {
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             )
         }
-        // Where the bar is in its phrase: "5/16" once the 16-bar lines are found or marked, "5/8" when only the 8-bar
-        // phrases are, amber with "?" while it is a guess. Tap it when a new phrase starts (a drop, the bass coming back:
-        // timing within a bar is enough); long-press forgets the mark.
+        // Where it is in the phrase, counted the way the owner hears it: 16 beats = 4 bars, "5/16". Lit on the 1 of the
+        // phrase; amber while the phrase lines are a guess. Tap it when a phrase starts (a bar of slack is enough);
+        // long-press forgets the mark.
         val inBlock = bar.barInBlock
         if (inBlock != null) {
-            val label =
-                when {
-                    bar.blockSure || bar.phraseMarked -> "${inBlock + 1}/16"
-                    bar.phraseSure -> "${inBlock % 8 + 1}/8"
-                    else -> "${inBlock + 1}/16?"
-                }
-            val lineNow = if (bar.blockSure || bar.phraseMarked || !bar.phraseSure) inBlock == 0 else inBlock % 8 == 0
+            val beat = (inBlock % 4) * bar.beatsPerBar + bar.beatInBar + 1
+            val sure = bar.phraseSure || bar.phraseMarked
             Surface(
                 modifier = Modifier.combinedClickable(
-                    onClick = { if (hooks.markPhrase(positionMs) != null) tapped++ },
+                    onClick = { if (hooks.markPhrase(heard) != null) tapped++ },
                     onLongClick = { hooks.clearPhrase(); tapped++ },
                 ),
                 shape = CircleShape,
-                color = if (lineNow && bar.beatInBar == 0) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+                color = if (beat == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
             ) {
                 Text(
-                    text = label,
+                    text = "$beat/${4 * bar.beatsPerBar}",
                     style = typo().labelMedium,
-                    fontWeight = if (lineNow) FontWeight.Bold else null,
-                    color = if (bar.phraseSure || bar.phraseMarked) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D),
+                    fontWeight = if (beat == 1) FontWeight.Bold else null,
+                    color = if (sure) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D),
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
             }
