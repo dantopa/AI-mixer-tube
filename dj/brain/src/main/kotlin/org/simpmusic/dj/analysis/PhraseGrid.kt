@@ -268,8 +268,8 @@ object PhraseGrid {
 
     /**
      * Per bar: how much the PATTERN OF REPETITION changes at its line ("structure features", Serra et al. 2012, on bars).
-     * Bar k's feature is its similarity (chroma + timbre, cosine) to every earlier bar k-L, L = 1..[MAX_LAG_BARS], smoothed
-     * along the diagonal over 3 bars so a repeated passage reads as a stripe. Where a chorus comes back, the bars from the
+     * Bar k's feature is its similarity (chroma + timbre, cosine) to every earlier bar k-L, L = [MIN_LAG_BARS]..[MAX_LAG_BARS]:
+     * a repeated passage reads as a stripe along one lag. Where a chorus comes back, the bars from the
      * line on suddenly resemble the bars one chorus-and-verse earlier, and the stripe starts: the window after the line
      * differs from the window before it. Null without structure frames. Loudness and bass barely change in a cumbia; what
      * repeats is the melody and the arrangement, which this reads.
@@ -291,37 +291,25 @@ object PhraseGrid {
             for (q in v[i].indices) d += v[i][q] * v[j][q]
             return d
         }
-        // lag[i][L-1] = similarity of bar i to bar i-L, averaged over bars i-1..i+1 on the same diagonal (NaN = no such bar)
-        val lag = Array(k) { i ->
-            DoubleArray(maxLag) { li ->
-                val l = li + 1
-                var sum = 0.0
-                var n = 0
-                for (dt in -1..1) {
-                    val a = i + dt
-                    if (a - l >= 0 && a < k) { sum += sim(a, a - l); n++ }
-                }
-                if (n == 0) Double.NaN else sum / n
-            }
-        }
+        // lag[i][L-1] = similarity of bar i to bar i-L (NaN = no such bar). Not smoothed along the diagonal: the windows
+        // below already average, and a smoothed stripe started a bar late (its first bar mixed in the bar before the line)
+        val lag = Array(k) { i -> DoubleArray(maxLag) { li -> val l = li + 1; if (i - l >= 0) sim(i, i - l) else Double.NaN } }
+        // the strongest single stripe that starts or stops at the line: averaging over every lag drowned it (one repeated
+        // section is one lag among 64), and a lag under [MIN_LAG_BARS] is a riff looping inside a section, not a phrase
         return DoubleArray(k) { i ->
             val w = REPEAT_WINDOW
             if (i - w < 0 || i + w > k) return@DoubleArray 0.0
-            var d2 = 0.0
-            var n = 0
-            for (li in 0 until maxLag) {
+            var best = 0.0
+            for (li in MIN_LAG_BARS - 1 until maxLag) {
+                // a bar with no bar L earlier counts as unrelated (0: the features are z-scored), or the first return of a
+                // section (the window before it reaching back past the start of the track) would never be seen
                 var a = 0.0
                 var b = 0.0
-                var ok = true
-                for (q in i until i + w) { val x = lag[q][li]; if (x.isNaN()) { ok = false; break }; a += x }
-                if (!ok) continue
-                for (q in i - w until i) { val x = lag[q][li]; if (x.isNaN()) { ok = false; break }; b += x }
-                if (!ok) continue
-                val diff = (a - b) / w
-                d2 += diff * diff
-                n++
+                for (q in i until i + w) { val x = lag[q][li]; if (!x.isNaN()) a += x }
+                for (q in i - w until i) { val x = lag[q][li]; if (!x.isNaN()) b += x }
+                best = max(best, abs(a - b) / w)
             }
-            if (n == 0) 0.0 else sqrt(d2 / n)
+            best
         }
     }
 
@@ -489,9 +477,10 @@ object PhraseGrid {
     private const val W_TIMBRE = 0.8
 
     /** Weight of the repetition evidence ([repetitionNovelty]), and its window and longest lag (bars). */
-    private const val W_REPEAT = 1.5
+    private const val W_REPEAT = 5.0
     private const val REPEAT_WINDOW = 4
     private const val MAX_LAG_BARS = 64
+    private const val MIN_LAG_BARS = 4
 
     private fun median(x: DoubleArray): Double = if (x.isEmpty()) 0.0 else x.sorted()[x.size / 2]
 
