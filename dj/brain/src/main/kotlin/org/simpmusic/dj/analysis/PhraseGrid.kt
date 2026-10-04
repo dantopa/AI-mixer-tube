@@ -41,8 +41,8 @@ object PhraseGrid {
     const val BLOCK_BARS = 16
     const val PHRASE_BARS = 8
 
-    /** The phrase lines a Perfect mix lands on ([PhraseInfo.phraseStartsMs]): 4 bars, "16" counted in beats. */
-    const val LINE_BARS = 4
+    /** The phrase lines a Perfect mix lands on ([PhraseInfo.phraseStartsMs]); the 16-bar block lines score more. */
+    const val LINE_BARS = 8
 
     /** Evidence weight of each position in the block (0 = the 16-bar line). */
     private val WEIGHT = DoubleArray(BLOCK_BARS).also {
@@ -117,7 +117,7 @@ object PhraseGrid {
         val downs = a.downbeatBeatIndices?.value?.filter { it in beats.indices } ?: return a
         val barStarts = downs.map { beats[it].toLong() }
         val r = detect(barStarts, Envelopes.of(a), anchors(a.videoId)) ?: return a
-        // the phrase as the owner counts it: 16 beats = 4 bars (a Perfect mix lands one phrase line on the other)
+        // 8-bar lines (half a 16-bar phrase); a Perfect mix prefers the 16-bar block lines themselves (see the planner)
         val phraseStarts = barStarts.indices.filter { r.position[it] % LINE_BARS == 0 }.map { barStarts[it] }
         val blockStarts = barStarts.indices.filter { r.position[it] == 0 }.map { barStarts[it] }
         val info =

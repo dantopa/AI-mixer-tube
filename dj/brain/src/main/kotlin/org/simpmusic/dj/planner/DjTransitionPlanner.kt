@@ -283,10 +283,10 @@ class DjTransitionPlanner : TransitionPlanner {
         return b
     }
 
-    /** "block on block (16 bars)", "phrase on phrase (4-bar lines, found)", ... for the Perfect reason. */
+    /** "block on block (16 bars)", "phrase on phrase (8-bar lines, found)", ... for the Perfect reason. */
     private fun perfectLevel(out: TrackContext, inc: TrackContext, e: Pick, n: Pick): String = when {
         e.levelName == "phrase" && n.levelName == "phrase" && e.timeMs in out.blockTimes && n.timeMs in inc.blockTimes -> "block on block (16 bars)"
-        e.levelName == "phrase" && n.levelName == "phrase" && out.phrasesFound && inc.phrasesFound -> "phrase on phrase (4-bar lines, found)"
+        e.levelName == "phrase" && n.levelName == "phrase" && out.phrasesFound && inc.phrasesFound -> "phrase on phrase (8-bar lines, found)"
         e.levelName == "phrase" && n.levelName == "phrase" -> "phrase on phrase (counted)"
         else -> "${e.levelName} on ${n.levelName}"
     }

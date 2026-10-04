@@ -241,25 +241,25 @@ actual fun DjStatusChip(modifier: Modifier) {
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             )
         }
-        // Where it is in the phrase, counted the way the owner hears it: 16 beats = 4 bars, "5/16". Lit on the 1 of the
-        // phrase; amber while the phrase lines are a guess. Tap it when a phrase starts (a bar of slack is enough);
+        // Which bar of the 16-bar phrase it is in ("5/16": a chorus is 16 bars, and the next 1 is where it starts again).
+        // Lit on bar 1; amber while the phrase lines are a guess. Tap it when a phrase starts (a bar of slack is enough);
         // long-press forgets the mark.
         val inBlock = bar.barInBlock
         if (inBlock != null) {
-            val beat = (inBlock % 4) * bar.beatsPerBar + bar.beatInBar + 1
-            val sure = bar.phraseSure || bar.phraseMarked
+            val barNo = inBlock + 1
+            val sure = bar.blockSure || bar.phraseMarked
             Surface(
                 modifier = Modifier.combinedClickable(
                     onClick = { if (hooks.markPhrase(heard) != null) tapped++ },
                     onLongClick = { hooks.clearPhrase(); tapped++ },
                 ),
                 shape = CircleShape,
-                color = if (beat == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+                color = if (barNo == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
             ) {
                 Text(
-                    text = "$beat/${4 * bar.beatsPerBar}",
+                    text = "$barNo/16",
                     style = typo().labelMedium,
-                    fontWeight = if (beat == 1) FontWeight.Bold else null,
+                    fontWeight = if (barNo == 1) FontWeight.Bold else null,
                     color = if (sure) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D),
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
                 )
