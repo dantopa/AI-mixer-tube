@@ -100,4 +100,54 @@ class PhraseGridTest {
         assertTrue(flatSure <= 3)
         PhraseGrid.debug = { println(it) }
     }
+
+    /**
+     * A song whose loudness and bass never change (a cumbia groove) but whose sections repeat: A B A B C B A, 16 bars each,
+     * every bar of a section with its own chroma/timbre, the same bars again when the section comes back. Only the
+     * repetition can find the lines.
+     */
+    private fun repeatingSong(seed: Int, noise: Double, pickup: Int = 3): Triple<List<Long>, PhraseGrid.Envelopes, List<Int>> {
+        val r = Random(seed)
+        val order = listOf(0, 1, 0, 1, 2, 1, 0)
+        val proto = Array(3) { Array(16) { DoubleArray(17) { r.nextDouble() } } }
+        val pick = Array(pickup) { DoubleArray(17) { r.nextDouble() } }
+        val bars = pickup + order.size * 16
+        val starts = List(bars) { (it * barMs).toLong() + 500 }
+        val hopS = 500
+        val frames = ((starts.last() + barMs) / hopS).toInt() + 2
+        val st = ArrayList<Float>(frames * 17)
+        for (f in 0 until frames) {
+            val bar = (((f * hopS) - 500) / barMs).toInt().coerceIn(0, bars - 1)
+            val base = if (bar < pickup) pick[bar] else proto[order[(bar - pickup) / 16]][(bar - pickup) % 16]
+            for (d in 0 until 17) st += (base[d] + (r.nextDouble() * 2 - 1) * noise).toFloat()
+        }
+        val n = ((starts.last() + barMs) / hop).toInt() + 20
+        val flat = List(n) { (0.6 + (r.nextDouble() * 2 - 1) * 0.2).toFloat() }
+        val low = List(n) { (0.6 + (r.nextDouble() * 2 - 1) * 0.2).toFloat() }
+        return Triple(starts, PhraseGrid.Envelopes(hop, flat, low, emptyList(), hopS, st), order.indices.map { pickup + 16 * it })
+    }
+
+    @Test
+    fun repeatedSectionsAreFoundWhenLoudnessAndBassAreFlat() {
+        PhraseGrid.debug = null
+        var right = 0
+        var sure = 0
+        var sureWrong = 0
+        var rightBlind = 0
+        for (seed in 1..30) {
+            val (starts, env, truth) = repeatingSong(seed, noise = 0.25)
+            val res = PhraseGrid.detect(starts, env)!!
+            val ok = truth.all { res.position[it] == 0 }
+            if (ok) right++
+            if (PhraseGrid.blocksSure(res)) { sure++; if (!ok) sureWrong++ }
+            // the same song without the structure frames: only flat loudness and bass to go on
+            val blind = PhraseGrid.detect(starts, PhraseGrid.Envelopes(env.hopMs, env.energy, env.low))!!
+            if (truth.all { blind.position[it] == 0 }) rightBlind++
+        }
+        println("repeating song: right $right/30, sure $sure, sure but wrong $sureWrong; without frames right $rightBlind/30")
+        assertTrue(right >= 27)
+        assertTrue(sure >= 20)
+        assertEquals(0, sureWrong)
+        PhraseGrid.debug = { println(it) }
+    }
 }

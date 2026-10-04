@@ -266,6 +266,65 @@ object PhraseGrid {
         return p to shiftMargin(ev, pos, PHRASE_BARS, 0, ev.size)
     }
 
+    /**
+     * Per bar: how much the PATTERN OF REPETITION changes at its line ("structure features", Serra et al. 2012, on bars).
+     * Bar k's feature is its similarity (chroma + timbre, cosine) to every earlier bar k-L, L = 1..[MAX_LAG_BARS], smoothed
+     * along the diagonal over 3 bars so a repeated passage reads as a stripe. Where a chorus comes back, the bars from the
+     * line on suddenly resemble the bars one chorus-and-verse earlier, and the stripe starts: the window after the line
+     * differs from the window before it. Null without structure frames. Loudness and bass barely change in a cumbia; what
+     * repeats is the melody and the arrangement, which this reads.
+     */
+    private fun repetitionNovelty(f: BarFeatures): DoubleArray? {
+        val c = f.chroma ?: return null
+        val t = f.timbre ?: return null
+        val k = f.size
+        if (k < 2 * REPEAT_WINDOW + 4) return null
+        val v = Array(k) { i ->
+            val x = DoubleArray(c[i].size + t[i].size) { d -> if (d < c[i].size) c[i][d] else t[i][d - c[i].size] }
+            val n = sqrt(x.sumOf { it * it }).coerceAtLeast(1e-9)
+            for (d in x.indices) x[d] /= n
+            x
+        }
+        val maxLag = min(MAX_LAG_BARS, k - 1)
+        fun sim(i: Int, j: Int): Double {
+            var d = 0.0
+            for (q in v[i].indices) d += v[i][q] * v[j][q]
+            return d
+        }
+        // lag[i][L-1] = similarity of bar i to bar i-L, averaged over bars i-1..i+1 on the same diagonal (NaN = no such bar)
+        val lag = Array(k) { i ->
+            DoubleArray(maxLag) { li ->
+                val l = li + 1
+                var sum = 0.0
+                var n = 0
+                for (dt in -1..1) {
+                    val a = i + dt
+                    if (a - l >= 0 && a < k) { sum += sim(a, a - l); n++ }
+                }
+                if (n == 0) Double.NaN else sum / n
+            }
+        }
+        return DoubleArray(k) { i ->
+            val w = REPEAT_WINDOW
+            if (i - w < 0 || i + w > k) return@DoubleArray 0.0
+            var d2 = 0.0
+            var n = 0
+            for (li in 0 until maxLag) {
+                var a = 0.0
+                var b = 0.0
+                var ok = true
+                for (q in i until i + w) { val x = lag[q][li]; if (x.isNaN()) { ok = false; break }; a += x }
+                if (!ok) continue
+                for (q in i - w until i) { val x = lag[q][li]; if (x.isNaN()) { ok = false; break }; b += x }
+                if (!ok) continue
+                val diff = (a - b) / w
+                d2 += diff * diff
+                n++
+            }
+            if (n == 0) 0.0 else sqrt(d2 / n)
+        }
+    }
+
     /** Per bar: how much the music changes at its line (z-scored, clipped). */
     private fun evidence(f: BarFeatures): DoubleArray {
         val k = f.size
@@ -288,6 +347,7 @@ object PhraseGrid {
             }
             return sqrt(d2 / v[0].size)
         }
+        val repeat = repetitionNovelty(f)?.let { zscore(it) }
         val raw = DoubleArray(k) { i ->
             var s = 0.0
             var w = 0.0
@@ -306,6 +366,8 @@ object PhraseGrid {
             // before the line) changes the level on both of its edges, and only the direction tells which edge is the line.
             val st = f.lowStep[i]
             b += if (st > 0) STEP_IN * st / ss else STEP_OUT * -st / ss
+            // where the song starts repeating something (or stops): the chorus coming back is a phrase line
+            repeat?.let { b += W_REPEAT * it[i].coerceAtLeast(0.0) }
             // a crash or an opening hat pattern on the line
             f.highStep?.let { hs -> if (hs[i] > 0) b += W_HIGH_STEP * hs[i] / shs }
             if (i >= 2) {
@@ -425,6 +487,11 @@ object PhraseGrid {
     private const val W_HIGH_STEP = 0.5
     private const val W_CHROMA = 0.8
     private const val W_TIMBRE = 0.8
+
+    /** Weight of the repetition evidence ([repetitionNovelty]), and its window and longest lag (bars). */
+    private const val W_REPEAT = 1.5
+    private const val REPEAT_WINDOW = 4
+    private const val MAX_LAG_BARS = 64
 
     private fun median(x: DoubleArray): Double = if (x.isEmpty()) 0.0 else x.sorted()[x.size / 2]
 
