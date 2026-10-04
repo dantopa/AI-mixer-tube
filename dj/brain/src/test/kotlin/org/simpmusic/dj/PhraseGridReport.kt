@@ -2,6 +2,7 @@ package org.simpmusic.dj
 
 import kotlinx.serialization.json.Json
 import org.simpmusic.dj.analysis.AnalysisRefiner
+import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.PhraseGrid
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
@@ -35,6 +36,11 @@ class PhraseGridReport {
         val out = System.getenv("PHRASE_OUT")?.let(::File)?.also { it.mkdirs() }
         val titles = File(dir, "titles.tsv").takeIf { it.exists() }?.readLines()?.associate { it.substringBefore('\t') to it.substringAfter('\t') } ?: emptyMap()
         val files = (File(dir, "analysis").listFiles() ?: dir.listFiles())!!.filter { it.name.endsWith(".json") }.sortedBy { it.name }
+        fun tsv(name: String) = File(dir, name).takeIf { it.exists() }?.readLines()?.filter { '\t' in it }?.associate { it.substringBefore('\t') to it.substringAfter('\t').trim().toLong() } ?: emptyMap()
+        // the owner's tapped 1s decide the bars, as on the phone; phrase marks are NOT applied, they are what is compared
+        val taps = tsv("taps.tsv")
+        val marks = tsv("phrases.tsv")
+        BarPhase.anchors = { taps[it] }
         var decided = 0; var phraseSure = 0; var blockSure = 0; var agreeCounted = 0; var blocksTotal = 0
         for (f in files) {
             val raw = runCatching { json.decodeFromString(TrackAnalysis.serializer(), f.readText()) }.getOrNull() ?: continue
@@ -57,7 +63,15 @@ class PhraseGridReport {
                 ),
             )
             if (out != null) draw(r, File(out, "${raw.videoId}.png"))
+            marks[raw.videoId]?.let { m ->
+                val starts = downs.map { beats[it].toLong() }
+                val res = PhraseGrid.detect(starts, PhraseGrid.Envelopes.of(r))!!
+                val k = starts.indices.minBy { kotlin.math.abs(starts[it] - m) }
+                println("PHRASE   mark ${raw.videoId} at $m ms = bar $k; around it (bar: position-in-block, evidence):")
+                println("PHRASE     " + (maxOf(0, k - 4)..minOf(starts.size - 1, k + 4)).joinToString("  ") { b -> "${if (b == k) "*" else ""}$b:${res.position[b] + 1}/16 %+.1f".format(res.evidence[b]) })
+            }
         }
+        BarPhase.anchors = { null }
         println("PHRASE decided $decided, 8-bar phrases sure $phraseSure, 16-bar lines sure $blockSure; detected 16 lines on the counted ones $agreeCounted / $blocksTotal")
     }
 
