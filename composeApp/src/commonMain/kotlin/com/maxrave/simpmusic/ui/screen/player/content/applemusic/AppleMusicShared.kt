@@ -495,25 +495,30 @@ internal fun AppleMusicTimesRow(
         // measured constant to keep in sync. The cross-fade looks identical — alpha is what
         // fadeIn/fadeOut animated anyway.
         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-            // Sweep head for the "Crossfading" shimmer, 0..1. Runs UNCONDITIONALLY — put behind the
-            // crossfade check it would restart from zero every time the label appears, which is the
-            // same reason the other two styles declare it outside their own visibility gate.
-            val sweepTransition = rememberInfiniteTransition(label = "appleMusicCrossfadeSweep")
-            val crossfadeSweep by sweepTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = 1f,
-                animationSpec =
-                    infiniteRepeatable(
-                        animation = tween(3200, easing = LinearEasing),
-                        repeatMode = RepeatMode.Restart,
-                    ),
-                label = "appleMusicSweepHead",
-            )
             val codec = state.audioCodecLabel
             val crossfadeLabelAlpha by animateFloatAsState(
                 targetValue = if (state.timelineState.isCrossfading) 1f else 0f,
                 label = "appleMusicCrossfadeLabelAlpha",
             )
+            // Sweep head for the "Crossfading" shimmer, 0..1. Only animated while the label is (becoming) visible: an
+            // infinite transition left running forced a frame on every vsync for as long as the player was on screen.
+            val crossfadeSweep =
+                if (state.timelineState.isCrossfading || crossfadeLabelAlpha > 0f) {
+                    val sweepTransition = rememberInfiniteTransition(label = "appleMusicCrossfadeSweep")
+                    val sweep by sweepTransition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 1f,
+                        animationSpec =
+                            infiniteRepeatable(
+                                animation = tween(3200, easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart,
+                            ),
+                        label = "appleMusicSweepHead",
+                    )
+                    sweep
+                } else {
+                    0f
+                }
             val codecBadgeAlpha by animateFloatAsState(
                 targetValue = if (!state.timelineState.isCrossfading && codec != null) 1f else 0f,
                 label = "appleMusicCodecBadgeAlpha",

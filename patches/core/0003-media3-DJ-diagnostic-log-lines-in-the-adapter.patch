@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH 3/3] media3: DJ diagnostic log lines in CrossfadeExoPlayerAdapter
+
+Logging only, no behaviour change: a "track started" line, a "queue context changed" line, a "TRIGGER" line and a
+throttled (every 5 s) "poll" line that says exactly why the DJ did or did not fire (guard, window state, position
+against the trigger). DjPlayerPort.log now goes to the DJ log (tag port). The adapter also tells the hooks when a window
+started (onMixStarted), which is what lets the UI say a DJ mix is playing.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LjDCXJJeuBALofdjqC8qgu
+---
+diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+index b0322f8..2e64226 100644
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -2901,6 +2901,43 @@ internal class CrossfadeExoPlayerAdapter(
+     @Volatile
+     private var djRunner: DjTransitionRunner? = null
+     private var djLastContext: DjQueueContext? = null
++    private var djLastLoggedTrack: String? = null
++    private var djLastExplainMs = 0L
++
++    /**
++     * Diagnostics only: once every ~5 s, ONE line saying exactly why the DJ did or did not fire (which guard, whether a
++     * window exists, the position against the trigger). Never changes behaviour.
++     */
++    private fun djExplain(
++        hooks: DjHooks,
++        ctx: DjQueueContext,
++        player: ExoPlayer,
++        positionMs: Long,
++    ) {
++        val now = android.os.SystemClock.elapsedRealtime()
++        if (now - djLastExplainMs < 5_000L) return
++        djLastExplainMs = now
++        val runner = djRunner
++        val dbg = hooks.debug.value
++        val why =
++            when {
++                ctx.blockedReason != null -> "blocked by guard: ${ctx.blockedReason}"
++                ctx.nextId == null -> "no next track in the queue"
++                runner == null -> "no prepared window yet; engine phase=${dbg.phase} kind=${dbg.kind} reason=${dbg.reason} current=${dbg.currentAnalysis} next=${dbg.nextAnalysis}"
++                runner.isRunning -> "mix running, controller phase=${runner.phase}"
++                !runner.isWindowReady -> "window prepared but its player is not ready yet"
++                !player.isPlaying -> "window ready but the player is not playing"
++                else ->
++                    "window ready, waiting for the trigger: position=$positionMs trigger=${runner.prepared.triggerSourceMs(hooks.calibrator.startLatencyMs).toLong()} " +
++                        "windowStartsAtSrc=${runner.prepared.timeline.outgoingSourceAtWindowStart.toLong()} exitPoint=${runner.prepared.plan.exitPointMs} " +
++                        "kind=${runner.prepared.plan.kind} remaining=${(runner.prepared.triggerSourceMs(hooks.calibrator.startLatencyMs) - positionMs).toLong()} ms"
++            }
++        hooks.log(
++            "poll",
++            "current=${ctx.currentId} next=${ctx.nextId} pos=$positionMs dur=$cachedDuration state=$internalState speed=$internalPlaybackSpeed pitch=$internalPlaybackPitch " +
++                "repeat=$internalRepeatMode cast=$isCastActive suppressed=$crossfadeSuppressed -> $why",
++        )
++    }
+ 
+     /** Why DJ mode must sit this transition out, or null. Mirrors (and adds to) the crossfade guards. */
+     private fun djBlockedReason(): String? =
+@@ -2922,10 +2959,19 @@ internal class CrossfadeExoPlayerAdapter(
+         val hooks = dj ?: return
+         if (!hooks.isEnabled) return
+         val currentId = playlist.getOrNull(localCurrentMediaItemIndex)?.mediaId ?: return
++        if (currentId != djLastLoggedTrack) {
++            djLastLoggedTrack = currentId
++            hooks.log(
++                "adapter",
++                "track started: id=$currentId index=$localCurrentMediaItemIndex/${playlist.size} duration=$cachedDuration position=$positionMs playing=${player.isPlaying}",
++            )
++        }
+         if (!isCrossfading) {
+             val nextId = if (hasNextMediaItem()) playlist.getOrNull(getNextMediaItemIndex())?.mediaId?.takeIf { it != currentId } else null
+             val ctx = DjQueueContext(currentId, nextId, djBlockedReason())
++            djExplain(hooks, ctx, player, positionMs)
+             if (ctx != djLastContext) {
++                hooks.log("adapter", "queue context changed: current=$currentId next=$nextId blocked=${ctx.blockedReason}; asking the engine for analyses")
+                 djLastContext = ctx
+                 hooks.onQueueContext(ctx)
+                 // A window prepared for another pair is dead weight.
+@@ -2943,10 +2989,13 @@ internal class CrossfadeExoPlayerAdapter(
+             if (ctx.blockedReason == null && !runner.isRunning && !runner.isDone && player.isPlaying && runner.isWindowReady &&
+                 runner.prepared.isTriggeredAt(positionMs, hooks.calibrator.startLatencyMs)
+             ) {
++                hooks.log("adapter", "TRIGGER: starting the window at position=$positionMs (trigger=${runner.prepared.triggerSourceMs(hooks.calibrator.startLatencyMs).toLong()})")
+                 currentPlayer?.skipSilenceEnabled = false
+                 if (!runner.start()) {
+                     hooks.consumed(runner.prepared, "start refused")
+                     djDiscardPrepared()
++                } else {
++                    hooks.onMixStarted(runner.prepared)
+                 }
+             }
+         }
+@@ -3118,7 +3167,7 @@ internal class CrossfadeExoPlayerAdapter(
+             }
+ 
+             override fun log(message: String) {
+-                Logger.d(TAG, message)
++                dj?.log("port", message) ?: Logger.d(TAG, message)
+             }
+         }
+ 

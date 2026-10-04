@@ -880,12 +880,16 @@ private fun rememberSmoothPlayhead(
         }
         // Keyed on rawMs, so the next real tick cancels this loop and restarts it from the truth —
         // the interpolation can accumulate error for at most one tick before being corrected.
+        // Stops once a whole tick has been carried forward: when the ticks stop (paused) there is nothing left to
+        // interpolate, and looping on would ask for a frame on every vsync for as long as the lyrics are on screen.
         var baseNanos = -1L
-        while (true) {
+        var saturated = false
+        while (!saturated) {
             withFrameNanos { frameNanos ->
                 if (baseNanos < 0L) baseNanos = frameNanos
                 val elapsedMs = (frameNanos - baseNanos) / 1_000_000L
                 playhead.longValue = rawMs + elapsedMs.coerceIn(0L, PLAYHEAD_TICK_MS)
+                saturated = elapsedMs >= PLAYHEAD_TICK_MS
             }
         }
     }

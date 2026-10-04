@@ -61,6 +61,7 @@ include(
     ":kizzy",
     ":listenTogether",
     ":loginSync",
+    ":djAndroid",
 )
 
 // core modules
@@ -79,10 +80,16 @@ project(":kizzy").projectDir = File(serviceDir, "kizzy")
 project(":listenTogether").projectDir = File(serviceDir, "listenTogether")
 project(":loginSync").projectDir = File(serviceDir, "loginSync")
 
+// AI DJ: Android half lives in dj/android; the pure-JVM brain is a composite build (dj/) that is
+// substituted for the coordinates org.simpmusic.dj:brain.
+project(":djAndroid").projectDir = File(rootDir, "dj/android")
+
 // media modules
 project(":media-jvm").projectDir = File(mediaDir, "media-jvm")
 project(":media-jvm-ui").projectDir = File(mediaDir, "media-jvm-ui")
 project(":media3").projectDir = File(mediaDir, "media3")
 project(":media3-ui").projectDir = File(mediaDir, "media3-ui")
+
+includeBuild("dj")
 
 enableFeaturePreview("TYPESAFE_PROJECT_ACCESSORS")

@@ -832,26 +832,24 @@ internal fun ColumnScope.ExpressivePlaybackControls(
             modifier = Modifier.weight(1f),
             textAlign = TextAlign.Left,
         )
-        // Sweep head for the "Crossfading" shimmer, 0..1. Runs
-        // unconditionally: behind the crossfade check it would
-        // restart from zero each time the label appears (same
-        // rationale as the desktop MiniPlayer's crossfadeSweep).
-        val sweepTransition = rememberInfiniteTransition(label = "m3eCrossfadeSweep")
-        val crossfadeSweep by sweepTransition.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec =
-                infiniteRepeatable(
-                    animation = tween(3200, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart,
-                ),
-            label = "m3eSweepHead",
-        )
         AnimatedVisibility(
             enter = fadeIn(),
             exit = fadeOut(),
             visible = state.timelineState.isCrossfading,
         ) {
+            // Created inside the visible branch: an infinite transition outside it forced a frame on every vsync for as
+            // long as the player was on screen, crossfade or not. Restarting the sweep from zero is invisible.
+            val sweepTransition = rememberInfiniteTransition(label = "m3eCrossfadeSweep")
+            val crossfadeSweep by sweepTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec =
+                    infiniteRepeatable(
+                        animation = tween(3200, easing = LinearEasing),
+                        repeatMode = RepeatMode.Restart,
+                    ),
+                label = "m3eSweepHead",
+            )
             // Same effect as the desktop MiniPlayer label: a
             // highlight sweeping through the glyphs via a text
             // brush — no overlay, no clipping.

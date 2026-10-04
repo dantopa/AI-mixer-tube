@@ -618,20 +618,6 @@ fun MiniPlayer(
         // Crossfade cue: a label on the artist line, nothing on the bar itself. The Now Playing
         // screen cycles the track through hues for this, which on a 2dp hairline reads as a
         // rendering fault rather than as a transition.
-        // Head of the highlight that travels through the "Crossfading" label, 0..1. Runs
-        // unconditionally: putting it behind the crossfade check would restart the animation from
-        // zero each time the label appears, so the sweep would jump rather than continue.
-        val sweepTransition = rememberInfiniteTransition(label = "miniPlayerCrossfadeSweep")
-        val crossfadeSweep by sweepTransition.animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec =
-                infiniteRepeatable(
-                    animation = tween(3200, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart,
-                ),
-            label = "miniPlayerSweepHead",
-        )
         val progressColor = textColor
 
         var isSliding by rememberSaveable {
@@ -866,6 +852,19 @@ fun MiniPlayer(
                                     enter = fadeIn(),
                                     exit = fadeOut(),
                                 ) {
+                                    // Created inside the visible branch: an infinite transition outside it forced a frame on every vsync for as
+                                    // long as the player was on screen, crossfade or not. Restarting the sweep from zero is invisible.
+                                    val sweepTransition = rememberInfiniteTransition(label = "miniPlayerCrossfadeSweep")
+                                    val crossfadeSweep by sweepTransition.animateFloat(
+                                        initialValue = 0f,
+                                        targetValue = 1f,
+                                        animationSpec =
+                                            infiniteRepeatable(
+                                                animation = tween(3200, easing = LinearEasing),
+                                                repeatMode = RepeatMode.Restart,
+                                            ),
+                                        label = "miniPlayerSweepHead",
+                                    )
                                     // The label is what travels: a highlight sweeping left to
                                     // right through the glyphs. TextStyle takes a brush directly,
                                     // so the gradient paints the text itself — no overlay, no

@@ -1,0 +1,57 @@
+Subject: [PATCH] less background work: canvas pauses when stopped, cheaper SponsorBlock tick, precache 1
+
+---
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -317,7 +317,9 @@
+     // VideoId -> PrecachedPlayer
+     private val precachedPlayers = ConcurrentHashMap<String, PrecachedPlayer>()
+     private var precacheEnabled = true
+-    private val maxPrecacheCount = 2
++    // 1, not 2: each precached player is a fully prepared ExoPlayer with 4x-default buffers, decoding and downloading
++    // ahead. Only the next track is needed for a gapless start, a crossfade or a DJ mix.
++    private val maxPrecacheCount = 1
+     private var precacheJob: Job? = null
+ 
+     // ========== Crossfade System ==========
+diff --git a/data/src/androidMain/kotlin/com/maxrave/data/mediaservice/MediaServiceHandlerImpl.kt b/data/src/androidMain/kotlin/com/maxrave/data/mediaservice/MediaServiceHandlerImpl.kt
+index 11ea5a0..4b35c6d 100644
+--- a/data/src/androidMain/kotlin/com/maxrave/data/mediaservice/MediaServiceHandlerImpl.kt
++++ b/data/src/androidMain/kotlin/com/maxrave/data/mediaservice/MediaServiceHandlerImpl.kt
+@@ -465,6 +465,9 @@ internal class MediaServiceHandlerImpl(
+                         }.filter { it >= 0f }
+                         .distinctUntilChanged()
+                         .collect { current ->
++                            // Cheap in-memory check first: this runs on every 50 ms progress tick, and the DataStore read
++                            // below used to happen 20 times a second even with SponsorBlock off or no segments for the track.
++                            if (skipSegments.value.isNullOrEmpty()) return@collect
+                             if (dataStoreManager.sponsorBlockEnabled.first() == TRUE) {
+                                 if (player.duration > 0L) {
+                                     val skipSegments = skipSegments.value
+diff --git a/media/media3-ui/src/main/java/com/maxrave/media3/ui/MediaPlayerView.kt b/media/media3-ui/src/main/java/com/maxrave/media3/ui/MediaPlayerView.kt
+index 05b718a..cdf612b 100644
+--- a/media/media3-ui/src/main/java/com/maxrave/media3/ui/MediaPlayerView.kt
++++ b/media/media3-ui/src/main/java/com/maxrave/media3/ui/MediaPlayerView.kt
+@@ -170,6 +170,22 @@ fun MediaPlayerView(
+         }
+     }
+ 
++    // The composition outlives the screen: with the display off (or the app in the background) this looping canvas
++    // kept decoding video nobody could see. Pause it while the activity is stopped, resume when it is back.
++    val lifecycle = (LocalContext.current as? ComponentActivity)?.lifecycle
++    DisposableEffect(lifecycle, exoPlayer) {
++        val observer =
++            androidx.lifecycle.LifecycleEventObserver { _, event ->
++                when (event) {
++                    androidx.lifecycle.Lifecycle.Event.ON_STOP -> exoPlayer.playWhenReady = false
++                    androidx.lifecycle.Lifecycle.Event.ON_START -> exoPlayer.playWhenReady = true
++                    else -> Unit
++                }
++            }
++        lifecycle?.addObserver(observer)
++        onDispose { lifecycle?.removeObserver(observer) }
++    }
++
+     if (keepScreenOn) {
+         KeepScreenOn()
+     }
