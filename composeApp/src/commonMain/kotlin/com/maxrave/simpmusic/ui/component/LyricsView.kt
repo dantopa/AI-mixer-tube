@@ -868,7 +868,7 @@ fun LyricsLineItem(
  * tick ahead, and when they stop — paused playback — it settles one tick ahead and stays there.
  */
 @Composable
-internal fun rememberSmoothPlayhead(
+private fun rememberSmoothPlayhead(
     rawMs: Long,
     enabled: Boolean,
 ): State<Long> {

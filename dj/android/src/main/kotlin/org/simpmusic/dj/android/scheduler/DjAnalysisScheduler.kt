@@ -419,9 +419,16 @@ class DjAnalysisScheduler(
                 outcomes.tryEmit(AnalysisOutcome.Done(id))
                 return
             }
+            // A full analysis that only lacks the structure frames (build ae) needs the DSP pass alone, not Beat This! again:
+            // about 2 s of CPU instead of ~25 s, once per track (less heat while the library catches up).
+            val onlyFrames = if (entry.priority != AnalysisPriority.BACKGROUND && quick != null) {
+                store.get(id, analyzer.id)?.takeIf { it.beatDownbeatLogits != null && it.structureFrames.isEmpty() }
+            } else {
+                null
+            }
             if (entry.priority != AnalysisPriority.BACKGROUND && store.has(id, analyzer.id)) {
                 synchronized(upgraded) { upgraded += id }
-                DjLog.i(TAG, "$id: stored analysis predates the bar-phase evidence, analysing it again (once)")
+                DjLog.i(TAG, "$id: stored analysis predates the ${if (onlyFrames != null) "structure frames, adding them with the DSP pass only" else "bar-phase evidence, analysing it again"} (once)")
             }
             val tDecode = clock()
             val pcm = decoder.decodeForAnalysis(id, network, cancel)
@@ -432,7 +439,13 @@ class DjAnalysisScheduler(
                 return
             }
             val tAnalyse = clock()
-            val analysis = useAnalyzer.analyze(id, pcm)
+            val analysis =
+                if (onlyFrames != null) {
+                    val q = quick!!.analyze(id, pcm)
+                    onlyFrames.copy(highBandEnergy = q.highBandEnergy, structureHopMs = q.structureHopMs, structureFrames = q.structureFrames)
+                } else {
+                    useAnalyzer.analyze(id, pcm)
+                }
             val tStore = clock()
             store.put(analysis)
             onStored(id)

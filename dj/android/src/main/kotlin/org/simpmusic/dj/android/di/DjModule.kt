@@ -138,8 +138,12 @@ val djModule =
                 quick = org.simpmusic.dj.android.analysis.TimedDsp(org.simpmusic.dj.analysis.DspTrackAnalyzer()),
                 onStored = { id -> getOrNull<AnalysisPool>()?.invalidate(id) },
                 onJobStart = { priority ->
-                    // the playing / next track's analysis is what a mix waits for: normal priority. The library warm-up stays in the background.
-                    Process.setThreadPriority(if (priority == AnalysisPriority.BACKGROUND) Process.THREAD_PRIORITY_BACKGROUND else Process.THREAD_PRIORITY_DEFAULT)
+                    // the playing / next track's analysis is what a mix waits for: normal priority. The library warm-up stays in
+                    // the background, and so does the NEXT track's once the phone reports MODERATE heat (thermal 2): it has a
+                    // whole track to finish in, and the little cores run it cooler (the owner: "it works great, it just gets hot")
+                    val hot = (getOrNull<org.simpmusic.dj.android.scheduler.DeviceConditions>()?.thermalStatus ?: 0) >= 2
+                    val background = priority == AnalysisPriority.BACKGROUND || (priority == AnalysisPriority.NEXT_UP && hot)
+                    Process.setThreadPriority(if (background) Process.THREAD_PRIORITY_BACKGROUND else Process.THREAD_PRIORITY_DEFAULT)
                 },
             )
         }

@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,7 +32,6 @@ import com.maxrave.domain.manager.DataStoreManager
 import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
-import com.maxrave.simpmusic.ui.component.rememberSmoothPlayhead
 import com.maxrave.simpmusic.ui.icon.FastForward
 import com.maxrave.simpmusic.ui.icon.Star
 import com.maxrave.simpmusic.ui.icon.GraphicEq
@@ -193,12 +193,13 @@ actual fun DjStatusChip(modifier: Modifier) {
     }
     // The 1-2-3-4 counter follows the DJ's bars: if its "1" does not light up on the 1 you hear, tap "»" to move it one
     // beat later (no timing needed). Tapping the counter on the 1s you hear (a few times) sets it too; long-press forgets.
-    // It follows what is HEARD: the 20 Hz position carried forward at frame rate (as the lyrics do), minus the lyrics
-    // timing offset the owner sets for Bluetooth; derived, so the chip recomposes only when the beat changes.
+    // It follows what is HEARD: the 20 Hz position minus the lyrics timing offset the owner sets for Bluetooth; derived,
+    // so the chip recomposes only when the beat changes. Not carried forward at frame rate like the lyrics: that asks for
+    // a frame on every vsync while Now Playing is open, a cost the counter (a beat is 450-750 ms) does not need.
     val dataStore = koinInject<DataStoreManager>()
     val outputDelayMs by dataStore.lyricsOffsetMs.collectAsStateWithLifecycle(0)
-    val playhead = rememberSmoothPlayhead(positionMs, enabled = media is SimpleMediaState.Progress)
-    val heard by remember(hooks) { derivedStateOf { (playhead.value - outputDelayMs).coerceAtLeast(0L) } }
+    val position by rememberUpdatedState(positionMs)
+    val heard by remember(hooks) { derivedStateOf { (position - outputDelayMs).coerceAtLeast(0L) } }
     val barState = remember(hooks) { derivedStateOf { hooks.barBeatAt(heard) } }
     val bar = barState.value
     if (bar != null) {
