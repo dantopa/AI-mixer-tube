@@ -260,6 +260,12 @@ fun shareDjLog(context: Context, chooserTitle: String) {
  * replay every pair of the owner's real queue offline.
  */
 fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
+    // Zipping ~170 analyses and drawing their phasegrams takes seconds: off the main thread (a device log showed the UI
+    // frozen 550 ms in the Deflater), then back to it for the share sheet.
+    kotlin.concurrent.thread(name = "dj-export") { buildAndShareDjAnalyses(context, chooserTitle, names) }
+}
+
+private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
     runCatching {
         val dir = File(context.cacheDir, "dj_log").apply { mkdirs() }
         val zip = File(dir, "dj-analyses.zip")
@@ -300,6 +306,8 @@ fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, S
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-        context.startActivity(Intent.createChooser(send, chooserTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching { context.startActivity(Intent.createChooser(send, chooserTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) }
+        }
     }.onFailure { DjLog.w("export", "analysis export failed: ${it.message}") }
 }

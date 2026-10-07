@@ -7,6 +7,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -17,6 +18,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.simpmusic.dj.android.decode.AudioUnavailableException
 import org.simpmusic.dj.android.decode.CancelSignal
 import org.simpmusic.dj.android.decode.TrackDecoder
 import org.simpmusic.dj.android.render.RenderRequest
@@ -64,7 +66,13 @@ class DjEngineTest {
     private class Decoder : TrackDecoder {
         val ranges = ArrayList<Triple<String, Long, Long>>()
 
-        override suspend fun decodeForAnalysis(videoId: String, allowNetwork: Boolean, cancel: CancelSignal) = PcmAudio(FloatArray(22_050), 22_050)
+        /** Tracks whose audio cannot be had (no stream url): every analysis decode of them throws. */
+        val unavailable = HashSet<String>()
+
+        override suspend fun decodeForAnalysis(videoId: String, allowNetwork: Boolean, cancel: CancelSignal): PcmAudio {
+            if (videoId in unavailable) throw AudioUnavailableException("no stream url for $videoId")
+            return PcmAudio(FloatArray(22_050), 22_050)
+        }
 
         override suspend fun decodeStereoRange(videoId: String, startMs: Long, endMs: Long, cancel: CancelSignal): StereoPcm {
             ranges += Triple(videoId, startMs, endMs)
@@ -244,6 +252,18 @@ class DjEngineTest {
             assertEquals("idle", done.phase)
             assertNull(done.mixStartedAtEpochMs)
             assertEquals("DJ mix done", done.lastOutcome)
+        }
+
+    /** A device log held a transition 10 minutes on a track with no stream url: once its analysis has FAILED, stop waiting. */
+    @Test
+    fun aFailedAnalysisEndsTheWaitAtOnceInsteadOfAfterTenMinutes() =
+        runTest {
+            val r = rig()
+            r.decoder.unavailable += "B"
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceTimeBy(150_000) // the scheduler's three tries (5 s, 20 s, 80 s back-offs), then a second of the engine's poll
+            assertEquals("analysis not available", r.engine.debug.value.reason)
+            assertEquals(0, r.planner.calls)
         }
 
     @Test

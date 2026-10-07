@@ -12,7 +12,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -651,8 +654,17 @@ class DjEngine(
                     }
                 try {
                     withTimeoutOrNull(analysisWaitMs) {
-                        combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a != null && b != null) a to b else null }
-                            .first { it != null }
+                        // A track whose analysis FAILED (no stream url, decode error) will not be ready within the wait: stop
+                        // waiting at once and let the app's own crossfade do this transition, instead of holding it 10 minutes.
+                        val failed =
+                            flow {
+                                while (true) {
+                                    if (scheduler.statusOf(fromId) is AnalysisStatus.Failed || scheduler.statusOf(toId) is AnalysisStatus.Failed) emit(null)
+                                    delay(1000)
+                                }
+                            }
+                        val ready = combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a != null && b != null) a to b else null }.filterNotNull()
+                        merge(ready, failed).first()
                     }
                 } finally {
                     ticker.cancel()
