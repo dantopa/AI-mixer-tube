@@ -283,6 +283,26 @@ Service modules:
   - **Tests**: `HarmonyTest` (synthetic chroma with a floor matching the real data) and two `QueueLookAheadTest` cases.
   - **Not done**: ±1 semitone using `Fit.bestShift`, vocal activity, and the recommender's own ranking.
   - Not run on a device, not judged by ear.
+- **No voice over voice (2026-10-08, build ak)**: the DJ now knows where each track has a voice and avoids two singers at once, the most audible clash after the bass.
+  - **Model**: YAMNet (Google, Apache-2.0, AudioSet tagger) as ONNX with fp16 weights, 8.1 MB, `dj/android/src/main/assets/yamnet_fp16w.onnx`. It is **gitignored** like Beat This!; build it with `dj/ml/tools/vocals_model.py`, which pins the HF revision and SHA-256.
+  - **`VocalDetector`** (`dj/ml`, `VocalActivity.kt`):
+    - resamples to 16 kHz and runs in 60 s chunks plus 2 extra hops (measured identical to one pass);
+    - takes ln(sum of 10 voice classes), smoothed over 3 frames, threshold −5.0;
+    - merges gaps under 1 s and drops ranges under 1 s;
+    - fills `TrackAnalysis.vocals` (`Confident(ranges, 0.85)`, an empty list = "no voice").
+  - **Measured on JamendoLyrics** (79 songs in EN/FR/DE/ES, truth from word timings; local only, no audio or labels in the repo):
+    - 16 s windows called right: 88 % (Kotlin pipeline on the 20 Spanish songs: 90.6 %);
+    - voice over voice between two windows: 86 % agreement, precision 87 %, recall 93 %;
+    - the instrumental corpus is marked vocal 1.8 % of the time.
+    - Not measured on cumbia or reggaeton specifically. `VocalReport` (`dj/ml` tests, VOX_MODEL + VOX_DIR) reproduces it.
+  - **Not in the analyzer id**: `CompositeAnalyzer(…, vocals =)` keeps its id, so the library is not re-analysed. The scheduler's `vocals` parameter adds them to a stored full analysis of the playing or next track with YAMNet alone, once per process. The old `onlyFrames` path became `patch`: frames and/or vocals.
+  - **Planner** (`analysis/VocalClash`):
+    - each exit/entry pair pays `MixScoring.W_VOCALS` (0.35) × (voice-over-voice ms / 8 s);
+    - `finishBeat` ends the overlap, in whole units, before the second voice joins when ≥ 1.5 s would overlap and at least `minUnits` fit;
+    - the reason says `vocals: none in the overlap | one at a time | voice over voice X s` and `(overlap ended before the second voice (a -> b bars))`.
+    - Analyses without vocals are planned exactly as before (`VocalClashTest`).
+  - **Cost**: about 230x real time on the build server's CPU with 2 threads, so roughly 1 s per 4-minute track there. The phone, with 1 thread, is unmeasured.
+  - Not run on a device, not judged by ear.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

@@ -16,6 +16,11 @@ class CompositeAnalyzer(
     private val base: TrackAnalyzer,
     private val beats: BeatProvider,
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Fills `vocals` when given. Deliberately NOT part of [id]: a new id would make every stored analysis stale and
+     * re-analyse the whole library; the scheduler adds the vocals to the playing and next tracks instead.
+     */
+    private val vocals: VocalProvider? = null,
 ) : TrackAnalyzer {
     override val id: String = "${base.id}+${beats.id}"
 
@@ -29,7 +34,13 @@ class CompositeAnalyzer(
         // Without a grid the DSP result is kept, but it must still carry THIS analyzer's id: the store treats a row whose
         // analyzerId differs from the analyzer's id as stale and deletes it on sight, so an untouched "dsp-1" row would be
         // re-analysed forever and the playing track would wait for an analysis that never sticks.
-        return if (grid == null) analysis.copy(analyzerId = id) else overlay(analysis, grid)
+        val a = if (grid == null) analysis.copy(analyzerId = id) else overlay(analysis, grid)
+        val v = vocals ?: return a
+        return try {
+            v.vocals(audio)?.let { a.copy(vocals = it) } ?: a
+        } catch (e: Exception) {
+            a
+        }
     }
 
     private fun overlay(a: TrackAnalysis, g: BeatGrid): TrackAnalysis {

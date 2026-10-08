@@ -3,6 +3,7 @@ package org.simpmusic.dj.planner
 import org.simpmusic.dj.analysis.AnalysisRefiner
 import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.Harmony
+import org.simpmusic.dj.analysis.VocalClash
 
 import org.simpmusic.dj.model.Camelot
 import org.simpmusic.dj.model.DeckPlan
@@ -106,6 +107,10 @@ class DjTransitionPlanner : TransitionPlanner {
         /** Chroma of each track for the LOCAL harmonic fit of an overlap (null for analyses without structure frames). */
         val hOut: Harmony.Profile? = Harmony.profile(from)
         val hIn: Harmony.Profile? = Harmony.profile(to)
+
+        /** Where each track has a voice (null for analyses without vocal detection). */
+        val vOut = VocalClash.ranges(from)
+        val vIn = VocalClash.ranges(to)
 
         val fromId: String get() = out.id
         val toId: String get() = inc.id
@@ -348,8 +353,10 @@ class DjTransitionPlanner : TransitionPlanner {
             // two tonal layers that clash over the overlap cost as much as the best bass terms earn: the planner looks for
             // an exit/entry pair that sounds together (or a percussive one, which is harmonically free) before settling
             val harmony = Harmony.fit(c.hOut, e.timeMs, overlapWanted.toLong(), c.hIn, n.timeMs, overlapWanted.toLong())
+            // and two singers at once is the clash everyone hears: a pair where one voice leaves before the other comes in wins
+            val vox = VocalClash.of(c.vOut, e.timeMs, 1.0, c.vIn, n.timeMs, 1.0, overlapWanted.toLong())
             val base = MixCandidates.score(e, n) + (if (c.perfect) perfectBonus(out, inc, e.pick, n.pick) else 0.0) -
-                MixScoring.W_HARMONY * (harmony?.penalty ?: 0.0)
+                MixScoring.W_HARMONY * (harmony?.penalty ?: 0.0) - MixScoring.W_VOCALS * (vox?.penalty ?: 0.0)
             val tempoTerm = if (t == null) 0.0 else MixScoring.W_TEMPO * (1.0 - 0.5 * min(1.0, max(abs(t.rateOut - 1.0), abs(t.rateIn - 1.0)) / max(bend, 1e-6)))
             all += Cand(MixCandidates.ScoredPair(e, n, base + tempoTerm), t)
         }
@@ -511,6 +518,17 @@ class DjTransitionPlanner : TransitionPlanner {
         val harmony = Harmony.fit(c.hOut, exitMs, (desiredUnits * unit * rateOut).toLong(), c.hIn, entryMs, (desiredUnits * unit * rateIn).toLong())
         val clash = harmony?.clash ?: c.key.clash
         if (clash) units = min(units, max(minUnits, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
+        // Voice over voice: end the overlap (whole units) before the second singer joins, so the outgoing deck is gone when
+        // the incoming voice starts. When the clash starts too early for even the shortest overlap it stays, and is said.
+        var vocalNote: String? = null
+        VocalClash.of(c.vOut, exitMs, rateOut, c.vIn, entryMs, rateIn, (units * unit).toLong())?.let { v ->
+            if (!v.clash) return@let
+            val fit = floor(v.firstMs / unit + UNIT_EPS).toInt()
+            if (fit >= minUnits && fit < units) {
+                vocalNote = "overlap ended before the second voice (${units} -> $fit ${if (barsMode) "bars" else "beats"})"
+                units = fit
+            }
+        }
         if (units < minUnits) {
             return Attempt.fail("not enough audio for a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap (room out ${availOut / 1000.0}s, in ${availIn / 1000.0}s)")
         }
@@ -685,6 +703,8 @@ class DjTransitionPlanner : TransitionPlanner {
             if (units < requestedUnits) append(" (clamped from $requestedUnits" + (if (desiredUnits < requestedUnits) ", the beat grid was irregular over a longer overlap" else "") + ")")
             append("; ").append(keyNote)
             harmony?.let { append("; ").append(it.describe()).append(if (it.clash) ": one tonal layer at a time (EQ swap), short overlap" else "") }
+            VocalClash.of(c.vOut, exitMs, rateOut, c.vIn, entryMs, rateIn, overlapMs)?.let { append("; ").append(it.describe()) }
+            vocalNote?.let { append(" (").append(it).append(")") }
             append("; bass swap ").append(if (bassSwap) "on" else if (!settings.bassSwap) "off (setting)" else "off (no bass to swap)")
             if (gainOut < 1.0 || gainIn < 1.0) append("; gain out ${fmt(gainOut.toFloat())} in ${fmt(gainIn.toFloat())}")
             if (notes.isNotEmpty()) append("; ").append(notes.joinToString())

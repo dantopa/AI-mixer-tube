@@ -129,7 +129,7 @@ TIV dissonance of the mixed chroma (outgoing 62-95 % window vs incoming 2-35 % w
    - cut the outgoing mids before the incoming tonal content;
    - or echo out.
    The planner already has the lanes.
-4. **Vocal activity** (cheap model, see `ai-landscape.md`): no vocal over vocal. Complementary to harmony, and the biggest audible clash after the bass.
+4. **Vocal activity** (done in build ak: YAMNet, `VocalClash`, see CLAUDE.md) (cheap model, see `ai-landscape.md`): no vocal over vocal. Complementary to harmony, and the biggest audible clash after the bass.
 5. **Optional ±1 semitone** on the incoming deck outside simple mode, only when TIV says it removes a clear clash and the incoming window has no vocals. That matches the 2.5 % / one-semitone practice.
 6. **Tuning offset**: store the tuning the key estimator already corrects for, and treat a > 30 cent difference as a clash (or correct a few cents, which is inaudible to stretch).
 7. Energy direction for Auto DJ: +1 clockwise (or +2) as the "lift" move, the Mixed In Key convention. Low priority.

@@ -49,3 +49,5 @@ sentry.properties
 
 # Beat This! model weights (MIT, 24 MB): fetched locally, never committed
 dj/android/src/main/assets/*.onnx
+# YAMNet vocal-activity model (Apache-2.0): fetched by dj/ml/tools/vocals_model.py, never committed
+dj/ml/tools/model/

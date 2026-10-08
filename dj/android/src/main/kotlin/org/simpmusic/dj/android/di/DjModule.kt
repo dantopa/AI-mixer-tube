@@ -137,6 +137,7 @@ val djModule =
                 worker = get(ANALYSIS_DISPATCHER),
                 quick = org.simpmusic.dj.android.analysis.TimedDsp(org.simpmusic.dj.analysis.DspTrackAnalyzer()),
                 onStored = { id -> getOrNull<AnalysisPool>()?.invalidate(id) },
+                vocals = DjAnalyzerFactory.vocals(androidContext()),
                 onJobStart = { priority ->
                     // the playing / next track's analysis is what a mix waits for: normal priority. The library warm-up stays in
                     // the background, and so does the NEXT track's once the phone reports MODERATE heat (thermal 2): it has a

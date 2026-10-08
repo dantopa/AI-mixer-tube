@@ -50,6 +50,8 @@ internal object MixScoring {
      * heavy as the bass terms, so a consonant or percussive pair a little lower on the other terms wins.
      */
     const val W_HARMONY = 0.35
+    /** Penalty for voice over voice in the overlap (`VocalClash.Result.penalty`, 0..1, full at 8 s), not part of the sum of 1. */
+    const val W_VOCALS = 0.35
 
     /** Window (ms) over which the energy before the exit and after the entry is averaged. */
     const val REGION_MS = 8_000L

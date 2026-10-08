@@ -8,6 +8,11 @@ import org.simpmusic.dj.ml.BeatProvider
 import org.simpmusic.dj.ml.BeatThisTracker
 import org.simpmusic.dj.ml.CompositeAnalyzer
 import org.simpmusic.dj.ml.OnnxBeatModel
+import org.simpmusic.dj.ml.OnnxVocalModel
+import org.simpmusic.dj.ml.VocalDetector
+import org.simpmusic.dj.ml.VocalProvider
+import org.simpmusic.dj.model.Confident
+import org.simpmusic.dj.model.TimeRange
 import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalyzer
@@ -24,15 +29,18 @@ object DjAnalyzerFactory {
     /** File name of the quantised model (`beat_this_int8mm.onnx`) inside the app assets. */
     const val MODEL_ASSET = "beat_this_int8mm.onnx"
 
+    /** File name of the YAMNet vocal-activity model (`dj/ml/tools/vocals_model.py`) inside the app assets. */
+    const val VOCALS_ASSET = "yamnet_fp16w.onnx"
+
     /** Size in bytes of the bundled model, or -1 when the asset is not in the APK. */
-    fun modelAssetSize(context: Context): Long =
+    fun modelAssetSize(context: Context, asset: String = MODEL_ASSET): Long =
         try {
             val am = context.applicationContext.assets
             try {
-                am.openFd(MODEL_ASSET).use { it.length }
+                am.openFd(asset).use { it.length }
             } catch (_: Exception) {
                 // compressed asset: no file descriptor, count the stream
-                am.open(MODEL_ASSET).use { s ->
+                am.open(asset).use { s ->
                     var total = 0L
                     val buf = ByteArray(1 shl 16)
                     while (true) {
@@ -56,7 +64,21 @@ object DjAnalyzerFactory {
             return dsp
         }
         DjLog.i(TAG, "Beat This! model asset '$MODEL_ASSET' present: $size bytes; analyzer = DSP + Beat This! overlay")
-        return CompositeAnalyzer(dsp, LazyBeatThis(app))
+        return CompositeAnalyzer(dsp, LazyBeatThis(app), vocals = vocals(app))
+    }
+
+    @Volatile private var vocalProvider: VocalProvider? = null
+
+    /** The vocal detector (one per process), or null when its model is not in the APK: mixes then ignore vocals. */
+    fun vocals(context: Context): VocalProvider? {
+        vocalProvider?.let { return it }
+        val size = modelAssetSize(context.applicationContext, VOCALS_ASSET)
+        if (size < 0) {
+            DjLog.w(TAG, "vocal model asset '$VOCALS_ASSET' is NOT in the APK: the DJ cannot avoid voice over voice")
+            return null
+        }
+        DjLog.i(TAG, "vocal model asset '$VOCALS_ASSET' present: $size bytes")
+        return synchronized(this) { vocalProvider ?: LazyVocals(context.applicationContext).also { vocalProvider = it } }
     }
 
     private const val TAG = "analyzer"
@@ -136,5 +158,52 @@ private class LazyBeatThis(private val context: Context) : BeatProvider {
     private companion object {
         const val TAG_ORT = "ort"
         const val RETRY_LOAD_MS = 5 * 60_000L
+    }
+}
+
+/** Loads the YAMNet session on first use and keeps it; any failure is logged and answered with null (no vocals). */
+private class LazyVocals(private val context: Context) : VocalProvider {
+    override val id: String = "yamnet-vocals-1"
+
+    @Volatile private var detector: VocalDetector? = null
+
+    @Volatile private var loadFailedAtMs = 0L
+
+    private fun detector(): VocalDetector? {
+        detector?.let { return it }
+        return synchronized(this) {
+            detector ?: run {
+                if (loadFailedAtMs != 0L && System.currentTimeMillis() - loadFailedAtMs < 5 * 60_000L) return@run null
+                val t0 = System.nanoTime()
+                try {
+                    // one thread: it runs beside Beat This! on the same worker, and heat matters more than seconds here
+                    VocalDetector(OnnxVocalModel.fromStream(context.assets.open(DjAnalyzerFactory.VOCALS_ASSET), threads = 1)).also {
+                        detector = it
+                        DjLog.i("ort", "vocal model session created in ${(System.nanoTime() - t0) / 1_000_000} ms")
+                    }
+                } catch (e: Throwable) {
+                    loadFailedAtMs = System.currentTimeMillis()
+                    DjLog.e("ort", "vocal model session creation FAILED: no vocal detection until it loads", e)
+                    null
+                }
+            }
+        }
+    }
+
+    override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? {
+        val d = detector() ?: return null
+        val t0 = System.nanoTime()
+        return try {
+            d.vocals(audio).also { v ->
+                DjLog.i(
+                    "ort",
+                    "vocals ${(System.nanoTime() - t0) / 1_000_000} ms for ${audio.durationMs} ms of audio: " +
+                        (v?.value?.let { r -> "${r.size} ranges, ${r.sumOf { it.durationMs } / 1000} s of voice" } ?: "too short"),
+                )
+            }
+        } catch (e: Throwable) {
+            DjLog.e("ort", "vocal detection FAILED after ${(System.nanoTime() - t0) / 1_000_000} ms: no vocals for this track", e)
+            null
+        }
     }
 }

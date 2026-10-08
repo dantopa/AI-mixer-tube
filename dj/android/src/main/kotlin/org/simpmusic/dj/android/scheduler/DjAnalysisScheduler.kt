@@ -114,6 +114,11 @@ class DjAnalysisScheduler(
      * THREAD_PRIORITY_BACKGROUND is confined to the little cores with a sliver of CPU while the app is in use.
      */
     private val onJobStart: (AnalysisPriority) -> Unit = {},
+    /**
+     * Vocal detection, used to ADD the vocals to a stored full analysis made before it existed (the full [analyzer] already
+     * fills them for new analyses): YAMNet alone, a few seconds, once per process for the playing and the next track.
+     */
+    private val vocals: org.simpmusic.dj.ml.VocalProvider? = null,
 ) : TrackAnalysisRepository {
     private val quick: TrackAnalyzer? = quick?.takeIf { it.id != analyzer.id }
 
@@ -141,7 +146,7 @@ class DjAnalysisScheduler(
         val a = store.get(videoId, analyzer.id) ?: return false
         if (a.beatTimesMs == null) return false
         // only the device's full analyzer (Beat This! over the DSP pass) produces both; any other would re-analyse for nothing
-        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty())
+        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty() || (vocals != null && a.vocals == null))
     }
 
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
@@ -419,16 +424,22 @@ class DjAnalysisScheduler(
                 outcomes.tryEmit(AnalysisOutcome.Done(id))
                 return
             }
-            // A full analysis that only lacks the structure frames (build ae) needs the DSP pass alone, not Beat This! again:
-            // about 2 s of CPU instead of ~25 s, once per track (less heat while the library catches up).
-            val onlyFrames = if (entry.priority != AnalysisPriority.BACKGROUND && quick != null) {
-                store.get(id, analyzer.id)?.takeIf { it.beatDownbeatLogits != null && it.structureFrames.isEmpty() }
+            // A full analysis that only lacks the structure frames (build ae) and/or the vocals (build ak) needs the DSP pass and/or
+            // the vocal model alone, not Beat This! again: a few seconds of CPU instead of ~25 s, once per track (less heat).
+            val patch = if (entry.priority != AnalysisPriority.BACKGROUND) {
+                store.get(id, analyzer.id)?.takeIf { it.beatDownbeatLogits != null && (it.structureFrames.isNotEmpty() || quick != null) }
             } else {
                 null
             }
             if (entry.priority != AnalysisPriority.BACKGROUND && store.has(id, analyzer.id)) {
                 synchronized(upgraded) { upgraded += id }
-                DjLog.i(TAG, "$id: stored analysis predates the ${if (onlyFrames != null) "structure frames, adding them with the DSP pass only" else "bar-phase evidence, analysing it again"} (once)")
+                val what = if (patch == null) {
+                    "bar-phase evidence, analysing it again"
+                } else {
+                    listOfNotNull("structure frames".takeIf { patch.structureFrames.isEmpty() }, "vocals".takeIf { patch.vocals == null && vocals != null })
+                        .joinToString(" and ") + ", adding only that"
+                }
+                DjLog.i(TAG, "$id: stored analysis predates the $what (once)")
             }
             val tDecode = clock()
             val pcm = decoder.decodeForAnalysis(id, network, cancel)
@@ -440,9 +451,16 @@ class DjAnalysisScheduler(
             }
             val tAnalyse = clock()
             val analysis =
-                if (onlyFrames != null) {
-                    val q = quick!!.analyze(id, pcm)
-                    onlyFrames.copy(highBandEnergy = q.highBandEnergy, structureHopMs = q.structureHopMs, structureFrames = q.structureFrames)
+                if (patch != null) {
+                    var a: TrackAnalysis = patch
+                    if (a.structureFrames.isEmpty()) {
+                        val q = quick!!.analyze(id, pcm)
+                        a = a.copy(highBandEnergy = q.highBandEnergy, structureHopMs = q.structureHopMs, structureFrames = q.structureFrames)
+                    }
+                    if (a.vocals == null && vocals != null) {
+                        a = (try { vocals.vocals(pcm) } catch (e: Exception) { null })?.let { a.copy(vocals = it) } ?: a
+                    }
+                    a
                 } else {
                     useAnalyzer.analyze(id, pcm)
                 }
@@ -508,7 +526,7 @@ class DjAnalysisScheduler(
 
     private fun summary(a: TrackAnalysis): String =
         "bpm=${a.bpm?.let { "%.1f(c%.2f)".format(it.value, it.confidence) }} beats=${a.beatTimesMs?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} " +
-            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.AnalysisRefiner.cached(a).let { r -> org.simpmusic.dj.analysis.BarPhase.describe(r) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(r) }}"
+            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms vocals=${a.vocals?.value?.let { v -> "${v.size} ranges, ${v.sumOf { it.durationMs } / 1000} s" } ?: "none"} grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.AnalysisRefiner.cached(a).let { r -> org.simpmusic.dj.analysis.BarPhase.describe(r) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(r) }}"
 
     private fun queueSummary(): String = queue.values.joinToString(prefix = "[", postfix = "]") { "${it.videoId}/${it.priority}" }
 
