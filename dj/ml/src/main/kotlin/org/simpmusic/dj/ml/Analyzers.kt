@@ -37,7 +37,7 @@ class CompositeAnalyzer(
         val a = if (grid == null) analysis.copy(analyzerId = id) else overlay(analysis, grid)
         val v = vocals ?: return a
         return try {
-            v.vocals(audio)?.let { a.copy(vocals = it) } ?: a
+            v.detect(audio)?.let { a.copy(vocals = it.ranges, vocalProfile = it.profile) } ?: a
         } catch (e: Exception) {
             a
         }

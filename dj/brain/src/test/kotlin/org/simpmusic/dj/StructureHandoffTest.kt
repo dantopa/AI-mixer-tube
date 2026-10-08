@@ -30,14 +30,15 @@ class StructureHandoffTest {
     }
 
     @Test
-    fun aShortIntroGivesAShorterHandoffEndingOnTheSameBars() {
-        // the incoming sings after 4 bars: a 4-bar overlap ending at the outgoing's 112 s, starting at 104 s
+    fun aShortIntroGivesAShorterHandoffFromTheInstrumentalsFirstBar() {
+        // the incoming sings after 4 bars: a 4-bar overlap that starts as the outgoing's instrumental starts (96 s), the
+        // owner's rule since 2026-10-08 ("start the crossfade where the instrumental after the chorus starts")
         val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
         val inc = analysis("in", 300, listOf(TimeRange(8_000, 140_000)))
         val plan = planner.plan(out, inc, settings)
         println("short intro: ${plan.reason}")
         assertTrue(plan.reason.startsWith("STRUCTURE"), plan.reason)
-        assertEquals(104_000, plan.exitPointMs)
+        assertEquals(96_000, plan.exitPointMs)
         assertEquals(0, plan.entryPointMs)
         assertEquals(8_000, plan.overlapMs)
     }
@@ -55,13 +56,14 @@ class StructureHandoffTest {
     @Test
     fun anIncomingThatSingsAtOnceLandsOnItsOwnBreak() {
         // the owner's "Me Enamoré": sings from the start, but has a 4-bar instrumental at 30..38 s and then phrase 1 again.
-        // Both instrumentals overlap; the incoming's phrase 1 (38 s) lands where the outgoing's voice would return (112 s).
+        // Both instrumentals overlap from the first bar of the outgoing's (96 s); the incoming's phrase 1 (38 s) comes in as
+        // the outgoing leaves, 4 bars before its voice would have returned.
         val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
         val inc = analysis("in", 300, listOf(TimeRange(500, 30_000), TimeRange(38_000, 140_000)))
         val plan = planner.plan(out, inc, settings)
         println("own break: ${plan.reason}")
         assertTrue(plan.reason.startsWith("STRUCTURE") && "own instrumental break" in plan.reason, plan.reason)
-        assertEquals(104_000, plan.exitPointMs)
+        assertEquals(96_000, plan.exitPointMs)
         assertEquals(30_000, plan.entryPointMs)
         assertEquals(8_000, plan.overlapMs)
     }

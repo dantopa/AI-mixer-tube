@@ -35,6 +35,14 @@ data class MusicalKey(val pitchClass: Int, val mode: Mode) {
     }
 }
 
+/**
+ * The vocal detector's own evidence, kept so its threshold can be tuned against the owner's marks without the audio: per
+ * [hopMs] frame, the log voice score (rounded to 1 decimal; a frame is vocal above the detector's threshold) and the
+ * AudioSet class the tagger heard most (an index into YAMNet's 521 classes: 0 Speech, 24 Singing, 137 Music, 161 Accordion...).
+ */
+@Serializable
+data class VocalProfile(val hopMs: Int, val score: List<Float>, val topClass: List<Int>)
+
 @Serializable
 data class TimeRange(val startMs: Long, val endMs: Long) {
     init {
@@ -120,6 +128,8 @@ data class TrackAnalysis(
     val structureFrames: List<Float> = emptyList(),
     /** Where the phrases and 16-bar blocks start; set on read by `PhraseGrid`, never by an analyzer. */
     val phrases: PhraseInfo? = null,
+    /** What the vocal detector heard frame by frame (what [vocals] was cut from); null for analyses made before it was stored. */
+    val vocalProfile: VocalProfile? = null,
 ) {
     companion object {
         const val SCHEMA_VERSION = 1

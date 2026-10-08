@@ -68,12 +68,14 @@ internal object StructureHandoff {
         val singsAtOnce: Boolean = false,
         /** The incoming lands on the voice after one of its own instrumental breaks, not after its intro. */
         val viaBreak: Boolean = false,
+        /** The overlap starts on the first bar of the outgoing's instrumental (else it ends on its last). */
+        val fromStart: Boolean = false,
     ) {
         fun describe(): String =
             if (singsAtOnce) {
                 TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) ends under the incoming's phrase 1, which sings from the start (${PlanTags.SECOND_TIER}, no pure instrumental pair); %d bars; ".format(resumeMs / 1000.0, bars)
             } else {
-                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) over the incoming's ${if (viaBreak) "own instrumental break" else "intro"}, whose ${if (viaBreak) "phrase 1 returns" else "first voice lands"} there (%.1f s), base in both; %d bars; ".format(
+                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) over the incoming's ${if (viaBreak) "own instrumental break" else "intro"}, whose ${if (viaBreak) "phrase 1 returns" else "first voice lands"} there (%.1f s), base in both${if (fromStart) ", from the instrumental's first bar" else ""}; %d bars; ".format(
                     resumeMs / 1000.0, firstVoiceMs / 1000.0, bars,
                 )
             }
@@ -182,13 +184,20 @@ internal object StructureHandoff {
                 val limit = min(min(breakBars, land.bars), cap)
                 val bars = BAR_CHOICES.firstOrNull { it <= limit && (atOnce || it >= PURE_MIN_BARS) } ?: continue
                 if (iR - bars < 0 || (!atOnce && land.iV - bars < 0)) continue
-                val exit = dOut[iR - bars]
                 val entry = if (atOnce) dIn[land.entryIdx] else dIn[land.iV - bars]
-                if (exit < lower || exit > upper) continue
                 val inEnd = if (atOnce) dIn.getOrElse(land.entryIdx + bars) { entry + (bars * barIn).toLong() } else dIn[land.iV]
-                if (!hasBase(out, exit, dOut[iR]) || !hasBase(inc, entry, inEnd)) continue
+                if (!hasBase(inc, entry, inEnd)) continue
+                // Where the overlap sits inside the outgoing's instrumental: from its FIRST bar, right as the chorus ends (the
+                // owner, 2026-10-08: "the instrumental after the chorus starts at 1:33; that is where the crossfade should
+                // start"), or ending on its last bar, where its voice would come back. The first is preferred; the second is
+                // kept for when the first is too early (earliestExitMs) or has no base.
+                val iA = (0..iR).firstOrNull { dOut[it] >= a - out.medianBeatMs / 2 } ?: iR
+                val starts = if (!atOnce && iA + bars < iR) listOf(iA to true, iR - bars to false) else listOf(iR - bars to false)
+                val (iExit, fromStart) = starts.firstOrNull { (i, _) -> dOut[i] in lower..upper && hasBase(out, dOut[i], dOut[i + bars]) } ?: continue
+                val exit = dOut[iExit]
                 var score = bars.toDouble() / maxOf(wantBars, bars)
-                if (dOut[iR] in out.phraseTimes) score += 0.25
+                if (dOut[iExit + bars] in out.phraseTimes || dOut[iExit] in out.phraseTimes) score += 0.25
+                if (fromStart) score += 0.15
                 if (!atOnce && dIn[land.iV] in inc.phraseTimes) score += 0.25
                 if (outro) score -= 0.1 // the owner's case is the bridge after a chorus; an outro is the classic fallback
                 score += chorusBonus
@@ -198,7 +207,7 @@ internal object StructureHandoff {
                     Landing.Kind.BREAK -> -0.05 * dIn[land.iV] / maxOf(1L, inc.durationMs) // a tie-break, not a rule
                     Landing.Kind.SINGS_AT_ONCE -> -1.0 // the second tier: any pure instrumental pair ranks above it
                 }
-                result += Handoff(exit, entry, bars, dOut[iR], dIn[land.iV], outro, score, atOnce, land.kind == Landing.Kind.BREAK)
+                result += Handoff(exit, entry, bars, dOut[iR], dIn[land.iV], outro, score, atOnce, land.kind == Landing.Kind.BREAK, fromStart)
             }
         }
         return result.sortedWith(compareByDescending<Handoff> { it.score }.thenBy { it.exitMs })

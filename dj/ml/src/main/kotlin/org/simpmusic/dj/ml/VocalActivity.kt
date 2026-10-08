@@ -6,6 +6,7 @@ import ai.onnxruntime.OrtSession
 import org.simpmusic.dj.model.Confident
 import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TimeRange
+import org.simpmusic.dj.model.VocalProfile
 import java.io.InputStream
 import java.nio.FloatBuffer
 import kotlin.math.ln
@@ -16,7 +17,12 @@ interface VocalProvider {
 
     /** Null when nothing can be said (model missing, audio too short); an empty list means "no vocals found". */
     fun vocals(audio: PcmAudio): Confident<List<TimeRange>>?
+
+    /** The ranges plus the frame-by-frame evidence they were cut from, when the provider has it. */
+    fun detect(audio: PcmAudio): VocalDetection? = vocals(audio)?.let { VocalDetection(it, null) }
 }
+
+class VocalDetection(val ranges: Confident<List<TimeRange>>, val profile: VocalProfile?)
 
 /** An AudioSet tagger over 16 kHz mono: one row of [VocalDetector.CLASSES] scores per 0.48 s frame (0.96 s window). */
 interface VocalModel : AutoCloseable {
@@ -36,11 +42,14 @@ interface VocalModel : AutoCloseable {
 class VocalDetector(private val model: VocalModel) : VocalProvider {
     override val id: String = "yamnet-vocals-1"
 
-    override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? {
+    override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? = detect(audio)?.ranges
+
+    override fun detect(audio: PcmAudio): VocalDetection? {
         val wave = Resampler.resample(audio.samples, audio.sampleRate, SAMPLE_RATE)
         val frames = wave.size / HOP
         if (frames < 3) return null
         val score = DoubleArray(frames)
+        val top = IntArray(frames)
         var start = 0
         while (start < frames) {
             // YAMNet pads the end of what it is given: two extra hops make every kept frame see real audio (measured: exact)
@@ -51,10 +60,14 @@ class VocalDetector(private val model: VocalModel) : VocalProvider {
                 var s = 0.0
                 for (c in CLASSES) s += rows[k][c]
                 score[start + k] = ln(s + 1e-4)
+                var best = 0
+                for (c in rows[k].indices) if (rows[k][c] > rows[k][best]) best = c
+                top[start + k] = best
             }
             start += CHUNK_HOPS
         }
-        return Confident(ranges(score), CONFIDENCE)
+        val profile = VocalProfile(HOP_MS.toInt(), score.map { Math.round(it * 10) / 10f }, top.toList())
+        return VocalDetection(Confident(ranges(score), CONFIDENCE), profile)
     }
 
     companion object {

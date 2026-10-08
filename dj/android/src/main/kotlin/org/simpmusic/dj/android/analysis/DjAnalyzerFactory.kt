@@ -190,15 +190,17 @@ private class LazyVocals(private val context: Context) : VocalProvider {
         }
     }
 
-    override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? {
+    override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? = detect(audio)?.ranges
+
+    override fun detect(audio: PcmAudio): org.simpmusic.dj.ml.VocalDetection? {
         val d = detector() ?: return null
         val t0 = System.nanoTime()
         return try {
-            d.vocals(audio).also { v ->
+            d.detect(audio).also { v ->
                 DjLog.i(
                     "ort",
                     "vocals ${(System.nanoTime() - t0) / 1_000_000} ms for ${audio.durationMs} ms of audio: " +
-                        (v?.value?.let { r -> "${r.size} ranges, ${r.sumOf { it.durationMs } / 1000} s of voice" } ?: "too short"),
+                        (v?.ranges?.value?.let { r -> "${r.size} ranges, ${r.sumOf { it.durationMs } / 1000} s of voice" } ?: "too short"),
                 )
             }
         } catch (e: Throwable) {

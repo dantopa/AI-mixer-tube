@@ -146,7 +146,7 @@ class DjAnalysisScheduler(
         val a = store.get(videoId, analyzer.id) ?: return false
         if (a.beatTimesMs == null) return false
         // only the device's full analyzer (Beat This! over the DSP pass) produces both; any other would re-analyse for nothing
-        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty() || (vocals != null && a.vocals == null))
+        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty() || (vocals != null && (a.vocals == null || a.vocalProfile == null)))
     }
 
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
@@ -443,7 +443,7 @@ class DjAnalysisScheduler(
                 val what = if (patch == null) {
                     "bar-phase evidence, analysing it again"
                 } else {
-                    listOfNotNull("structure frames".takeIf { patch.structureFrames.isEmpty() }, "vocals".takeIf { patch.vocals == null && vocals != null })
+                    listOfNotNull("structure frames".takeIf { patch.structureFrames.isEmpty() }, "vocals".takeIf { (patch.vocals == null || patch.vocalProfile == null) && vocals != null })
                         .joinToString(" and ") + ", adding only that"
                 }
                 DjLog.i(TAG, "$id: stored analysis predates the $what (once)")
@@ -464,8 +464,8 @@ class DjAnalysisScheduler(
                         val q = quick!!.analyze(id, pcm)
                         a = a.copy(highBandEnergy = q.highBandEnergy, structureHopMs = q.structureHopMs, structureFrames = q.structureFrames)
                     }
-                    if (a.vocals == null && vocals != null) {
-                        a = (try { vocals.vocals(pcm) } catch (e: Exception) { null })?.let { a.copy(vocals = it) } ?: a
+                    if ((a.vocals == null || a.vocalProfile == null) && vocals != null) {
+                        a = (try { vocals.detect(pcm) } catch (e: Exception) { null })?.let { a.copy(vocals = it.ranges, vocalProfile = it.profile) } ?: a
                     }
                     a
                 } else {
