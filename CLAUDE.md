@@ -303,6 +303,25 @@ Service modules:
     - Analyses without vocals are planned exactly as before (`VocalClashTest`).
   - **Cost**: about 230x real time on the build server's CPU with 2 threads, so roughly 1 s per 4-minute track there. The phone, with 1 thread, is unmeasured.
   - Not run on a device, not judged by ear.
+- **The mix follows the songs' structure (2026-10-08, build al)**: the owner's sweet spot, in their words: a chorus ends, the band plays an instrumental, and the song would start over with phrase 1. Lay that instrumental over the incoming's instrumental, so the incoming's phrase 1 starts where the outgoing's would have, at full volume.
+  - **`StructureHandoff`** (`dj/brain` `planner/`) works from the vocal ranges (build ak) and the bar lines.
+    - **Outgoing breaks**: instrumental spans that follow ≥ 6 s of voice in the 16 s before them. Vocal islands under `ISLAND_MS` 2 s (a shout) do not end a span. The outro counts too, scored 0.1 lower.
+    - **Incoming landings**:
+      - its intro, ending on its first voice (+0.3);
+      - or one of its own instrumental breaks followed by voice, ending within `MAX_LANDING_FRACTION` 0.6 of the track. This is the owner's case of a song that starts singing (`Me Enamoré`, break at 74 s); it is scored −0.4 × depth.
+      - Only when it has neither, it enters on its first bar and sings over the outgoing's instrumental (−0.3).
+    - **The overlap** is 16, 8, 4 or 2 bars, whichever fits both instrumentals. It ends on the outgoing's "voice returns" bar and on the incoming's voice bar. A phrase line at either end adds +0.25.
+  - **`planAnywhere` step 0** tries up to 6 hand-offs, beat-matched with `beatAttempt(units = bars)`. A hand-off is kept only at its full length with no voice over voice. The reason starts `STRUCTURE: …` (`StructureHandoff.TAG`), and the "clamped from" note is removed.
+  - **Precedence**: with `preferPerfect`, a STRUCTURE plan wins over a Perfect 1-on-1 elsewhere in the track, because that would cut a sung section. A Perfect plan wins only if it is itself a hand-off (`PERFECT: structure hand-off, …`).
+  - **Voice over voice is never chosen while another candidate avoids it.** Step 1 keeps such plans as a last fallback, and Perfect refuses them. The device log showed a Perfect 1-on-1 with 16.1 s of two voices. When both tracks sing from the first beat of the overlap, `finishBeat` cuts it to `minUnits` (in the export: 21.1 s → 2.9 s).
+  - `VocalClash.CLASH_TAG`; `DJ_DEBUG_STRUCTURE` prints each hand-off attempt. `StructureReport` (`STRUCTURE_DIR` = an export, `STRUCTURE_VERBOSE`) plans every pair.
+  - **Measured on the owner's build-ak export** (8 cumbia tracks with vocals, 56 ordered pairs):
+    - structure hand-offs 33 of 56 (the first version, before the incoming-break landing and the precedence fix, had 15);
+    - voice over voice 2, both into a track that sings from 4 s with outgoing tracks that sing throughout, now about 3 s instead of 21;
+    - beat-matched 56 of 56.
+    - The same log shows 7 spliced mixes, including entries at incoming source 0.5 s.
+  - Tests: `StructureHandoffTest`, covering intro, short intro, a shout in the intro, the incoming's own break, singing at once, and no vocals.
+  - Not run on a device, not judged by ear.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

@@ -56,12 +56,19 @@ class DjTransitionPlanner : TransitionPlanner {
             when {
                 constraints.perfect -> planPerfect(from, to, s, earliest, latest)
                 constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
+                    // The songs' own structure (StructureHandoff) comes first: a 1-on-1 elsewhere in the track would cut a
+                    // sung section that the hand-off leaves whole. Perfect is next, the regular scored plan last.
                     val p = planPerfect(from, to, s, earliest, latest, keepTiming = true)
-                    if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) {
+                    val perfectOk = p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)
+                    if (perfectOk && StructureHandoff.TAG in p.reason) {
                         p
                     } else {
                         val regular = planUnsafe(from, to, s, earliest, latest)
-                        regular.copy(reason = regular.reason + " | " + p.reason.take(PERFECT_WHY_CHARS))
+                        when {
+                            regular.reason.startsWith(StructureHandoff.TAG) -> regular
+                            perfectOk -> p
+                            else -> regular.copy(reason = regular.reason + " | " + p.reason.take(PERFECT_WHY_CHARS))
+                        }
                     }
                 }
                 else -> planUnsafe(from, to, s, earliest, latest)
@@ -377,6 +384,26 @@ class DjTransitionPlanner : TransitionPlanner {
             }
         }
 
+        // 0. the songs' own structure: the outgoing's instrumental after a sung section over the incoming's intro, the
+        //    incoming's first voice where the outgoing's would have come back (StructureHandoff). Tried first, kept only
+        //    when it comes out at its full length with no voice over voice.
+        for (h in StructureHandoff.find(out, inc, c.vOut, c.vIn, lower, upper, c.requestedUnits.coerceAtLeast(StructureHandoff.BAR_CHOICES.last())).take(MAX_STRUCTURE_TRIES)) {
+            if (!c.barsMode) break
+            if (c.perfect && ((BarPhase.marginAt(c.from, h.exitMs) ?: 0f) < BarPhase.PERFECT_MARGIN || (BarPhase.marginAt(c.to, h.entryMs) ?: 0f) < BarPhase.PERFECT_MARGIN)) continue
+            val t = chooseTempo(localPeriod(out, h.exitMs, ahead = true), localPeriod(inc, h.entryMs, ahead = true), bend) ?: continue
+            fun level(ctx: TrackContext, ms: Long) = if (ctx.phraseTimes.any { abs(it - ms) <= 2 }) "phrase" else "downbeat"
+            // viaOutro stays false: the outro is known from the vocals here, not from the (unreliable) section detector
+            val a = beatAttempt(c, Pick(h.exitMs, level(out, h.exitMs), false), Pick(h.entryMs, level(inc, h.entryMs), false), t, units = h.bars)
+            val p = a.plan ?: run { if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: ${a.fail}"); null } ?: continue
+            val bpm = p.mixBpm?.toDouble()?.takeIf { it > 0 } ?: continue
+            if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: overlap ${p.overlapMs} of ${h.bars} bars; ${p.reason}")
+            if (p.overlapMs < (h.bars - 0.5) * out.beatsPerBar * 60000.0 / bpm || isVoiceOverVoice(p)) continue
+            val where = "mix point ${(100.0 * h.exitMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track; "
+            // the overlap was chosen to fit the instrumental, not clamped: drop the "clamped from" note finishBeat writes
+            val clean = p.copy(reason = p.reason.replace(CLAMPED_NOTE, ""))
+            return clean.withReason((if (c.perfect) PlanConstraints.PERFECT_OK + "structure hand-off, " else "") + h.describe() + where)
+        }
+
         var lastFail: String? = null
         // A pair whose overlap had to be cut to a bar or two (the exit sits right before the end of the outgoing track) is
         // a poor mix, and too short for the precise splice, which then falls back to the clock-locked three-player path:
@@ -388,6 +415,9 @@ class DjTransitionPlanner : TransitionPlanner {
             return p.overlapMs < (SHORT_OVERLAP_BARS - 0.5) * out.beatsPerBar * 60000.0 / bpm
         }
         var short: TransitionPlan? = null
+        // Voice over voice that could not be shortened away (the second voice is there from the start of the overlap) is
+        // kept only when no other candidate avoids it: a device log (build ak) showed a Perfect 1-on-1 with 16 s of it.
+        var sung: TransitionPlan? = null
         // 1. beat-matched, on the best-scoring pairs whose local tempos are compatible
         var tries = 0
         for (cand in all) {
@@ -408,13 +438,19 @@ class DjTransitionPlanner : TransitionPlanner {
                             ) + where,
                         )
                     }
-                if (!tooShort(done)) return done
-                if (short == null) short = done
+                if (isVoiceOverVoice(done)) {
+                    if (sung == null) sung = done
+                } else if (!tooShort(done)) {
+                    return done
+                } else if (short == null) {
+                    short = done
+                }
             }
             if (lastFail == null) lastFail = a.fail
         }
         short?.let { return it }
-        if (c.perfect) return null // a perfect mix is beat-matched or nothing
+        if (c.perfect) return null // a perfect mix is beat-matched or nothing, and never voice over voice
+        sung?.let { return it }
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
         val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
         var echoTries = 0
@@ -440,8 +476,10 @@ class DjTransitionPlanner : TransitionPlanner {
      * Full beat-matched attempt at ONE (exit, entry) pair: measures the local grids (shortening the overlap when they
      * are irregular over a long one), refines the tempo, then builds the plan.
      */
-    private fun beatAttempt(c: Ctx, exitPick: Pick, entryPick: Pick, rough: Tempo): Attempt {
-        var desired = c.requestedUnits
+    private fun isVoiceOverVoice(p: TransitionPlan): Boolean = VocalClash.CLASH_TAG in p.reason
+
+    private fun beatAttempt(c: Ctx, exitPick: Pick, entryPick: Pick, rough: Tempo, units: Int = c.requestedUnits): Attempt {
+        var desired = units
         val shortest = max(c.minUnits, c.softFloor)
         var tempo = rough
         var pass = 0
@@ -527,6 +565,11 @@ class DjTransitionPlanner : TransitionPlanner {
             if (fit >= minUnits && fit < units) {
                 vocalNote = "overlap ended before the second voice (${units} -> $fit ${if (barsMode) "bars" else "beats"})"
                 units = fit
+            } else if (fit < minUnits && units > minUnits) {
+                // both sing from the first beat of the overlap: keep it as short as a mix can be, so it is a moment and not
+                // 20 s of two singers (the planner only lands here when no other point avoids it)
+                vocalNote = "both sing from the start of the overlap, cut to the shortest (${units} -> $minUnits ${if (barsMode) "bars" else "beats"})"
+                units = minUnits
             }
         }
         if (units < minUnits) {
@@ -1125,6 +1168,10 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
+        /** Structure hand-offs tried before the scored pairs. */
+        private const val MAX_STRUCTURE_TRIES = 6
+        private val CLAMPED_NOTE = Regex(""" \(clamped from \d+(, the beat grid was irregular over a longer overlap)?\)""")
+        private val DEBUG_STRUCTURE = System.getenv("DJ_DEBUG_STRUCTURE") != null
         /** Clash treatment: the high-pass that keeps only hats and top of a deck while the other one carries the harmony. */
         private const val CLASH_IN_HP_HZ = 900f
     }

@@ -15,6 +15,9 @@ object VocalClash {
     /** This much voice over voice is a full penalty. */
     const val FULL_MS = 8_000L
 
+    /** Written into a plan's reason when its overlap has two voices at once. */
+    const val CLASH_TAG = "voice over voice"
+
     /** Under this much it is a breath or a backing "uh", not two singers. */
     const val CLASH_MS = 1_500L
 
@@ -31,7 +34,7 @@ object VocalClash {
         val clash: Boolean get() = clashMs >= CLASH_MS
 
         fun describe(): String = when {
-            clash -> "vocals: voice over voice %.1f s".format(clashMs / 1000.0)
+            clash -> "vocals: $CLASH_TAG %.1f s".format(clashMs / 1000.0)
             outMs == 0L && inMs == 0L -> "vocals: none in the overlap"
             else -> "vocals: one at a time"
         }
