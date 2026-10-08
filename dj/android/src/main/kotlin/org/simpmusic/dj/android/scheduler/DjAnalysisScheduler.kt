@@ -349,6 +349,13 @@ class DjAnalysisScheduler(
         }
     }
 
+    /**
+     * True while a track that is already in the store is queued or being analysed again: the once-per-process patch that
+     * adds the vocals / structure frames, or the re-analysis that adds the bar evidence. [statusOf] says `Analysed` then,
+     * because the old record is still there, so a caller that needs the new fields must ask this instead.
+     */
+    fun upgradePending(videoId: String): Boolean = synchronized(lock) { runningId == videoId || queue.containsKey(videoId) }
+
     fun shutdown() {
         loop.cancel()
     }

@@ -677,6 +677,22 @@ class DjEngine(
             }
         var (from, to) = pair!!
         DjLog.i(TAG, "both analyses ready after ${since()} ms")
+        // A stored analysis can be ready while its upgrade (vocals, structure frames, bar evidence) is still running: planning
+        // now would plan without the voices, so no structure hand-off and no voice-over-voice check, and nothing re-plans
+        // when the upgrade lands. It takes a decode and the vocal model, ~10-20 s; wait for it, bounded.
+        if (scheduler.upgradePending(fromId) || scheduler.upgradePending(toId)) {
+            val pending = listOf(fromId, toId).filter { scheduler.upgradePending(it) }
+            DjLog.i(TAG, "waiting for the analysis upgrade of $pending before planning")
+            _debug.update { it.copy(lastOutcome = "analysing the voices first…") }
+            val done =
+                withTimeoutOrNull(UPGRADE_WAIT_MS) {
+                    while (scheduler.upgradePending(fromId) || scheduler.upgradePending(toId)) delay(500)
+                    true
+                }
+            scheduler.get(fromId)?.let { from = it }
+            scheduler.get(toId)?.let { to = it }
+            DjLog.i(TAG, if (done == true) "upgrade done after ${since()} ms: vocals out=${from.vocals != null} in=${to.vocals != null}" else "upgrade still running after ${since()} ms; planning with what is stored")
+        }
         currentRaw = from
         currentRawAtMs = System.currentTimeMillis()
         if (perfectKey == key(fromId, toId) && (from.beatDownbeatLogits == null || to.beatDownbeatLogits == null)) {
@@ -918,6 +934,9 @@ private const val MIX_NOW_SPAN_MS = 20_000L
 
 /** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
 private const val PERFECT_SPAN_MS = 120_000L
+
+/** How long the plan waits for a running upgrade (vocals / frames / bar evidence) of a stored analysis. */
+private const val UPGRADE_WAIT_MS = 45_000L
 
 /** How long a "Perfect" request waits for the re-analysis that adds the bar-phase evidence. */
 private const val PERFECT_EVIDENCE_WAIT_MS = 150_000L

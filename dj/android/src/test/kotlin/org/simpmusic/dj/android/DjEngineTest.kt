@@ -69,8 +69,12 @@ class DjEngineTest {
         /** Tracks whose audio cannot be had (no stream url): every analysis decode of them throws. */
         val unavailable = HashSet<String>()
 
+        /** Virtual time an analysis decode takes. */
+        var analysisDecodeMs = 0L
+
         override suspend fun decodeForAnalysis(videoId: String, allowNetwork: Boolean, cancel: CancelSignal): PcmAudio {
             if (videoId in unavailable) throw AudioUnavailableException("no stream url for $videoId")
+            if (analysisDecodeMs > 0) kotlinx.coroutines.delay(analysisDecodeMs)
             return PcmAudio(FloatArray(22_050), 22_050)
         }
 
@@ -80,18 +84,19 @@ class DjEngineTest {
         }
     }
 
-    private class Analyzer : TrackAnalyzer {
-        override val id = "fake-1"
+    private class Analyzer(override val id: String = "fake-1") : TrackAnalyzer {
 
         override fun analyze(videoId: String, audio: PcmAudio) = fakeAnalysis(videoId, analyzerId = id)
     }
 
     private class Planner(var plan: (TrackAnalysis?, TrackAnalysis?) -> TransitionPlan) : TransitionPlanner {
         var calls = 0
+        val inputs = ArrayList<Pair<TrackAnalysis?, TrackAnalysis?>>()
         val constraints = ArrayList<PlanConstraints>()
 
         override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
             this.constraints += constraints
+            inputs += from to to
             return plan(from, to, settings)
         }
 
@@ -126,12 +131,17 @@ class DjEngineTest {
     private fun TestScope.rig(
         enabled: Boolean = true,
         plan: (TrackAnalysis?, TrackAnalysis?) -> TransitionPlan = { a, b -> fakePlan(a!!.videoId, b!!.videoId) },
+        analyzerId: String = "fake-1",
+        vocals: org.simpmusic.dj.ml.VocalProvider? = null,
+        stored: List<TrackAnalysis> = emptyList(),
+        analysisDecodeMs: Long = 0L,
     ): Rig {
         val worker = StandardTestDispatcher(testScheduler)
         val scope = CoroutineScope(SupervisorJob() + worker).also { scopes += it }
-        val decoder = Decoder()
+        val decoder = Decoder().also { it.analysisDecodeMs = analysisDecodeMs }
         val settings = MutableStateFlow(DjSettings(enabled = enabled))
-        val scheduler = DjAnalysisScheduler(AnalysisStore(File(dir, "a")), Analyzer(), decoder, AnalysisPolicy(Cond()) { true }, scope, worker, io = worker, clock = { testScheduler.currentTime })
+        val store = AnalysisStore(File(dir, "a")).also { st -> stored.forEach { st.put(it) } }
+        val scheduler = DjAnalysisScheduler(store, Analyzer(analyzerId), decoder, AnalysisPolicy(Cond()) { true }, scope, worker, io = worker, clock = { testScheduler.currentTime }, vocals = vocals)
         val planner = Planner(plan)
         val renderer = Renderer()
         val windowDir = File(dir, "w")
@@ -264,6 +274,27 @@ class DjEngineTest {
             advanceTimeBy(150_000) // the scheduler's three tries (5 s, 20 s, 80 s back-offs), then a second of the engine's poll
             assertEquals("analysis not available", r.engine.debug.value.reason)
             assertEquals(0, r.planner.calls)
+        }
+
+    @Test
+    fun theVocalsPatchOfAStoredAnalysisIsWaitedForBeforePlanning() =
+        runTest {
+            // The device log of 2026-10-08: the next track's stored analysis predated the vocals, the patch was still decoding,
+            // and the plan ran without them (no structure hand-off, no voice-over-voice check) and was never redone.
+            val full = "dsp-1+beat-this"
+            fun old(id: String) = fakeAnalysis(id, analyzerId = full).copy(beatDownbeatLogits = List(400) { 0f }, structureHopMs = 500, structureFrames = List(17) { 0f })
+            val voices =
+                object : org.simpmusic.dj.ml.VocalProvider {
+                    override val id = "test-vocals"
+
+                    override fun vocals(audio: PcmAudio) = org.simpmusic.dj.model.Confident(listOf(org.simpmusic.dj.model.TimeRange(10_000, 50_000)), 0.85f)
+                }
+            val r = rig(analyzerId = full, vocals = voices, stored = listOf(old("A"), old("B")), analysisDecodeMs = 10_000)
+            r.engine.onQueueContext(DjQueueContext("A", "B"))
+            advanceUntilIdle()
+            val (from, to) = r.planner.inputs.single()
+            assertNotNull(from!!.vocals)
+            assertNotNull(to!!.vocals)
         }
 
     @Test
