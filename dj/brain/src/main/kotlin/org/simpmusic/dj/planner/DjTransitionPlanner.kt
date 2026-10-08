@@ -2,6 +2,7 @@ package org.simpmusic.dj.planner
 
 import org.simpmusic.dj.analysis.AnalysisRefiner
 import org.simpmusic.dj.analysis.BarPhase
+import org.simpmusic.dj.analysis.Harmony
 
 import org.simpmusic.dj.model.Camelot
 import org.simpmusic.dj.model.DeckPlan
@@ -102,6 +103,10 @@ class DjTransitionPlanner : TransitionPlanner {
         val key: KeyDecision, val requestedUnits: Int, val minUnits: Int, val softFloor: Int,
         val perfect: Boolean = false,
     ) {
+        /** Chroma of each track for the LOCAL harmonic fit of an overlap (null for analyses without structure frames). */
+        val hOut: Harmony.Profile? = Harmony.profile(from)
+        val hIn: Harmony.Profile? = Harmony.profile(to)
+
         val fromId: String get() = out.id
         val toId: String get() = inc.id
     }
@@ -340,7 +345,11 @@ class DjTransitionPlanner : TransitionPlanner {
             val t = chooseTempo(perOut.getValue(e.timeMs), perIn.getValue(n.timeMs), bend)
             // perfect: the 16 on the 16 first, then phrase on phrase (one track's phrase ends where the other's starts), then
             // bar on bar; a found (or marked) phrase counts more than a counted one
-            val base = MixCandidates.score(e, n) + if (c.perfect) perfectBonus(out, inc, e.pick, n.pick) else 0.0
+            // two tonal layers that clash over the overlap cost as much as the best bass terms earn: the planner looks for
+            // an exit/entry pair that sounds together (or a percussive one, which is harmonically free) before settling
+            val harmony = Harmony.fit(c.hOut, e.timeMs, overlapWanted.toLong(), c.hIn, n.timeMs, overlapWanted.toLong())
+            val base = MixCandidates.score(e, n) + (if (c.perfect) perfectBonus(out, inc, e.pick, n.pick) else 0.0) -
+                MixScoring.W_HARMONY * (harmony?.penalty ?: 0.0)
             val tempoTerm = if (t == null) 0.0 else MixScoring.W_TEMPO * (1.0 - 0.5 * min(1.0, max(abs(t.rateOut - 1.0), abs(t.rateIn - 1.0)) / max(bend, 1e-6)))
             all += Cand(MixCandidates.ScoredPair(e, n, base + tempoTerm), t)
         }
@@ -473,7 +482,6 @@ class DjTransitionPlanner : TransitionPlanner {
         var conf = c.conf
         val shiftOut = c.key.shiftOut
         val shiftIn = c.key.shiftIn
-        val clash = c.key.clash
         val keyNote = c.key.note
         if (exitPick.viaOutro) conf = min(conf, out.sectionsConf)
         conf = min(conf, (1.0 - 2.0 * localOut.noiseRms / out.medianBeatMs).toFloat().coerceIn(0f, 1f))
@@ -498,6 +506,10 @@ class DjTransitionPlanner : TransitionPlanner {
         if (outroLeft != null) conf = min(conf, out.sectionsConf)
         var units = min(desiredUnits, max(softUnits, min(softFloor, hardUnits)))
         units = min(units, hardUnits)
+        // Harmony of THIS overlap from the stored chroma decides the clash treatment; the global key only when there is no
+        // chroma (analyses made before build ae). A percussive window is harmonically free, a modulation is seen.
+        val harmony = Harmony.fit(c.hOut, exitMs, (desiredUnits * unit * rateOut).toLong(), c.hIn, entryMs, (desiredUnits * unit * rateIn).toLong())
+        val clash = harmony?.clash ?: c.key.clash
         if (clash) units = min(units, max(minUnits, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
         if (units < minUnits) {
             return Attempt.fail("not enough audio for a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap (room out ${availOut / 1000.0}s, in ${availIn / 1000.0}s)")
@@ -631,14 +643,26 @@ class DjTransitionPlanner : TransitionPlanner {
         val outVolume = equalPowerOut(overlapMs, gainOut, if (gainOut < 1.0) rampOutMs else 0L)
         val inVolume = equalPowerIn(overlapMs, gainIn)
 
-        val outLow = if (bassSwap) ParamCurve(listOf(Keyframe(swapStart, 20f), Keyframe(swapEnd, 250f, Ease.EXPONENTIAL))) else ParamCurve.constant(20f)
-        val inLow = if (bassSwap) ParamCurve(listOf(Keyframe(swapStart, 250f), Keyframe(swapEnd, 20f, Ease.EXPONENTIAL))) else ParamCurve.constant(20f)
+        // A clash is mixed the way DJs mix clashing keys: only ONE tonal layer at a time. The incoming deck enters with its
+        // bass AND mids cut (hats and top only, high-pass CLASH_IN_HP_HZ), both swap on the middle beat/bar, and from there
+        // the outgoing deck keeps only its top (high-pass to CLASH_IN_HP_HZ) and fades its highs. The old clash lanes
+        // low-passed the incoming at 2.5 kHz, i.e. brought in exactly its mids, where melodies and vocals clash.
+        val outLow = when {
+            clash -> ParamCurve(listOf(Keyframe(swapStart, 20f), Keyframe(swapEnd, CLASH_IN_HP_HZ, Ease.EXPONENTIAL)))
+            bassSwap -> ParamCurve(listOf(Keyframe(swapStart, 20f), Keyframe(swapEnd, 250f, Ease.EXPONENTIAL)))
+            else -> ParamCurve.constant(20f)
+        }
+        val inLow = when {
+            clash -> ParamCurve(listOf(Keyframe(swapStart, CLASH_IN_HP_HZ), Keyframe(swapEnd, 20f, Ease.EXPONENTIAL)))
+            bassSwap -> ParamCurve(listOf(Keyframe(swapStart, 250f), Keyframe(swapEnd, 20f, Ease.EXPONENTIAL)))
+            else -> ParamCurve.constant(20f)
+        }
         val outHigh = when {
-            clash -> ParamCurve(listOf(Keyframe(0, 20000f), Keyframe(overlapMs, 2500f, Ease.EXPONENTIAL)))
+            clash -> ParamCurve(listOf(Keyframe(swapEnd, 20000f), Keyframe(overlapMs, 4000f, Ease.EXPONENTIAL)))
             overlapMs >= 4 * lattice -> ParamCurve(listOf(Keyframe(mid, 20000f), Keyframe(overlapMs, 9000f, Ease.EXPONENTIAL)))
             else -> ParamCurve.constant(20000f)
         }
-        val inHigh = if (clash) ParamCurve(listOf(Keyframe(0, 2500f), Keyframe((overlapMs * 0.6).toLong(), 20000f, Ease.EXPONENTIAL))) else ParamCurve.constant(20000f)
+        val inHigh = ParamCurve.constant(20000f)
 
         val mixBpm = (60000.0 / w).toFloat()
         val plan = TransitionPlan(
@@ -660,6 +684,7 @@ class DjTransitionPlanner : TransitionPlanner {
             append(units).append(if (barsMode) " bars" else " beats").append(" = ").append(overlapMs).append(" ms")
             if (units < requestedUnits) append(" (clamped from $requestedUnits" + (if (desiredUnits < requestedUnits) ", the beat grid was irregular over a longer overlap" else "") + ")")
             append("; ").append(keyNote)
+            harmony?.let { append("; ").append(it.describe()).append(if (it.clash) ": one tonal layer at a time (EQ swap), short overlap" else "") }
             append("; bass swap ").append(if (bassSwap) "on" else if (!settings.bassSwap) "off (setting)" else "off (no bass to swap)")
             if (gainOut < 1.0 || gainIn < 1.0) append("; gain out ${fmt(gainOut.toFloat())} in ${fmt(gainIn.toFloat())}")
             if (notes.isNotEmpty()) append("; ").append(notes.joinToString())
@@ -1080,5 +1105,7 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
+        /** Clash treatment: the high-pass that keeps only hats and top of a deck while the other one carries the harmony. */
+        private const val CLASH_IN_HP_HZ = 900f
     }
 }

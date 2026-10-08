@@ -45,6 +45,11 @@ internal object MixScoring {
     const val W_ROOM_IN = 0.08
     /** Smaller tempo bends are preferred (beat-matched pairs only). */
     const val W_TEMPO = 0.06
+    /**
+     * Penalty (not part of the sum of 1) for an overlap whose two tonal layers clash (`Harmony.Fit.penalty`, 0..1): as
+     * heavy as the bass terms, so a consonant or percussive pair a little lower on the other terms wins.
+     */
+    const val W_HARMONY = 0.35
 
     /** Window (ms) over which the energy before the exit and after the entry is averaged. */
     const val REGION_MS = 8_000L

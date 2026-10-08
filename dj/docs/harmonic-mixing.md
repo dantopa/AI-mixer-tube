@@ -111,7 +111,15 @@ TIV dissonance of the mixed chroma (outgoing 62-95 % window vs incoming 2-35 % w
 - **40 %** of pairs are within 0.03 of their best transposition as they are, i.e. harmonically fine untouched. The 0.03 threshold is arbitrary and was not checked by ear.
 - For the same pair, moving the exit among four 16 s windows changes the dissonance by a median **0.022**, about the size of that threshold. **Where** the mix happens matters about as much as **which** song comes next.
 
-## 9. Recommendations, in order
+## 9. Applied in build aj (2026-10-08)
+
+- **`Harmony`** (`dj/brain`, `analysis/`): TIV excess dissonance of the actual overlap, from `structureFrames` (energy-weighted chroma, prefix sums, LRU of 64 analyses). `COMPATIBLE` = 0.025 (about a fifth apart on the owner's tracks), `CLASH` = 0.07 (about three fifths and beyond). A flat window gives exactly 0, so the tonalness gate (item 2 below) needs no code of its own. `Fit.bestShift` is computed and logged; nothing transposes with it yet.
+- **Planner**: every exit/entry pair in `planAnywhere` pays `W_HARMONY` (0.35) × penalty. `finishBeat` takes the clash decision from the local fit, and from the global key only without frames.
+- **Clash treatment rewritten** (item 3): one tonal layer at a time. The incoming deck enters high-passed at 900 Hz (hats and top only), both decks swap on the middle of the overlap, then the outgoing deck keeps only its top and fades its highs to 4 kHz. The old lanes LOW-passed the incoming at 2.5 kHz, i.e. brought in exactly its mids, where melodies and vocals clash. Overlap still capped at 9 s.
+- **Look-ahead**: a queued next that beat-matches but clashes is now treated like one that does not beat-match. The other candidates are analysed, and one that beat-matches without a clash is moved up.
+- **Measured** (`HarmonyReport`, the 70 analyses with frames, 4 830 ordered pairs, simple-mode settings, Perfect first): beat-matched pairs 1 717 → 1 722. Exit or entry changed on 808 pairs. Overlaps that clash 36.5 % → 26.3 %, mean excess 0.058 → 0.053. `W_HARMONY` 0.20 gave 28.6 % and 0.50 gave 25.0 %. Most of the remainder are pairs that clash everywhere, which is the look-ahead's and the clash treatment's job. **Not judged by ear.**
+
+## 10. Recommendations, in order
 
 1. **Local harmonic score in the planner (cheap, data already stored).** Compute the TIV dissonance of the actual overlap (exit window of A, entry window of B, at shift 0) from `structureFrames`, and add it as a scoring term so the planner prefers consonant exit/entry pairs. Use it in the look-ahead/recommender ranking too. Camelot stays for display only. It falls back to the global key when frames are missing.
 2. **Tonalness gate.** A window with a flat chroma (low TIV magnitude, i.e. drums or noise) is harmonically free. Prefer such windows when the tonal score of the pair is bad, the way DJs mix on percussive intros.

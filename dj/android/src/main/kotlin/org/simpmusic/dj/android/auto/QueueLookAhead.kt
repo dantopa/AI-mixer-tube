@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.simpmusic.dj.analysis.Harmony
 import org.simpmusic.dj.android.recommend.DjPlayerPort
 import org.simpmusic.dj.android.recommend.PlayerSnapshot
 import org.simpmusic.dj.model.AnalysisPriority
@@ -19,6 +20,7 @@ import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalysisRepository
+import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.TransitionPlanner
 import org.simpmusic.dj.recommend.HeuristicRecommender
 import org.simpmusic.dj.recommend.RecommendContext
@@ -91,12 +93,15 @@ class QueueLookAhead(
         // already mixes, and analysing two more tracks per song just to confirm it was the look-ahead's main heat cost.
         val next = analysisOf(nextId, AnalysisPriority.NEXT_UP, minOf(perTrackWaitMs, deadline - clock())) ?: return
         val nextPlan = withContext(compute) { runCatching { planner.plan(from, next, settingsNow) }.getOrNull() }
-        if (nextPlan == null || nextPlan.kind == PlanKind.BEAT_MATCHED) {
+        if (nextPlan == null || nextPlan.mixesClean()) {
             decidedFor = current
             log("look-ahead: $nextId mixes with the current track (${nextPlan?.kind}); not analysing the others")
             return
         }
-        log("look-ahead: $nextId would not beat-match (${nextPlan.reason}); looking at ${window.size - 1} more")
+        // A pair that beat-matches but whose overlap clashes harmonically everywhere the planner could put it is mixed with
+        // the clash treatment (one tonal layer at a time, short); an upcoming track that fits is worth the analyses.
+        val nextWhy = if (nextPlan.kind == PlanKind.BEAT_MATCHED) "would clash harmonically" else "would not beat-match"
+        log("look-ahead: $nextId $nextWhy (${nextPlan.reason}); looking at ${window.size - 1} more")
         setKeep(window.toSet())
 
         val got = LinkedHashMap<String, TrackAnalysis>()
@@ -120,20 +125,20 @@ class QueueLookAhead(
             }
         val nextScore = scored.firstOrNull { it.first == nextId }?.second?.score ?: 0f
         val line = scored.joinToString { "${it.first}=${"%.2f".format(it.second.score)}" }
-        // The queued next does not beat-match, so a challenger needs no score margin over it: it only has to beat-match
-        // itself and clear the floor. A challenger that would not beat-match either is never worth a reorder.
+        // The queued next does not mix cleanly, so a challenger needs no score margin over it: it only has to beat-match
+        // without a harmonic clash and clear the floor. A challenger that would not either is never worth a reorder.
         val best =
             scored
-                .filter { it.first != nextId && it.second.plan?.kind == PlanKind.BEAT_MATCHED && it.second.score >= MIN_SCORE }
+                .filter { it.first != nextId && it.second.plan?.mixesClean() == true && it.second.score >= MIN_SCORE }
                 .maxByOrNull { it.second.score }
         if (best == null) {
-            log("look-ahead: no upcoming track beat-matches either; keeping $nextId next (scores $line)")
+            log("look-ahead: no upcoming track mixes cleanly either; keeping $nextId next (scores $line)")
             return
         }
         val bestId = best.first
         val moved = withContext(NonCancellable) { port.moveToNext(bestId) }
         log(
-            if (moved) "look-ahead: moved $bestId next, ahead of $nextId (which would not beat-match): ${"%.2f".format(best.second.score)} vs ${"%.2f".format(nextScore)} (scores $line) — ${best.second.reason}"
+            if (moved) "look-ahead: moved $bestId next, ahead of $nextId (which $nextWhy): ${"%.2f".format(best.second.score)} vs ${"%.2f".format(nextScore)} (scores $line) — ${best.second.reason}"
             else "look-ahead: could not move $bestId up (scores $line)",
         )
     }
@@ -149,6 +154,9 @@ class QueueLookAhead(
             while (handPlaced.size > 100) handPlaced.remove(handPlaced.first())
         }
     }
+
+    /** Beat-matched with no harmonic clash over the chosen overlap. */
+    private fun TransitionPlan.mixesClean() = kind == PlanKind.BEAT_MATCHED && Harmony.CLASH_TAG !in reason
 
     private suspend fun analysisOf(id: String, priority: AnalysisPriority, waitMs: Long): TrackAnalysis? {
         analyses.get(id)?.let { return it }

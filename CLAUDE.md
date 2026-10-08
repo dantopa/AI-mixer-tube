@@ -265,6 +265,24 @@ Service modules:
     - Simple mode, overlap length, bass swap, mix anywhere and precise splice moved into a collapsed "Advanced" group. Tempo bend and key shift are hidden (no longer greyed out) while simple mode is on.
     - Three unused `dj_perfect_*` strings were removed.
   - Not run on a device.
+- **Harmonic mixing from the overlap itself (2026-10-08, build aj)**: after researching harmonic-mixing theory (`dj/docs/harmonic-mixing.md`), the planner judges the harmony of the actual overlap instead of a global key that only 8 % of the owner's tracks trust.
+  - **`Harmony`** (`dj/brain` `analysis/`) computes the TIV excess dissonance (Bernardes et al.) of the two chroma windows from `structureFrames`: `D(mix) − mean(D(a), D(b))`.
+    - Thresholds: `COMPATIBLE` 0.025 and `CLASH` 0.07. On the owner's trusted-key tracks the excess grows with fifths apart: 0.009, 0.016, 0.043, 0.055, 0.085, 0.123, 0.148.
+    - Percussive windows score 0.
+    - An analysis without frames returns null, so the old key logic applies.
+  - **`planAnywhere`** subtracts `MixScoring.W_HARMONY` (0.35) × penalty from each exit/entry pair.
+  - **`finishBeat`** decides `clash` from the local fit.
+  - **Clash lanes were redone** as a DJ EQ swap (one tonal layer at a time):
+    - the incoming deck enters high-passed at `CLASH_IN_HP_HZ` 900 Hz;
+    - the two decks swap mid-overlap;
+    - the outgoing deck then keeps its top and fades the highs to 4 kHz.
+    - Before, the incoming deck was low-passed at 2.5 kHz, which let in exactly its mids.
+  - **The reason** carries `harmony ok|tense|CLASH (excess x[, best with the incoming ±n st])`.
+  - **`QueueLookAhead`** treats a beat-matched pair whose reason has `Harmony.CLASH_TAG` like one that does not beat-match: it analyses the other candidates and moves one that mixes cleanly.
+  - **Measured** with `HarmonyReport` (HARMONY_DIR = an export; 70 analyses, 4 830 pairs): clashing overlaps 36.5 % → 26.3 %, beat-matched pairs 1 717 → 1 722, exit or entry changed on 808 pairs.
+  - **Tests**: `HarmonyTest` (synthetic chroma with a floor matching the real data) and two `QueueLookAheadTest` cases.
+  - **Not done**: ±1 semitone using `Fit.bestShift`, vocal activity, and the recommender's own ranking.
+  - Not run on a device, not judged by ear.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
