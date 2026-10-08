@@ -68,13 +68,13 @@ class StructureHandoffTest {
 
     @Test
     fun anIncomingThatSingsAtOnceStartsOverTheOutgoingsInstrumental() {
-        // no intro: the incoming sings from 0.5 s; the hand-off lays its first bars over the outgoing's 8-bar bridge
+        // no intro: the incoming sings from 0.5 s; its first 4 bars go over the last 4 of the outgoing's 8-bar bridge
         val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
         val inc = analysis("in", 300, listOf(TimeRange(500, 140_000)))
         val plan = planner.plan(out, inc, settings)
         println("sings at once: ${plan.reason}")
         assertTrue(plan.reason.startsWith("STRUCTURE"), plan.reason)
-        assertEquals(96_000, plan.exitPointMs)
+        assertEquals(104_000, plan.exitPointMs)
         assertEquals(0, plan.entryPointMs)
         val v = VocalClash.of(VocalClash.ranges(out), plan.exitPointMs, 1.0, VocalClash.ranges(inc), plan.entryPointMs, 1.0, plan.overlapMs)!!
         assertEquals(0, v.clashMs)

@@ -331,6 +331,29 @@ class DjTransitionPlanner : TransitionPlanner {
         val minPlayed = min(settings.minPlayedFraction.toDouble() * out.audibleEndMs, MixScoring.MIN_PLAYED_CAP_MS.toDouble()).toLong()
         val lower = max(max(c.earliest, minPlayed), (4 * beat + 250.0).toLong())
         val upper = min(out.audibleEndMs - (bar + MARGIN_MS).toLong(), c.latest)
+        // 0. the songs' own structure: the outgoing's instrumental after a sung section over the incoming's intro, the
+        //    incoming's first voice where the outgoing's would have come back (StructureHandoff). Tried first, kept only
+        //    when it comes out at its full length with no voice over voice.
+        // The hand-off may leave earlier than the regular minimum played: with the DJ on, a mix on the song's structure
+        // beats hearing the whole song (the owner). Never before the constraints' earliest exit.
+        val lowerS = max(max(c.earliest, min((STRUCTURE_MIN_PLAYED_FRACTION * out.audibleEndMs).toLong(), STRUCTURE_MIN_PLAYED_MS)), (4 * beat + 250.0).toLong())
+        for (h in StructureHandoff.find(out, inc, c.vOut, c.vIn, lowerS, upper, c.requestedUnits.coerceAtLeast(StructureHandoff.BAR_CHOICES.last())).take(MAX_STRUCTURE_TRIES)) {
+            if (!c.barsMode) break
+            if (c.perfect && ((BarPhase.marginAt(c.from, h.exitMs) ?: 0f) < BarPhase.PERFECT_MARGIN || (BarPhase.marginAt(c.to, h.entryMs) ?: 0f) < BarPhase.PERFECT_MARGIN)) continue
+            val t = chooseTempo(localPeriod(out, h.exitMs, ahead = true), localPeriod(inc, h.entryMs, ahead = true), settings.maxTempoBend.toDouble()) ?: continue
+            fun level(ctx: TrackContext, ms: Long) = if (ctx.phraseTimes.any { abs(it - ms) <= 2 }) "phrase" else "downbeat"
+            // viaOutro stays false: the outro is known from the vocals here, not from the (unreliable) section detector
+            val a = beatAttempt(c, Pick(h.exitMs, level(out, h.exitMs), false), Pick(h.entryMs, level(inc, h.entryMs), false), t, units = h.bars)
+            val p = a.plan ?: run { if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: ${a.fail}"); null } ?: continue
+            val bpm = p.mixBpm?.toDouble()?.takeIf { it > 0 } ?: continue
+            if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: overlap ${p.overlapMs} of ${h.bars} bars; ${p.reason}")
+            if (p.overlapMs < (h.bars - 0.5) * out.beatsPerBar * 60000.0 / bpm || isVoiceOverVoice(p)) continue
+            val where = "mix point ${(100.0 * h.exitMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track; "
+            // the overlap was chosen to fit the instrumental, not clamped: drop the "clamped from" note finishBeat writes
+            val clean = p.copy(reason = p.reason.replace(CLAMPED_NOTE, ""))
+            return clean.withReason((if (c.perfect) PlanConstraints.PERFECT_OK + "structure hand-off, " else "") + h.describe() + where)
+        }
+
         if (upper < lower) return null
         val overlapWanted = c.requestedUnits * if (c.barsMode) bar else beat
         val endPick = pickExit(out, out.audibleEndMs, overlapWanted + MARGIN_MS, bar + MARGIN_MS, lower.toDouble(), out.outro()?.range?.startMs)
@@ -382,26 +405,6 @@ class DjTransitionPlanner : TransitionPlanner {
                 val pick = pool[((c.fromId + ">" + c.toId).hashCode() and Int.MAX_VALUE) % pool.size]
                 if (pick > 0) all.add(0, all.removeAt(pick))
             }
-        }
-
-        // 0. the songs' own structure: the outgoing's instrumental after a sung section over the incoming's intro, the
-        //    incoming's first voice where the outgoing's would have come back (StructureHandoff). Tried first, kept only
-        //    when it comes out at its full length with no voice over voice.
-        for (h in StructureHandoff.find(out, inc, c.vOut, c.vIn, lower, upper, c.requestedUnits.coerceAtLeast(StructureHandoff.BAR_CHOICES.last())).take(MAX_STRUCTURE_TRIES)) {
-            if (!c.barsMode) break
-            if (c.perfect && ((BarPhase.marginAt(c.from, h.exitMs) ?: 0f) < BarPhase.PERFECT_MARGIN || (BarPhase.marginAt(c.to, h.entryMs) ?: 0f) < BarPhase.PERFECT_MARGIN)) continue
-            val t = chooseTempo(localPeriod(out, h.exitMs, ahead = true), localPeriod(inc, h.entryMs, ahead = true), bend) ?: continue
-            fun level(ctx: TrackContext, ms: Long) = if (ctx.phraseTimes.any { abs(it - ms) <= 2 }) "phrase" else "downbeat"
-            // viaOutro stays false: the outro is known from the vocals here, not from the (unreliable) section detector
-            val a = beatAttempt(c, Pick(h.exitMs, level(out, h.exitMs), false), Pick(h.entryMs, level(inc, h.entryMs), false), t, units = h.bars)
-            val p = a.plan ?: run { if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: ${a.fail}"); null } ?: continue
-            val bpm = p.mixBpm?.toDouble()?.takeIf { it > 0 } ?: continue
-            if (DEBUG_STRUCTURE) println("structure ${h.exitMs}->${h.entryMs}: overlap ${p.overlapMs} of ${h.bars} bars; ${p.reason}")
-            if (p.overlapMs < (h.bars - 0.5) * out.beatsPerBar * 60000.0 / bpm || isVoiceOverVoice(p)) continue
-            val where = "mix point ${(100.0 * h.exitMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track; "
-            // the overlap was chosen to fit the instrumental, not clamped: drop the "clamped from" note finishBeat writes
-            val clean = p.copy(reason = p.reason.replace(CLAMPED_NOTE, ""))
-            return clean.withReason((if (c.perfect) PlanConstraints.PERFECT_OK + "structure hand-off, " else "") + h.describe() + where)
         }
 
         var lastFail: String? = null
@@ -1169,7 +1172,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
         /** Structure hand-offs tried before the scored pairs. */
-        private const val MAX_STRUCTURE_TRIES = 6
+        private const val MAX_STRUCTURE_TRIES = 8
+        private const val STRUCTURE_MIN_PLAYED_FRACTION = 0.3
+        private const val STRUCTURE_MIN_PLAYED_MS = 40_000L
         private val CLAMPED_NOTE = Regex(""" \(clamped from \d+(, the beat grid was irregular over a longer overlap)?\)""")
         private val DEBUG_STRUCTURE = System.getenv("DJ_DEBUG_STRUCTURE") != null
         /** Clash treatment: the high-pass that keeps only hats and top of a deck while the other one carries the harmony. */

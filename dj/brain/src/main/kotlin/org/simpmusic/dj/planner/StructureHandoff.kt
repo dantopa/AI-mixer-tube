@@ -1,5 +1,6 @@
 package org.simpmusic.dj.planner
 
+import org.simpmusic.dj.analysis.SongMap
 import org.simpmusic.dj.model.TimeRange
 import kotlin.math.abs
 import kotlin.math.min
@@ -24,8 +25,20 @@ internal object StructureHandoff {
 
     val BAR_CHOICES = intArrayOf(16, 8, 4, 2)
 
-    /** An incoming landed on a later break must still have most of the song ahead. */
-    const val MAX_LANDING_FRACTION = 0.6
+    /** Length of the sung window whose repetition tells a chorus. */
+    const val CHORUS_WINDOW_MS = 16_000L
+
+    /** Longest overlap when the incoming sings from its first bar. */
+    const val SINGS_AT_ONCE_MAX_BARS = 4
+
+    /**
+     * An incoming landed on one of its later breaks must still have this much song ahead. The owner: with the DJ on, a
+     * good mix matters more than hearing every song from its first second ("for that I turn the DJ off").
+     */
+    const val MIN_REMAINING_MS = 60_000L
+
+    /** Where in the outgoing track a hand-off is preferred (fraction of it); further away costs a little. */
+    const val PREFERRED_EXIT_FRACTION = 0.55
 
     /** Start of a hand-off plan's reason. */
     const val TAG = "STRUCTURE: "
@@ -120,15 +133,16 @@ internal object StructureHandoff {
         for (span in instrumentals(vIn, inc.audibleEndMs)) {
             val a = span[0]
             val b = span[1]
-            if (a <= 0L || b >= inc.audibleEndMs || b > MAX_LANDING_FRACTION * inc.durationMs) continue
+            if (a <= 0L || b >= inc.audibleEndMs || inc.audibleEndMs - b < MIN_REMAINING_MS) continue
             val iV = bar(dIn, b, barIn)
             if (iV <= 0) continue
             val n = (0 until iV).count { dIn[it] >= a - inc.medianBeatMs }
             if (n >= BAR_CHOICES.last()) landings += Landing(iV, n, Landing.Kind.BREAK)
         }
-        // No instrumental to land in at all: the incoming enters on its first bar and sings over the outgoing's
-        // instrumental, which still keeps one voice at a time.
-        if (landings.isEmpty()) {
+        // A track that starts singing over its band enters on its first bar, over the last bars of the outgoing's
+        // instrumental: the owner, "if it starts with voice but with the base behind it, it can be perfect right after
+        // track 1's instrumental, the natural continuation". Still one voice at a time.
+        if (introBars < BAR_CHOICES.last()) {
             val firstBar = dIn.indexOfFirst { it >= inc.firstAudibleMs - inc.medianBeatMs }
             if (firstBar >= 0 && iFirst >= 0) landings += Landing(iFirst, Int.MAX_VALUE, Landing.Kind.SINGS_AT_ONCE, firstBar)
         }
@@ -145,9 +159,16 @@ internal object StructureHandoff {
             val iR = if (outro) dOut.indexOfLast { it <= out.audibleEndMs } else bar(dOut, b, barOut)
             if (iR <= 0) continue
             val breakBars = (0 until iR).count { dOut[it] >= a - out.medianBeatMs }
+            // the owner's "instrumental after the chorus": the sung part just before the break comes back elsewhere
+            val lastSung = sungOut.lastOrNull { it.endMs <= a + out.medianBeatMs }
+            val chorus = lastSung?.let { SongMap.repeatScore(out.analysis, it.endMs, minOf(it.durationMs, CHORUS_WINDOW_MS)) }
+            val chorusBonus = 0.3 * (((chorus ?: 0.0) - 0.35) / 0.35).coerceIn(0.0, 1.0)
             for (land in landings) {
                 val atOnce = land.kind == Landing.Kind.SINGS_AT_ONCE
-                val limit = min(min(breakBars, land.bars), wantBars.coerceAtLeast(BAR_CHOICES.last()))
+                // singing at once: only the last bars of the outgoing's instrumental carry the incoming's first phrase, so it
+                // sounds like the next section of one song rather than two songs together
+                val cap = if (atOnce) SINGS_AT_ONCE_MAX_BARS else wantBars.coerceAtLeast(BAR_CHOICES.last())
+                val limit = min(min(breakBars, land.bars), cap)
                 val bars = BAR_CHOICES.firstOrNull { it <= limit } ?: continue
                 if (iR - bars < 0 || (!atOnce && land.iV - bars < 0)) continue
                 val exit = dOut[iR - bars]
@@ -157,10 +178,12 @@ internal object StructureHandoff {
                 if (dOut[iR] in out.phraseTimes) score += 0.25
                 if (!atOnce && dIn[land.iV] in inc.phraseTimes) score += 0.25
                 if (outro) score -= 0.1 // the owner's case is the bridge after a chorus; an outro is the classic fallback
+                score += chorusBonus
+                score -= 0.3 * kotlin.math.abs(exit.toDouble() / maxOf(1L, out.audibleEndMs) - PREFERRED_EXIT_FRACTION)
                 score += when (land.kind) {
-                    Landing.Kind.INTRO -> 0.3 // the whole incoming song is heard
-                    Landing.Kind.BREAK -> -0.4 * dIn[land.iV] / maxOf(1L, inc.durationMs) // the later, the more of it is skipped
-                    Landing.Kind.SINGS_AT_ONCE -> -0.3
+                    Landing.Kind.INTRO -> 0.1
+                    Landing.Kind.BREAK -> -0.05 * dIn[land.iV] / maxOf(1L, inc.durationMs) // a tie-break, not a rule
+                    Landing.Kind.SINGS_AT_ONCE -> -0.25 // good when the band is under the voice; an instrumental is surer
                 }
                 result += Handoff(exit, entry, bars, dOut[iR], dIn[land.iV], outro, score, atOnce, land.kind == Landing.Kind.BREAK)
             }

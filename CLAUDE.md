@@ -322,6 +322,21 @@ Service modules:
     - The same log shows 7 spliced mixes, including entries at incoming source 0.5 s.
   - Tests: `StructureHandoffTest`, covering intro, short intro, a shout in the intro, the incoming's own break, singing at once, and no vocals.
   - Not run on a device, not judged by ear.
+- **Structure first, whole songs second; the song map (2026-10-08, build am)**: the owner: "with the DJ on, the point is good mixes, not playing every song from start to end; for that I turn the DJ off". Also: a track that starts singing should wait for an instrumental of its own, but "if it starts with voice and the band behind it, it can be perfect right after track 1's instrumental: the natural continuation".
+  - **Landings**:
+    - an incoming break needs only `MIN_REMAINING_MS` 60 s of song after it (was 60 % of the track), with a −0.05 × depth tie-break instead of −0.4;
+    - the intro gets +0.1;
+    - "sings at once" is always a candidate when the incoming has no intro: at most `SINGS_AT_ONCE_MAX_BARS` 4, over the LAST bars of the outgoing's instrumental, −0.25.
+  - **Exits**:
+    - the hand-off may leave from `STRUCTURE_MIN_PLAYED_FRACTION` 0.3 of the track (capped at 40 s) instead of the regular 0.55 / 75 s, never before `earliestExitMs`;
+    - −0.3 × distance from `PREFERRED_EXIT_FRACTION` 0.55;
+    - a break that follows a chorus-like sung section gets up to +0.3.
+    - Step 0 now runs before `planAnywhere`'s early returns.
+  - **`SongMap`** (`dj/brain` `analysis/`):
+    - `repeatScore` is the best mean frame-by-frame cosine (z-scored `structureFrames`) of a sung window against any other window at least its length away. A chorus repeats; a verse repeats less.
+    - `describe` gives a one-line map: `inst 0-13 | voice 13-142 (chorus-like .71) | inst 142-148 | …`.
+    - Not checked against labels.
+  - Owner's export: still 33 of 56 hand-offs and 2 short voice-over-voice. Not run on a device, not judged by ear.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
