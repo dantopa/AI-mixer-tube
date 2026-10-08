@@ -730,8 +730,10 @@ class DjEngine(
                     withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
                 }
             } else {
-                DjLog.i(TAG, "planning with mixPoint=${settings.mixPoint}, earliest exit $earliest ms (position $playbackPositionMs ms)")
-                withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints) }
+                // the default: a perfect mix (1 on 1, the 16 on the 16 where the phrases are known) when the pair qualifies,
+                // at the regular timing; the regular plan otherwise (the planner appends why perfect was not possible)
+                DjLog.i(TAG, "planning with mixPoint=${settings.mixPoint}, perfect first, earliest exit $earliest ms (position $playbackPositionMs ms)")
+                withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints.copy(preferPerfect = true)) }
             }
         publishPlan(from, to, plan)
         if (plan.kind == PlanKind.SIMPLE_CROSSFADE) {

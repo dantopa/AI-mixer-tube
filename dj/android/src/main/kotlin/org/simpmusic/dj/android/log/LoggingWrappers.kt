@@ -34,7 +34,7 @@ class LoggingPlanner(private val delegate: TransitionPlanner) : TransitionPlanne
 
     private fun logged(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints?): TransitionPlan {
         val t0 = System.nanoTime()
-        DjLog.d(TAG, "plan inputs: from=${describe(from)} to=${describe(to)} settings[bars=${settings.overlapBars} bend=${settings.maxTempoBend} keyShift=${settings.allowKeyShift}/${settings.maxPitchShift} bassSwap=${settings.bassSwap} minConf=${settings.minConfidence} mixPoint=${settings.mixPoint} earliestExit=${constraints?.earliestExitMs}]")
+        DjLog.d(TAG, "plan inputs: from=${describe(from)} to=${describe(to)} settings[bars=${settings.overlapBars} bend=${settings.maxTempoBend} keyShift=${settings.allowKeyShift}/${settings.maxPitchShift} bassSwap=${settings.bassSwap} minConf=${settings.minConfidence} mixPoint=${settings.mixPoint} earliestExit=${constraints?.earliestExitMs} perfectFirst=${constraints?.preferPerfect}]")
         try {
             val p = if (constraints == null) delegate.plan(from, to, settings) else delegate.plan(from, to, settings, constraints)
             DjLog.i(

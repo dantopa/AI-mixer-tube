@@ -15,7 +15,8 @@ class SimpleModeTest {
         val s = raw.simplified()
         assertFalse(s.allowEchoOut)
         assertFalse(s.allowKeyShift)
-        assertFalse(s.bassSwap)
+        // the bass swap is kept: one bassline at a time is what keeps a beat-matched mix clean
+        assertTrue(s.bassSwap)
         assertEquals(DjSettingsRepository.SIMPLE_MODE_MAX_BEND, s.maxTempoBend, 0f)
         // what the user chose for the rest is left alone
         assertEquals(32, s.overlapBars)

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -18,12 +19,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -33,11 +36,11 @@ import com.maxrave.domain.mediaservice.handler.MediaPlayerHandler
 import com.maxrave.domain.mediaservice.handler.SimpleMediaState
 import com.maxrave.simpmusic.ui.component.dj.DjMixSheet
 import com.maxrave.simpmusic.ui.icon.FastForward
-import com.maxrave.simpmusic.ui.icon.Star
 import com.maxrave.simpmusic.ui.icon.GraphicEq
 import com.maxrave.simpmusic.ui.icon.SimpIcons
 import com.maxrave.simpmusic.ui.theme.typo
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import org.simpmusic.dj.android.DjDebugState
@@ -71,10 +74,7 @@ import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
 import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
 import simpmusic.composeapp.generated.resources.dj_mix_now_soon
 import simpmusic.composeapp.generated.resources.dj_mix_now_started
-import simpmusic.composeapp.generated.resources.dj_perfect_already
-import simpmusic.composeapp.generated.resources.dj_perfect_mix
 import simpmusic.composeapp.generated.resources.dj_perfect_ready
-import simpmusic.composeapp.generated.resources.dj_perfect_started
 import simpmusic.composeapp.generated.resources.dj_tap_one_done
 import simpmusic.composeapp.generated.resources.dj_chip_planning
 import simpmusic.composeapp.generated.resources.dj_chip_ready
@@ -83,17 +83,55 @@ import simpmusic.composeapp.generated.resources.dj_chip_retrying
 import simpmusic.composeapp.generated.resources.dj_chip_waiting
 
 /**
- * One unobtrusive line on Now Playing, only while AI DJ mode is on: what the DJ engine is doing right now, in plain words
- * ("analysing next track… 12 s", "ready, mix in 0:42 (124→128 BPM, 8A→9A)", "mixing", "crossfade fallback: ..."). Tapping it
- * opens the DJ log. Reads the same [DjDebugState] the settings line reads.
+ * The AI DJ row on Now Playing. A "DJ" switch first, always there (DJ mode on/off without going into Settings); while it
+ * is on, one line of what the engine is doing ("analysing next track… 12 s", "ready, mix in 0:42 (124→128 BPM, 8A→9A)",
+ * "mixing", "crossfade fallback: ...") and "mix now". Tapping the line opens the picture of the mix, or the DJ log.
+ * The 1-2-3-4 counter and the phrase pill are tools to correct the DJ, shown only when Settings -> AI DJ -> "Bar counter"
+ * is on. A perfect mix (1 on 1, 16 on 16) is planned by itself whenever the pair qualifies: there is no button for it.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-actual fun DjStatusChip(modifier: Modifier) {
+actual fun DjStatusChip(modifier: Modifier, castRemote: Boolean) {
+    // the DJ cannot mix on a cast receiver; Settings says so, Now Playing simply shows nothing
+    if (castRemote) return
     val settings = koinInject<DjSettingsRepository>()
     val enabled by settings.settings.collectAsStateWithLifecycle(DjSettings())
-    if (!enabled.enabled) return
+    val showCounter by settings.showBarCounter.collectAsStateWithLifecycle(false)
+    val scope = rememberCoroutineScope()
+    val on = enabled.enabled
 
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Surface(
+            modifier = Modifier.toggleable(value = on, role = Role.Switch, onValueChange = { v -> scope.launch { settings.setEnabled(v) } }),
+            shape = CircleShape,
+            color = if (on) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                androidx.compose.foundation.Image(
+                    imageVector = SimpIcons.GraphicEq,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    colorFilter = ColorFilter.tint(if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f)),
+                )
+                Text(
+                    text = "DJ",
+                    style = typo().labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f),
+                )
+            }
+        }
+        if (on) DjStatusLine(showCounter)
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter: Boolean) {
     val hooks = koinInject<DjHooks>()
     val handler = koinInject<MediaPlayerHandler>()
     val debug by hooks.debug.collectAsStateWithLifecycle()
@@ -101,10 +139,8 @@ actual fun DjStatusChip(modifier: Modifier) {
     val mix by hooks.mixView.collectAsStateWithLifecycle()
     var showLog by remember { mutableStateOf(false) }
     var showMix by remember { mutableStateOf(false) }
-    // Answer to the last "mix now" tap, shown in the chip for a few seconds.
+    // Answer to the last "mix now" tap, shown in the chip for a few seconds, and the "tap the 1" acknowledgement.
     var mixNowAnswer by remember { mutableStateOf<MixNowResult?>(null) }
-    // Which button the answer belongs to (the same results serve "mix now" and "perfect mix"), and the "tap the 1" ack.
-    var answerIsPerfect by remember { mutableStateOf(false) }
     var tapped by remember { mutableStateOf(0) }
     LaunchedEffect(mixNowAnswer, tapped) {
         if (mixNowAnswer != null || tapped > 0) {
@@ -125,16 +161,14 @@ actual fun DjStatusChip(modifier: Modifier) {
     }
     val answer =
         when (mixNowAnswer) {
-            MixNowResult.STARTED -> stringResource(if (answerIsPerfect) Res.string.dj_perfect_started else Res.string.dj_mix_now_started)
-            MixNowResult.ALREADY_PERFECT -> stringResource(Res.string.dj_perfect_already)
+            MixNowResult.STARTED -> stringResource(Res.string.dj_mix_now_started)
             MixNowResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
             MixNowResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
             MixNowResult.ALREADY_SOON -> stringResource(Res.string.dj_mix_now_soon)
-            MixNowResult.DISABLED, null -> null
+            MixNowResult.ALREADY_PERFECT, MixNowResult.DISABLED, null -> null
         }
     val text = (if (tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: chipText(debug, positionMs, nowMs)
 
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
     Surface(
         // Tap: the picture of the mix (both tracks overlapping) when there is one, else the log. Long-press: always the log.
         modifier = Modifier.weight(1f, fill = false).combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
@@ -147,12 +181,6 @@ actual fun DjStatusChip(modifier: Modifier) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            androidx.compose.foundation.Image(
-                imageVector = SimpIcons.GraphicEq,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.85f)),
-            )
             Text(
                 text = text,
                 style = if (mixing) typo().labelMedium else typo().labelSmall,
@@ -166,26 +194,13 @@ actual fun DjStatusChip(modifier: Modifier) {
     // "Mix now": the next good phrase start within ~20-45 s, instead of where the DJ would have chosen.
     if (!mixing) {
         Surface(
-            modifier = Modifier.clickable { answerIsPerfect = false; mixNowAnswer = hooks.mixNow() },
+            modifier = Modifier.clickable { mixNowAnswer = hooks.mixNow() },
             shape = CircleShape,
             color = Color.Black.copy(alpha = 0.45f),
         ) {
             androidx.compose.foundation.Image(
                 imageVector = SimpIcons.FastForward,
                 contentDescription = stringResource(Res.string.dj_mix_now),
-                modifier = Modifier.padding(5.dp).size(16.dp),
-                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
-            )
-        }
-        // "Perfect mix": the best point within ~2 minutes where both 1s are trusted, phrase on phrase first; or why not.
-        Surface(
-            modifier = Modifier.clickable { answerIsPerfect = true; mixNowAnswer = hooks.perfectMix() },
-            shape = CircleShape,
-            color = if (debug.perfect) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
-        ) {
-            androidx.compose.foundation.Image(
-                imageVector = SimpIcons.Star,
-                contentDescription = stringResource(Res.string.dj_perfect_mix),
                 modifier = Modifier.padding(5.dp).size(16.dp),
                 colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
             )
@@ -201,7 +216,8 @@ actual fun DjStatusChip(modifier: Modifier) {
     val position by rememberUpdatedState(positionMs)
     val heard by remember(hooks) { derivedStateOf { (position - outputDelayMs).coerceAtLeast(0L) } }
     val barState = remember(hooks) { derivedStateOf { hooks.barBeatAt(heard) } }
-    val bar = barState.value
+    // read (and so computed) only while the counter is shown
+    val bar = if (showCounter) barState.value else null
     if (bar != null) {
         Surface(
             modifier = Modifier.combinedClickable(
@@ -265,7 +281,6 @@ actual fun DjStatusChip(modifier: Modifier) {
                 )
             }
         }
-    }
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
     // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.

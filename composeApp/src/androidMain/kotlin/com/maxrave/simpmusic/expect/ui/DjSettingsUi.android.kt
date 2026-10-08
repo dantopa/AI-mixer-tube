@@ -9,6 +9,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.maxrave.simpmusic.ui.component.SettingItem
 import com.maxrave.simpmusic.viewModel.SettingAlertState
@@ -65,6 +66,10 @@ import simpmusic.composeapp.generated.resources.ai_dj_library_nothing_to_do
 import simpmusic.composeapp.generated.resources.ai_dj_library_progress
 import simpmusic.composeapp.generated.resources.ai_dj_log
 import simpmusic.composeapp.generated.resources.ai_dj_log_description
+import simpmusic.composeapp.generated.resources.ai_dj_advanced
+import simpmusic.composeapp.generated.resources.ai_dj_advanced_description
+import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter
+import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter_description
 import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift_description
 import simpmusic.composeapp.generated.resources.ai_dj_analyzer_missing
 import simpmusic.composeapp.generated.resources.ai_dj_bars
@@ -114,6 +119,8 @@ actual fun DjSettingsSection(castRemote: Boolean) {
     val settings by repo.settings.collectAsStateWithLifecycle(DjSettings())
     val simpleMode by repo.simpleMode.collectAsStateWithLifecycle(DjSettingsRepository.DEFAULT_SIMPLE_MODE)
     val analyzeOnMetered by repo.analyzeOnMetered.collectAsStateWithLifecycle(DjSettingsRepository.DEFAULT_ANALYZE_ON_METERED)
+    val showBarCounter by repo.showBarCounter.collectAsStateWithLifecycle(false)
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
     val debug by hooks.debug.collectAsStateWithLifecycle()
     val scheduling by scheduler.state.collectAsStateWithLifecycle()
     val library by coordinator.state.collectAsStateWithLifecycle()
@@ -176,115 +183,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
         )
         AnimatedVisibility(visible = settings.enabled) {
             Column {
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_simple_mode),
-                    subtitle = stringResource(Res.string.ai_dj_simple_mode_description),
-                    smallSubtitle = true,
-                    switch = (simpleMode to { on -> scope.launch { repo.setSimpleMode(on) }; Unit }),
-                    isEnable = notCasting,
-                )
-                SettingItem(
-                    title = overlapTitle,
-                    subtitle =
-                        if (castRemote) {
-                            stringResource(Res.string.not_available_while_casting)
-                        } else {
-                            stringResource(Res.string.ai_dj_bars, settings.overlapBars) + " · " +
-                                stringResource(Res.string.ai_dj_overlap_bars_description)
-                        },
-                    smallSubtitle = true,
-                    isEnable = notCasting,
-                    onClick = {
-                        viewModel.setAlertData(
-                            SettingAlertState(
-                                title = overlapTitle,
-                                selectOne =
-                                    SettingAlertState.SelectData(
-                                        listSelect = barLabels.map { (bars, label) -> (bars == settings.overlapBars) to label },
-                                    ),
-                                confirm =
-                                    confirm to { state ->
-                                        val picked = barLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first
-                                        if (picked != null) scope.launch { repo.setOverlapBars(picked) }
-                                    },
-                                dismiss = dismiss,
-                            ),
-                        )
-                    },
-                )
-                SettingItem(
-                    title = tempoTitle,
-                    subtitle =
-                        if (castRemote) {
-                            stringResource(Res.string.not_available_while_casting)
-                        } else {
-                            "±${(settings.maxTempoBend * 100).roundToInt()}% · " + stringResource(Res.string.ai_dj_max_tempo_bend_description)
-                        },
-                    smallSubtitle = true,
-                    isEnable = notCasting && !simpleMode,
-                    onClick = {
-                        viewModel.setAlertData(
-                            SettingAlertState(
-                                title = tempoTitle,
-                                selectOne =
-                                    SettingAlertState.SelectData(
-                                        listSelect = tempoLabels.map { (bend, label) -> (kotlin.math.abs(bend - settings.maxTempoBend) < 0.004f) to label },
-                                    ),
-                                confirm =
-                                    confirm to { state ->
-                                        val picked = tempoLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first
-                                        if (picked != null) scope.launch { repo.setMaxTempoBend(picked) }
-                                    },
-                                dismiss = dismiss,
-                            ),
-                        )
-                    },
-                )
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_allow_key_shift),
-                    subtitle =
-                        if (castRemote) {
-                            stringResource(Res.string.not_available_while_casting)
-                        } else {
-                            stringResource(Res.string.ai_dj_allow_key_shift_description)
-                        },
-                    smallSubtitle = true,
-                    switch = (settings.allowKeyShift to { on -> scope.launch { repo.setAllowKeyShift(on) }; Unit }),
-                    isEnable = notCasting && !simpleMode,
-                )
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_bass_swap),
-                    subtitle =
-                        if (castRemote) {
-                            stringResource(Res.string.not_available_while_casting)
-                        } else {
-                            stringResource(Res.string.ai_dj_bass_swap_description)
-                        },
-                    smallSubtitle = true,
-                    switch = (settings.bassSwap to { on -> scope.launch { repo.setBassSwap(on) }; Unit }),
-                    isEnable = notCasting && !simpleMode,
-                )
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_mix_anywhere),
-                    subtitle = stringResource(Res.string.ai_dj_mix_anywhere_description),
-                    smallSubtitle = true,
-                    switch = ((settings.mixPoint == MixPoint.ANYWHERE) to { on -> scope.launch { repo.setMixAnywhere(on) }; Unit }),
-                    isEnable = notCasting,
-                )
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_precise_splice),
-                    subtitle = stringResource(Res.string.ai_dj_precise_splice_description),
-                    smallSubtitle = true,
-                    switch = (settings.preciseSplice to { on -> scope.launch { repo.setPreciseSplice(on) }; Unit }),
-                    isEnable = notCasting,
-                )
-                SettingItem(
-                    title = stringResource(Res.string.ai_dj_analyze_on_metered),
-                    subtitle = stringResource(Res.string.ai_dj_analyze_on_metered_description),
-                    smallSubtitle = true,
-                    switch = (analyzeOnMetered to { on -> scope.launch { repo.setAnalyzeOnMetered(on) }; Unit }),
-                )
-                // ---- Auto DJ ----
+                // ---- what a listener changes: Auto DJ, mobile data, the bar counter, the library ----
                 SettingItem(
                     title = stringResource(Res.string.ai_dj_auto),
                     subtitle = stringResource(Res.string.ai_dj_auto_description),
@@ -320,25 +219,27 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         )
                     }
                 }
-                // ---- library analysis ----
                 SettingItem(
-                    title = stringResource(Res.string.ai_dj_library_progress, library.analysed, library.total),
-                    subtitle =
-                        buildString {
-                            append(stringResource(Res.string.ai_dj_library_description))
-                            if (library.finished) append("\n").append(libraryDone)
-                            library.pause?.let { append("\n").append(pauseLabels.getValue(it)) }
-                        },
+                    title = stringResource(Res.string.ai_dj_analyze_on_metered),
+                    subtitle = stringResource(Res.string.ai_dj_analyze_on_metered_description),
                     smallSubtitle = true,
+                    switch = (analyzeOnMetered to { on -> scope.launch { repo.setAnalyzeOnMetered(on) }; Unit }),
                 )
                 SettingItem(
+                    title = stringResource(Res.string.ai_dj_show_bar_counter),
+                    subtitle = stringResource(Res.string.ai_dj_show_bar_counter_description),
+                    smallSubtitle = true,
+                    switch = (showBarCounter to { on -> scope.launch { repo.setShowBarCounter(on) }; Unit }),
+                )
+                // the library analysis in one row: the action as title, the progress and its state below
+                SettingItem(
                     title = if (library.running) stringResource(Res.string.ai_dj_library_pause) else stringResource(Res.string.ai_dj_library_analyse),
-                    // Without this the button looked like it bounced: with nothing left to analyse it finishes at once and flips back.
                     subtitle =
-                        when {
-                            library.running -> stringResource(Res.string.ai_dj_library_progress, library.analysed, library.total)
-                            library.finished && library.analysed >= library.total -> stringResource(Res.string.ai_dj_library_nothing_to_do, library.total)
-                            else -> ""
+                        buildString {
+                            append(stringResource(Res.string.ai_dj_library_progress, library.analysed, library.total))
+                            append(" · ").append(stringResource(Res.string.ai_dj_library_description))
+                            if (library.finished) append("\n").append(libraryDone)
+                            library.pause?.let { append("\n").append(pauseLabels.getValue(it)) }
                         },
                     smallSubtitle = true,
                     onClick = {
@@ -375,6 +276,124 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         },
                     smallSubtitle = true,
                 )
+                // ---- advanced: the defaults are the best mode; these are for tinkering ----
+                SettingItem(
+                    title = stringResource(Res.string.ai_dj_advanced) + if (showAdvanced) "  ▴" else "  ▾",
+                    subtitle = stringResource(Res.string.ai_dj_advanced_description),
+                    smallSubtitle = true,
+                    onClick = { showAdvanced = !showAdvanced },
+                )
+                AnimatedVisibility(visible = showAdvanced) {
+                    Column {
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_simple_mode),
+                            subtitle = stringResource(Res.string.ai_dj_simple_mode_description),
+                            smallSubtitle = true,
+                            switch = (simpleMode to { on -> scope.launch { repo.setSimpleMode(on) }; Unit }),
+                            isEnable = notCasting,
+                        )
+                        SettingItem(
+                            title = overlapTitle,
+                            subtitle =
+                                if (castRemote) {
+                                    stringResource(Res.string.not_available_while_casting)
+                                } else {
+                                    stringResource(Res.string.ai_dj_bars, settings.overlapBars) + " · " +
+                                        stringResource(Res.string.ai_dj_overlap_bars_description)
+                                },
+                            smallSubtitle = true,
+                            isEnable = notCasting,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = overlapTitle,
+                                        selectOne =
+                                            SettingAlertState.SelectData(
+                                                listSelect = barLabels.map { (bars, label) -> (bars == settings.overlapBars) to label },
+                                            ),
+                                        confirm =
+                                            confirm to { state ->
+                                                val picked = barLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first
+                                                if (picked != null) scope.launch { repo.setOverlapBars(picked) }
+                                            },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        // tempo bend and key shift only mean something outside simple mode: hidden there, not greyed out
+                        AnimatedVisibility(visible = !simpleMode) {
+                            Column {
+                                SettingItem(
+                                    title = tempoTitle,
+                                    subtitle =
+                                        if (castRemote) {
+                                            stringResource(Res.string.not_available_while_casting)
+                                        } else {
+                                            "±${(settings.maxTempoBend * 100).roundToInt()}% · " + stringResource(Res.string.ai_dj_max_tempo_bend_description)
+                                        },
+                                    smallSubtitle = true,
+                                    isEnable = notCasting,
+                                    onClick = {
+                                        viewModel.setAlertData(
+                                            SettingAlertState(
+                                                title = tempoTitle,
+                                                selectOne =
+                                                    SettingAlertState.SelectData(
+                                                        listSelect = tempoLabels.map { (bend, label) -> (kotlin.math.abs(bend - settings.maxTempoBend) < 0.004f) to label },
+                                                    ),
+                                                confirm =
+                                                    confirm to { state ->
+                                                        val picked = tempoLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first
+                                                        if (picked != null) scope.launch { repo.setMaxTempoBend(picked) }
+                                                    },
+                                                dismiss = dismiss,
+                                            ),
+                                        )
+                                    },
+                                )
+                                SettingItem(
+                                    title = stringResource(Res.string.ai_dj_allow_key_shift),
+                                    subtitle =
+                                        if (castRemote) {
+                                            stringResource(Res.string.not_available_while_casting)
+                                        } else {
+                                            stringResource(Res.string.ai_dj_allow_key_shift_description)
+                                        },
+                                    smallSubtitle = true,
+                                    switch = (settings.allowKeyShift to { on -> scope.launch { repo.setAllowKeyShift(on) }; Unit }),
+                                    isEnable = notCasting,
+                                )
+                            }
+                        }
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_bass_swap),
+                            subtitle =
+                                if (castRemote) {
+                                    stringResource(Res.string.not_available_while_casting)
+                                } else {
+                                    stringResource(Res.string.ai_dj_bass_swap_description)
+                                },
+                            smallSubtitle = true,
+                            switch = (settings.bassSwap to { on -> scope.launch { repo.setBassSwap(on) }; Unit }),
+                            isEnable = notCasting,
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_mix_anywhere),
+                            subtitle = stringResource(Res.string.ai_dj_mix_anywhere_description),
+                            smallSubtitle = true,
+                            switch = ((settings.mixPoint == MixPoint.ANYWHERE) to { on -> scope.launch { repo.setMixAnywhere(on) }; Unit }),
+                            isEnable = notCasting,
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_precise_splice),
+                            subtitle = stringResource(Res.string.ai_dj_precise_splice_description),
+                            smallSubtitle = true,
+                            switch = (settings.preciseSplice to { on -> scope.launch { repo.setPreciseSplice(on) }; Unit }),
+                            isEnable = notCasting,
+                        )
+                    }
+                }
             }
         }
     }

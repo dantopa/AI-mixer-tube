@@ -13,7 +13,10 @@ actual fun rememberDjModeEnabled(): Boolean = false
 actual fun rememberDjFallbackSeconds(): Int = 0
 
 @Composable
-actual fun DjStatusChip(modifier: androidx.compose.ui.Modifier) = Unit
+actual fun DjStatusChip(
+    modifier: androidx.compose.ui.Modifier,
+    castRemote: Boolean,
+) = Unit
 
 @Composable
 actual fun DjNextSheet(

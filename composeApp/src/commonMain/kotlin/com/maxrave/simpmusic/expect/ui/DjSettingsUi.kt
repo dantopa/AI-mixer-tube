@@ -21,11 +21,12 @@ expect fun rememberDjModeEnabled(): Boolean
 expect fun rememberDjFallbackSeconds(): Int
 
 /**
- * A one-line status chip for Now Playing: what the AI DJ engine is doing right now ("analysing next track… 12 s",
- * "ready, mix in 0:42", "mixing"...). Draws nothing while AI DJ mode is off, and on Desktop. Tapping it opens the DJ log.
+ * The AI DJ row on Now Playing: a "DJ" switch that turns DJ mode on and off without going into Settings, and while it is
+ * on a one-line status ("analysing next track… 12 s", "ready, mix in 0:42", "mixing"...). Draws nothing while casting
+ * ([castRemote]: the DJ cannot mix on a receiver), and on Desktop.
  */
 @Composable
-expect fun DjStatusChip(modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier)
+expect fun DjStatusChip(modifier: androidx.compose.ui.Modifier = androidx.compose.ui.Modifier, castRemote: Boolean = false)
 
 /**
  * "DJ: what next?" sheet: the best songs of the analysed library to follow the playing one, with Play next / Play now.

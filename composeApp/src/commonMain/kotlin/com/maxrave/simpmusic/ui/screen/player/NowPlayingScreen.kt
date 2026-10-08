@@ -883,12 +883,13 @@ fun NowPlayingScreenContent(
                     actions = actions,
                 )
         }
-        // AI DJ status: one line under the top bar, shared by all three styles (Android only, and only while DJ mode is on).
+        // AI DJ: its on/off switch and, while on, one status line under the top bar, shared by all three styles (Android only).
         DjStatusChip(
             Modifier
                 .align(Alignment.TopCenter)
                 .windowInsetsPadding(WindowInsets.statusBars)
                 .padding(top = 52.dp),
+            castRemote = castState.isRemote,
         )
     }
 }

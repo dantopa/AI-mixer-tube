@@ -136,6 +136,16 @@ class AnalysisPlumbingTest {
             assertFalse("simple mode: no echo-out by default", s.allowEchoOut)
             assertTrue("analyze on mobile data defaults to ON", repo.analyzeOnMetered.first())
             assertFalse("the library analysis is not running until asked", repo.libraryAnalysis.first())
+            assertFalse("the bar counter is hidden until asked", repo.showBarCounter.first())
+        }
+
+    @Test
+    fun aFreshInstallHasTheDjOnAndAnExplicitOffStaysOff() =
+        runBlocking {
+            assertTrue("AI DJ is on for a fresh install", repo().settings.first().enabled)
+            val store = PreferenceDataStoreFactory.create(produceFile = { File(dir, "off.preferences_pb") })
+            store.edit { it[booleanPreferencesKey("dj_enabled")] = false }
+            assertFalse("a user who turned it off keeps it off", DjSettingsRepository(store).settings.first().enabled)
         }
 
     @Test

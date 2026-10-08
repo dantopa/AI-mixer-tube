@@ -51,7 +51,19 @@ class DjTransitionPlanner : TransitionPlanner {
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
-            if (constraints.perfect) planPerfect(from, to, s, earliest, latest) else planUnsafe(from, to, s, earliest, latest)
+            when {
+                constraints.perfect -> planPerfect(from, to, s, earliest, latest)
+                constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
+                    val p = planPerfect(from, to, s, earliest, latest, keepTiming = true)
+                    if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) {
+                        p
+                    } else {
+                        val regular = planUnsafe(from, to, s, earliest, latest)
+                        regular.copy(reason = regular.reason + " | " + p.reason.take(PERFECT_WHY_CHARS))
+                    }
+                }
+                else -> planUnsafe(from, to, s, earliest, latest)
+            }
         } catch (e: Exception) {
             try {
                 simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), s, "planner error (${e.javaClass.simpleName}): ${e.message}", earliest)
@@ -129,7 +141,7 @@ class DjTransitionPlanner : TransitionPlanner {
      * search then only considers exits and entries on trusted 1s. Anything short of that is refused, never downgraded
      * silently: the caller shows the owner why.
      */
-    private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long): TransitionPlan {
+    private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, keepTiming: Boolean = false): TransitionPlan {
         val why = ArrayList<String>()
         for ((a, name) in listOf(from to "outgoing", to to "incoming")) {
             val info = a?.barPhase
@@ -143,7 +155,9 @@ class DjTransitionPlanner : TransitionPlanner {
         if (why.isEmpty()) {
             // plan on the found (or marked) phrase lines where PhraseGrid is sure of them, the counted ones otherwise
             fun found(a: TrackAnalysis) = a.phrases?.takeIf { it.phrasesTrusted && it.phraseStartsMs.isNotEmpty() }?.let { a.copy(phraseStartsMs = it.phraseStartsMs) } ?: a
-            val p = planUnsafe(found(from!!), found(to!!), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, latest, perfect = true)
+            // the button mixes as soon as it can; the default mode keeps the settings' minimum played share of the track
+            val timing = if (keepTiming) settings.copy(mixPoint = MixPoint.ANYWHERE) else settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
+            val p = planUnsafe(found(from!!), found(to!!), timing, earliest, latest, perfect = true)
             if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) return p
             why += p.reason
         }
@@ -1046,6 +1060,8 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** An ANYWHERE overlap clamped below this many bars is used only when nothing better beat-matches. */
         private const val SHORT_OVERLAP_BARS = 4
+        /** How much of the "perfect not possible" reason a regular plan carries along in its own reason (for the log). */
+        private const val PERFECT_WHY_CHARS = 200
         private const val PERFECT_FOUND_PHRASE_BONUS = 0.1
         private const val PERFECT_BLOCK_BONUS = 0.15
 

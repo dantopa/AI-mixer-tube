@@ -192,6 +192,12 @@ data class PlanConstraints(
      * has a reason starting with [PERFECT_OK].
      */
     val perfect: Boolean = false,
+    /**
+     * The default mode: try a [perfect] mix first, with the settings' own timing (how much of the outgoing track must
+     * have played, unlike the "perfect" button, which may mix right away), and when the pair does not qualify plan the
+     * regular way. Only with `MixPoint.ANYWHERE`; ignored when [perfect] is set.
+     */
+    val preferPerfect: Boolean = false,
 ) {
     companion object {
         const val PERFECT_OK = "PERFECT: "

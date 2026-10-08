@@ -571,7 +571,7 @@
     <string name="crossfade_auto">Auto</string>
     <string name="crossfade_auto_description">Automatically calculate duration based on BPM (requires 320kbps stream with BPM data)</string>
     <string name="ai_dj_mode">AI DJ mode (BETA)</string>
-    <string name="ai_dj_mode_description">Mix tracks like a DJ: beat-matched, phrase-aligned transitions planned from an analysis of both songs. Replaces the crossfade below whenever a good mix is possible.</string>
+    <string name="ai_dj_mode_description">Mix tracks like a DJ: beat-matched, phrase-aligned transitions planned from an analysis of both songs, the 1 on the 1 whenever both are sure. Replaces the crossfade below whenever a good mix is possible. The DJ button on Now Playing turns it on or off too.</string>
     <string name="ai_dj_overlap_bars">Overlap length</string>
     <string name="ai_dj_bars">%1$d bars</string>
     <string name="ai_dj_overlap_bars_description">How long the two songs play together</string>
@@ -585,13 +585,17 @@
     <string name="ai_dj_no_plan_yet">Nothing planned yet. Play a couple of songs.</string>
     <string name="ai_dj_analyzer_missing">The beat analyzer is not part of this build yet, so DJ mode falls back to the normal crossfade.</string>
     <string name="ai_dj_simple_mode">Simple mode</string>
-    <string name="ai_dj_simple_mode_description">Keep the same base with a beat-matched mix at a small tempo change, or else the normal crossfade. No echo-out, pitch shifting or EQ swap. Turn off to use the advanced options below.</string>
+    <string name="ai_dj_simple_mode_description">Keep the same base with a beat-matched mix at a small tempo change (one bassline at a time), or else the normal crossfade. No echo-out or pitch shifting. Turn off for the tempo and key options below.</string>
     <string name="ai_dj_mix_anywhere">Mix anywhere in the song</string>
     <string name="ai_dj_mix_anywhere_description">Find the best moment in the current song to mix out (after about half of it, at least 25 s from now). Off: only near the end. Songs whose tempos cannot be matched get an echo-out instead of a plain crossfade.</string>
     <string name="ai_dj_analyze_on_metered">Analyze on mobile data</string>
     <string name="ai_dj_analyze_on_metered_description">Analyze the next song even on mobile data (about 4 MB per song). Off: only on Wi-Fi or from the cache.</string>
     <string name="ai_dj_log">DJ log</string>
     <string name="ai_dj_log_description">See what the DJ is doing, copy or share it</string>
+    <string name="ai_dj_show_bar_counter">Bar counter</string>
+    <string name="ai_dj_show_bar_counter_description">Shows 1-2-3-4 and the bar of the 16-bar phrase on Now Playing, to correct the 1 (») or mark where a phrase starts. The DJ works the same without it.</string>
+    <string name="ai_dj_advanced">Advanced</string>
+    <string name="ai_dj_advanced_description">Simple mode, mix length, tempo, key, bass swap, where the mix may happen, precise splice</string>
     <string name="ai_dj_diag_playing">Playing track: %1$s</string>
     <string name="ai_dj_diag_next">Next track: %1$s</string>
     <string name="ai_dj_diag_errors">Last errors: %1$s</string>
@@ -633,9 +637,6 @@
     <string name="dj_mix_now_no_pair">DJ: nothing to mix into yet</string>
     <string name="dj_mix_now_mixing">DJ: already mixing</string>
     <string name="dj_mix_now_soon">DJ: the mix is coming up anyway</string>
-    <string name="dj_perfect_mix">Perfect mix</string>
-    <string name="dj_perfect_started">DJ: looking for a perfect point (1 on 1)…</string>
-    <string name="dj_perfect_already">DJ: the prepared mix is already perfect</string>
     <string name="dj_perfect_ready">Perfect mix in %1$s%2$s</string>
     <string name="dj_tap_one">Tap the 1</string>
     <string name="dj_tap_one_done">DJ: 1 marked for this song</string>

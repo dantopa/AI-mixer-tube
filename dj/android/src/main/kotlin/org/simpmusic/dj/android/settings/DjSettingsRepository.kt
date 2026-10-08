@@ -30,7 +30,7 @@ class DjSettingsRepository(
     /** The settings the planner/engine consume. Values are clamped on read, so a corrupt file cannot crash playback. */
     val settings: Flow<DjSettings> = store.data.map { prefs -> prefs.toSettings().let { if (prefs[SIMPLE_MODE] ?: DEFAULT_SIMPLE_MODE) it.simplified() else it } }
 
-    /** Simple mode (default ON): the plan is a beat-matched mix at a small tempo bend, or the app's plain crossfade. No echo-out, no pitch shifting, no EQ swap. */
+    /** Simple mode (default ON): the plan is a beat-matched mix at a small tempo bend (with the bass swap), or the app's plain crossfade. No echo-out, no pitch shifting. */
     val simpleMode: Flow<Boolean> = store.data.map { it[SIMPLE_MODE] ?: DEFAULT_SIMPLE_MODE }
 
     suspend fun setSimpleMode(on: Boolean) {
@@ -76,6 +76,16 @@ class DjSettingsRepository(
 
     suspend fun setAutoDjArc(arc: EnergyArc) = update { it.copy(autoDjArc = arc) }
 
+    /**
+     * The 1-2-3-4 counter, "»" and the n/16 phrase pill on Now Playing (default OFF): tools to correct the 1 and mark
+     * phrases, which most listeners never need. The DJ works the same without them.
+     */
+    val showBarCounter: Flow<Boolean> = store.data.map { it[SHOW_BAR_COUNTER] ?: false }
+
+    suspend fun setShowBarCounter(on: Boolean) {
+        store.edit { it[SHOW_BAR_COUNTER] = on }
+    }
+
     /** Whether the user asked for the background library analysis to run (survives a restart; not part of [DjSettings]). */
     val libraryAnalysis: Flow<Boolean> = store.data.map { it[LIBRARY_ANALYSIS] ?: false }
 
@@ -90,7 +100,7 @@ class DjSettingsRepository(
     private fun Preferences.toSettings(): DjSettings {
         val d = DjSettings()
         return DjSettings(
-            enabled = this[ENABLED] ?: d.enabled,
+            enabled = this[ENABLED] ?: DEFAULT_ENABLED,
             overlapBars = (this[OVERLAP_BARS] ?: d.overlapBars).coerceIn(MIN_OVERLAP_BARS, MAX_OVERLAP_BARS),
             maxTempoBend = (this[MAX_TEMPO_BEND] ?: d.maxTempoBend).coerceIn(0f, MAX_TEMPO_BEND_LIMIT),
             allowKeyShift = this[ALLOW_KEY_SHIFT] ?: d.allowKeyShift,
@@ -106,6 +116,12 @@ class DjSettingsRepository(
     }
 
     companion object {
+        /**
+         * AI DJ on by default, so anyone who installs the app hears it (the owner, 2026-10-07: "the best mix mode on by
+         * default, for anyone to try"). A user who turned it off keeps it off: only a missing key reads as this.
+         */
+        const val DEFAULT_ENABLED = true
+
         /** On by default: one track is about 4 MB, and without it the next track can never be analysed in time on mobile data. */
         const val DEFAULT_ANALYZE_ON_METERED = true
 
@@ -133,14 +149,18 @@ class DjSettingsRepository(
         private val SIMPLE_MODE = booleanPreferencesKey("dj_simple_mode")
         private val LIBRARY_ANALYSIS = booleanPreferencesKey("dj_library_analysis")
         private val ANALYZE_ON_METERED = booleanPreferencesKey("dj_analyze_on_metered")
+        private val SHOW_BAR_COUNTER = booleanPreferencesKey("dj_show_bar_counter")
     }
 }
 
-/** The simple-mode view of the settings: nothing but a modest beat-match, or a crossfade. Stored values are untouched. */
+/**
+ * The simple-mode view of the settings: a modest beat-match, or a crossfade. Stored values are untouched. The bass swap
+ * stays (it was switched off here on 2026-09-30, when mixes "sounded bad and drifted" because the decks were not aligned;
+ * two basslines and two kicks for a whole overlap are what makes a beat-matched mix sound muddy).
+ */
 internal fun DjSettings.simplified(): DjSettings =
     copy(
         allowEchoOut = false,
         allowKeyShift = false,
-        bassSwap = false,
         maxTempoBend = minOf(maxTempoBend, DjSettingsRepository.SIMPLE_MODE_MAX_BEND),
     )

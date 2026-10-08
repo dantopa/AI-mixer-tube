@@ -224,4 +224,42 @@ class BarPhaseTest {
         assertTrue(p.exitPointMs in ra.phrases!!.blockStartsMs, "exit ${p.exitPointMs} not on a 16 line")
         assertTrue(p.entryPointMs in rb.phrases!!.blockStartsMs, "entry ${p.entryPointMs} not on a 16 line")
     }
+
+    /**
+     * The default mode tries a perfect mix first, but with the settings' own timing: unlike the button, it must not mix
+     * before the outgoing track has played its minimum share (AutoMix's best-known complaint is cutting songs short).
+     */
+    @Test
+    fun preferPerfectPlansPerfectWithTheRegularTiming() {
+        val planner = DjTransitionPlanner()
+        val s = DjSettings(enabled = true) // minPlayedFraction 0.55, mixPoint ANYWHERE
+        val a0 = track("pa")
+        val b0 = track("pb", bpm = 126f)
+        val a = a0.copy(beatDownbeatLogits = logits(a0, 3f, -3f, 1f))
+        val b = b0.copy(beatDownbeatLogits = logits(b0, 3f, -3f, 1f, seed = 2))
+        val p = planner.plan(a, b, s, PlanConstraints(earliestExitMs = 40_000L, preferPerfect = true))
+        println("prefer perfect: ${p.kind} exit ${p.exitPointMs} of ${a.durationMs}: ${p.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+        assertTrue(p.reason.startsWith(PlanConstraints.PERFECT_OK), p.reason)
+        val minPlayed = minOf((0.55 * a.durationMs).toLong(), 75_000L)
+        assertTrue(p.exitPointMs >= minPlayed - 1000, "exit ${p.exitPointMs} before the minimum played $minPlayed")
+    }
+
+    @Test
+    fun preferPerfectFallsBackToTheRegularPlanWhenTheOneIsUnsure() {
+        val planner = DjTransitionPlanner()
+        val s = DjSettings(enabled = true)
+        val a0 = track("ua")
+        val b0 = track("ub", bpm = 126f)
+        val a = a0.copy(beatDownbeatLogits = logits(a0, 0.3f, 0.1f, 1.2f))
+        val b = b0.copy(beatDownbeatLogits = logits(b0, 3f, -3f, 1f, seed = 2))
+        val p = planner.plan(a, b, s, PlanConstraints(earliestExitMs = 40_000L, preferPerfect = true))
+        val regular = planner.plan(a, b, s, PlanConstraints(earliestExitMs = 40_000L))
+        println("unsure: ${p.kind} exit ${p.exitPointMs}: ${p.reason}")
+        assertFalse(p.reason.startsWith(PlanConstraints.PERFECT_OK))
+        assertTrue(PlanConstraints.PERFECT_REFUSED in p.reason, p.reason)
+        assertEquals(regular.kind, p.kind)
+        assertEquals(regular.exitPointMs, p.exitPointMs)
+        assertEquals(regular.entryPointMs, p.entryPointMs)
+    }
 }

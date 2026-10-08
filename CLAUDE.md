@@ -254,6 +254,17 @@ Service modules:
     - The one marked track with a trusted 16 (1iAj) has its mark on the 8-bar line (9/16): it is unknown whether the owner marks 16-bar lines or any phrase start.
     - Over the 142 analyses, 8-bar phrases are trusted on 32 and 16-bar lines on 5.
   - Logs written after 10-06 use a decimal comma (device locale) in `%.1f` fields; only log text, nothing parses it.
+- **DJ on by default, a DJ switch on Now Playing, Perfect first, the bass swap back (2026-10-08, build ai)**: the owner asked for the best mix mode on by default "for anyone to try", for on/off from the main screen without Settings, for less UI, and for cleaner mixes.
+  - **On by default**: `DjSettingsRepository.DEFAULT_ENABLED = true` applies only where the `dj_enabled` key is missing, so a user who turned the DJ off keeps it off. `DjSettings.enabled` itself still defaults to false; the brain's tests rely on that.
+  - **Switch on Now Playing**: `DjStatusChip(modifier, castRemote)` always draws a "DJ" pill (`toggleable`, `Role.Switch`) that writes `setEnabled`. While the DJ is on, the status line and "mix now" follow. The pill is not drawn while casting, since the DJ cannot mix on a receiver. `NowPlayingScreen` passes `castState.isRemote`.
+  - **Perfect first, automatically**: the star button is gone. `PlanConstraints.preferPerfect` (used by `DjEngine`'s regular plan, `MixPoint.ANYWHERE` only) runs `planPerfect(keepTiming = true)` first. That is the same 1-on-1 / 16-on-16 search as the button, but it keeps the settings' `minPlayedFraction` (0.55, capped at 75 s) instead of 0, so a song is not cut short. When the pair does not qualify, the regular plan is used, and its reason ends with `| perfect not possible: ...`. The chip already showed "Perfect mix in m:ss" from the reason's `PERFECT: ` prefix. Tests: `BarPhaseTest.preferPerfectPlansPerfectWithTheRegularTiming` (exit at 84 % of the track, block on block) and `preferPerfectFallsBackToTheRegularPlanWhenTheOneIsUnsure` (identical to the regular plan). The button's `DjHooks.perfectMix()` path is still in the engine, unused by the UI.
+  - **The bass swap is back in simple mode** (`simplified()` no longer clears `bassSwap`). The incoming deck plays through a 250 Hz high-pass until the middle of the overlap, then the two high-passes cross over one bar, so only one bassline and one kick sound at a time. Simple mode had switched it off on 2026-09-30 after a device test that "sounded bad and drifted", which was the deck alignment, fixed since by the precise splice. Not judged by ear; Settings -> AI DJ -> Advanced -> Bass swap turns it off.
+  - **Less UI**:
+    - The 1-2-3-4 counter, "»" and the n/16 pill are shown only with Settings -> AI DJ -> "Bar counter" (`dj_show_bar_counter`, default OFF). The owner uses them to correct the DJ, a first-time listener does not.
+    - Settings keeps on top: AI DJ, Auto DJ (+ arc and last pick), analyse on mobile data, bar counter, the library analysis (one row instead of two), the log and the "why" line.
+    - Simple mode, overlap length, bass swap, mix anywhere and precise splice moved into a collapsed "Advanced" group. Tempo bend and key shift are hidden (no longer greyed out) while simple mode is on.
+    - Three unused `dj_perfect_*` strings were removed.
+  - Not run on a device.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
@@ -1037,6 +1048,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-10-07
+**Last updated**: 2026-10-08
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors
