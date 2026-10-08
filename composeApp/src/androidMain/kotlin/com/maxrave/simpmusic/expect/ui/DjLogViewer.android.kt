@@ -262,13 +262,26 @@ fun shareDjLog(context: Context, chooserTitle: String) {
 fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
     // Zipping ~170 analyses and drawing their phasegrams takes seconds: off the main thread (a device log showed the UI
     // frozen 550 ms in the Deflater), then back to it for the share sheet.
-    kotlin.concurrent.thread(name = "dj-export") { buildAndShareDjAnalyses(context, chooserTitle, names) }
+    // One export at a time: two taps used to run two threads writing the same zip, and the owner's file came out with its
+    // entries interleaved (central directory offsets 410 bytes off the data, 2026-10-08).
+    if (!djExportRunning.compareAndSet(false, true)) return
+    kotlin.concurrent.thread(name = "dj-export") {
+        try {
+            buildAndShareDjAnalyses(context, chooserTitle, names)
+        } finally {
+            djExportRunning.set(false)
+        }
+    }
 }
+
+private val djExportRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
 private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
     runCatching {
         val dir = File(context.cacheDir, "dj_log").apply { mkdirs() }
-        val zip = File(dir, "dj-analyses.zip")
+        // a fresh name per export: a share target may still be reading the previous one
+        dir.listFiles { f -> f.name.startsWith("dj-analyses") && f.name.endsWith(".zip") }?.forEach { it.delete() }
+        val zip = File(dir, "dj-analyses-${System.currentTimeMillis()}.zip")
         java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
             fun put(name: String, bytes: ByteArray) {
                 out.putNextEntry(java.util.zip.ZipEntry(name))

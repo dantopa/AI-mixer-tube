@@ -81,6 +81,28 @@ class StructureHandoffTest {
     }
 
     @Test
+    fun anIntroWithoutTheBaseIsNoLanding() {
+        // the same pair as the first test, but the incoming's intro has no bass (an a cappella / keys-only intro): the
+        // owner wants the base in both, so no instrumental-over-instrumental hand-off lands there
+        val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
+        val inc = analysis("in", 300, listOf(TimeRange(16_000, 140_000))).let { a ->
+            a.copy(lowBandEnergy = a.lowBandEnergy.mapIndexed { i, v -> if (i * 100 < 16_000) 0.05f else v })
+        }
+        val plan = planner.plan(out, inc, settings)
+        assertTrue(!plan.reason.startsWith("STRUCTURE") || "second tier" in plan.reason, plan.reason)
+        assertTrue(!plan.reason.contains("over the incoming's intro"), plan.reason)
+    }
+
+    @Test
+    fun aPureInstrumentalPairRanksAboveTheSecondTier() {
+        // the incoming has both an 8-bar intro and could be entered singing: the pure pair wins
+        val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
+        val inc = analysis("in", 300, listOf(TimeRange(16_000, 140_000)))
+        val plan = planner.plan(out, inc, settings)
+        assertTrue(plan.reason.startsWith("STRUCTURE") && "second tier" !in plan.reason, plan.reason)
+    }
+
+    @Test
     fun withoutVocalsNothingChanges() {
         val a = planner.plan(analysis("out", 300, null), analysis("in", 300, null), settings)
         assertTrue(!a.reason.startsWith("STRUCTURE"))

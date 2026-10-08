@@ -14,6 +14,11 @@ import kotlin.math.min
  *
  * Built from the vocal ranges (`VocalClash`, YAMNet) and the bar lines of both tracks. The overlap is a whole number of
  * bars (16, 8, 4 or 2: phrase-sized), ending on the outgoing's "voice returns" bar and the incoming's "first voice" bar.
+ *
+ * Two tiers (the owner, 2026-10-08): first pure instrumental over pure instrumental, at least [PURE_MIN_BARS] long, "because
+ * that is where the mix is felt for real: when the base sounds in both"; only when no such pair exists, the outgoing's
+ * instrumental ending under the incoming's phrase 1 (an incoming that sings from its first bar), "a crossfade in time, zero
+ * drama". In both the BASE must play through each track's part of the overlap ([hasBase]).
  */
 internal object StructureHandoff {
     /** A vocal island shorter than this (a shout, an "¡ahí va!") inside an instrumental does not end it. */
@@ -28,6 +33,12 @@ internal object StructureHandoff {
     /** Length of the sung window whose repetition tells a chorus. */
     const val CHORUS_WINDOW_MS = 16_000L
 
+    /** Shortest pure instrumental-over-instrumental overlap; shorter ones are not worth it over the second tier. */
+    const val PURE_MIN_BARS = 4
+
+    /** Each quarter of an overlap window must carry at least this fraction of the track's typical (median) bass. */
+    const val BASE_FRACTION = 0.6f
+
     /** Longest overlap when the incoming sings from its first bar. */
     const val SINGS_AT_ONCE_MAX_BARS = 4
 
@@ -41,7 +52,7 @@ internal object StructureHandoff {
     const val PREFERRED_EXIT_FRACTION = 0.55
 
     /** Start of a hand-off plan's reason. */
-    const val TAG = "STRUCTURE: "
+    const val TAG = PlanTags.STRUCTURE
 
     class Handoff(
         val exitMs: Long,
@@ -60,9 +71,9 @@ internal object StructureHandoff {
     ) {
         fun describe(): String =
             if (singsAtOnce) {
-                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) under the incoming's first bars, which sing from the start; %d bars; ".format(resumeMs / 1000.0, bars)
+                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) ends under the incoming's phrase 1, which sings from the start (${PlanTags.SECOND_TIER}, no pure instrumental pair); %d bars; ".format(resumeMs / 1000.0, bars)
             } else {
-                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) over the incoming's ${if (viaBreak) "own instrumental break" else "intro"}, whose ${if (viaBreak) "phrase 1 returns" else "first voice lands"} there (%.1f s); %d bars; ".format(
+                TAG + "the outgoing's instrumental ${if (outro) "outro" else "after the vocals"} (voice would return at %.1f s) over the incoming's ${if (viaBreak) "own instrumental break" else "intro"}, whose ${if (viaBreak) "phrase 1 returns" else "first voice lands"} there (%.1f s), base in both; %d bars; ".format(
                     resumeMs / 1000.0, firstVoiceMs / 1000.0, bars,
                 )
             }
@@ -169,11 +180,13 @@ internal object StructureHandoff {
                 // sounds like the next section of one song rather than two songs together
                 val cap = if (atOnce) SINGS_AT_ONCE_MAX_BARS else wantBars.coerceAtLeast(BAR_CHOICES.last())
                 val limit = min(min(breakBars, land.bars), cap)
-                val bars = BAR_CHOICES.firstOrNull { it <= limit } ?: continue
+                val bars = BAR_CHOICES.firstOrNull { it <= limit && (atOnce || it >= PURE_MIN_BARS) } ?: continue
                 if (iR - bars < 0 || (!atOnce && land.iV - bars < 0)) continue
                 val exit = dOut[iR - bars]
                 val entry = if (atOnce) dIn[land.entryIdx] else dIn[land.iV - bars]
                 if (exit < lower || exit > upper) continue
+                val inEnd = if (atOnce) dIn.getOrElse(land.entryIdx + bars) { entry + (bars * barIn).toLong() } else dIn[land.iV]
+                if (!hasBase(out, exit, dOut[iR]) || !hasBase(inc, entry, inEnd)) continue
                 var score = bars.toDouble() / maxOf(wantBars, bars)
                 if (dOut[iR] in out.phraseTimes) score += 0.25
                 if (!atOnce && dIn[land.iV] in inc.phraseTimes) score += 0.25
@@ -183,7 +196,7 @@ internal object StructureHandoff {
                 score += when (land.kind) {
                     Landing.Kind.INTRO -> 0.1
                     Landing.Kind.BREAK -> -0.05 * dIn[land.iV] / maxOf(1L, inc.durationMs) // a tie-break, not a rule
-                    Landing.Kind.SINGS_AT_ONCE -> -0.25 // good when the band is under the voice; an instrumental is surer
+                    Landing.Kind.SINGS_AT_ONCE -> -1.0 // the second tier: any pure instrumental pair ranks above it
                 }
                 result += Handoff(exit, entry, bars, dOut[iR], dIn[land.iV], outro, score, atOnce, land.kind == Landing.Kind.BREAK)
             }
@@ -192,4 +205,20 @@ internal object StructureHandoff {
     }
 
     private operator fun LongArray.contains(t: Long): Boolean = any { abs(it - t) <= 2 }
+
+    private val medianBass = java.util.Collections.synchronizedMap(java.util.WeakHashMap<TrackContext, Float>())
+
+    /** The base (bass and kick: the low band) plays through [a, b): every quarter of it at [BASE_FRACTION] of the track's median. */
+    internal fun hasBase(t: TrackContext, a: Long, b: Long): Boolean {
+        if (t.lowBand.isEmpty() || t.hopMs <= 0) return true // nothing to judge with: older analyses keep the old behaviour
+        val median = medianBass.getOrPut(t) {
+            val i0 = (t.firstAudibleMs / t.hopMs).toInt().coerceIn(0, t.lowBand.size - 1)
+            val i1 = (t.audibleEndMs / t.hopMs).toInt().coerceIn(i0, t.lowBand.size - 1)
+            t.lowBand.copyOfRange(i0, i1 + 1).sorted().let { it[it.size / 2] }
+        }
+        if (median <= 0f) return true
+        val q = (b - a) / 4
+        if (q <= 0) return false
+        return (0 until 4).all { k -> (t.meanOver(t.lowBand, a + k * q, a + (k + 1) * q) ?: 0f) >= BASE_FRACTION * median }
+    }
 }

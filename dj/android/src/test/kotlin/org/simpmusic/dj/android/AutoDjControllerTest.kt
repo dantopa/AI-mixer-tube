@@ -114,34 +114,17 @@ class AutoDjControllerTest {
     }
 
     @Test
-    fun aRadioGetsItsNextSlotTakenByTheDjOnce() =
+    fun aRadioIsLeftToYouTubeTheDjAddsNothing() =
         runTest {
+            // The owner (2026-10-08): YouTube's radio picks tracks of the same style; the DJ inserted ~85 BPM reggaeton into
+            // a cumbia radio. On a radio it now only reorders (QueueLookAhead), never adds.
             val r = rig()
             r.controller.handle(radioQueue(ahead = 40))
-            assertEquals(1, r.player.calls.size)
-            assertTrue(r.player.calls.single().startsWith("next:lib"))
-            val picked = r.controller.lastDecision.value!!.pickedId!!
-            assertEquals(AutoDjDecision.Action.INSERT_NEXT, r.controller.lastDecision.value!!.action)
-
-            // The queue as the player now reports it: our pick sits right after the current track.
-            val after = PlayerSnapshot(currentId = "cur", queueIds = listOf("cur", picked) + (1..40).map { "q$it" }, currentIndex = 0, isRadio = true)
-            r.controller.handle(after)
-            assertEquals("the next slot is already the DJ's: nothing more to do", 1, r.player.calls.size)
-        }
-
-    @Test
-    fun aTrackTheUserPutNextByHandIsNeverJumpedOver() =
-        runTest {
-            val r = rig()
-            fun radio(vararg ids: String) = PlayerSnapshot(currentId = "cur", queueIds = ids.toList(), currentIndex = 0, isRadio = true)
-            // The DJ takes the next slot of a fresh radio...
-            r.controller.handle(radio("cur", "r1", "r2", "r3"))
-            val owned = r.controller.lastDecision.value!!.pickedId!!
-            r.player.calls.clear()
-            r.controller.handle(radio("cur", owned, "r1", "r2", "r3"))
-            // ...then the user puts 'mine' right after the current track: the queue grew by exactly one track nobody here queued.
-            r.controller.handle(radio("cur", "mine", owned, "r1", "r2", "r3"))
-            assertTrue("the user's own next track stays where it is", r.player.calls.isEmpty())
+            r.controller.handle(radioQueue(ahead = 40))
+            assertTrue(r.player.calls.isEmpty())
+            val d = r.controller.lastDecision.value!!
+            assertEquals(AutoDjDecision.Action.SKIPPED, d.action)
+            assertTrue(d.reason, "YouTube" in d.reason)
         }
 
     @Test

@@ -25,11 +25,16 @@ class StructureReport {
         var structure = 0
         var clash = 0
         var bm = 0
+        var atOnce = 0
+        var short = 0
+        val overlaps = ArrayList<Long>()
         for (a in all) for (b in all) {
             if (a === b) continue
             val p = planner.plan(a, b, settings, PlanConstraints(preferPerfect = true))
             if (p.kind == PlanKind.BEAT_MATCHED) bm++
             if ("STRUCTURE" in p.reason) structure++
+            if ("second tier" in p.reason) atOnce++
+            if (p.kind == PlanKind.BEAT_MATCHED) { overlaps += p.overlapMs; if (p.overlapMs < 8_000) short++ }
             // only the chosen plan's own reason, not the refused Perfect attempt appended after " | "
             if ("voice over voice" in p.reason.substringBefore(" | ")) { clash++; println("VOICE OVER VOICE: " + p.reason.substringBefore(" | ")) }
             val oc = org.simpmusic.dj.planner.TrackContext(org.simpmusic.dj.analysis.AnalysisRefiner.cached(a))
@@ -39,6 +44,6 @@ class StructureReport {
             println("%-22s -> %-22s %s %s".format(titles[a.videoId]?.take(22) ?: a.videoId, titles[b.videoId]?.take(22) ?: b.videoId, p.kind, p.reason.take(230)))
         }
         val n = all.size * (all.size - 1)
-        println("pairs $n: beat-matched $bm, structure hand-offs $structure, voice over voice $clash")
+        println("pairs $n: beat-matched $bm, structure hand-offs $structure (second tier $atOnce), voice over voice $clash, overlaps under 8 s $short, median overlap ${overlaps.sorted().getOrNull(overlaps.size / 2)?.div(1000)} s")
     }
 }

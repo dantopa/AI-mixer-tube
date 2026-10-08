@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.simpmusic.dj.analysis.Harmony
+import org.simpmusic.dj.analysis.VocalClash
 import org.simpmusic.dj.android.recommend.DjPlayerPort
 import org.simpmusic.dj.android.recommend.PlayerSnapshot
 import org.simpmusic.dj.model.AnalysisPriority
@@ -22,6 +23,7 @@ import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalysisRepository
 import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.TransitionPlanner
+import org.simpmusic.dj.planner.PlanTags
 import org.simpmusic.dj.recommend.HeuristicRecommender
 import org.simpmusic.dj.recommend.RecommendContext
 
@@ -93,14 +95,15 @@ class QueueLookAhead(
         // already mixes, and analysing two more tracks per song just to confirm it was the look-ahead's main heat cost.
         val next = analysisOf(nextId, AnalysisPriority.NEXT_UP, minOf(perTrackWaitMs, deadline - clock())) ?: return
         val nextPlan = withContext(compute) { runCatching { planner.plan(from, next, settingsNow) }.getOrNull() }
-        if (nextPlan == null || nextPlan.mixesClean()) {
+        if (nextPlan == null || nextPlan.quality() == Quality.BEST) {
             decidedFor = current
-            log("look-ahead: $nextId mixes with the current track (${nextPlan?.kind}); not analysing the others")
+            log("look-ahead: $nextId mixes instrumental over instrumental with the current track (or could not be planned); not analysing the others")
             return
         }
-        // A pair that beat-matches but whose overlap clashes harmonically everywhere the planner could put it is mixed with
-        // the clash treatment (one tonal layer at a time, short); an upcoming track that fits is worth the analyses.
-        val nextWhy = if (nextPlan.kind == PlanKind.BEAT_MATCHED) "would clash harmonically" else "would not beat-match"
+        val nextQuality = nextPlan.quality()
+        // YouTube's radio already picks tracks in the same style (the owner: "YouTube Music has an AI that finds tracks of the
+        // same vibe; use it"), so the DJ only chooses AMONG them: the one whose instrumental lands on the current track's.
+        val nextWhy = "mixes only as ${nextQuality.label}"
         log("look-ahead: $nextId $nextWhy (${nextPlan.reason}); looking at ${window.size - 1} more")
         setKeep(window.toSet())
 
@@ -125,14 +128,17 @@ class QueueLookAhead(
             }
         val nextScore = scored.firstOrNull { it.first == nextId }?.second?.score ?: 0f
         val line = scored.joinToString { "${it.first}=${"%.2f".format(it.second.score)}" }
-        // The queued next does not mix cleanly, so a challenger needs no score margin over it: it only has to beat-match
-        // without a harmonic clash and clear the floor. A challenger that would not either is never worth a reorder.
+        // A challenger must mix one tier better than the queued next (instrumental over instrumental > the outgoing's
+        // instrumental under the incoming's phrase 1 > a clean beat-matched crossfade > anything else) and clear the floor;
+        // within the best tier, the higher score wins. Never a reorder for a tie.
         val best =
             scored
-                .filter { it.first != nextId && it.second.plan?.mixesClean() == true && it.second.score >= MIN_SCORE }
-                .maxByOrNull { it.second.score }
+                .filter { it.first != nextId && it.second.score >= MIN_SCORE }
+                .mapNotNull { (id, r) -> r.plan?.quality()?.takeIf { it > nextQuality }?.let { Triple(id, r, it) } }
+                .maxWithOrNull(compareBy<Triple<String, org.simpmusic.dj.model.Recommendation, Quality>> { it.third }.thenBy { it.second.score })
+                ?.let { it.first to it.second }
         if (best == null) {
-            log("look-ahead: no upcoming track mixes cleanly either; keeping $nextId next (scores $line)")
+            log("look-ahead: no upcoming track mixes better than $nextId ($nextWhy); keeping the order (scores $line)")
             return
         }
         val bestId = best.first
@@ -156,7 +162,22 @@ class QueueLookAhead(
     }
 
     /** Beat-matched with no harmonic clash over the chosen overlap. */
-    private fun TransitionPlan.mixesClean() = kind == PlanKind.BEAT_MATCHED && Harmony.CLASH_TAG !in reason
+    /** How well a pair mixes, best last (declaration order is the ranking). */
+    internal enum class Quality(val label: String) {
+        OTHER("no clean beat-matched mix"),
+        CLEAN("a beat-matched crossfade"),
+        TAIL("the outgoing's instrumental under the incoming's phrase 1"),
+        BEST("instrumental over instrumental"),
+    }
+
+    private fun TransitionPlan.quality(): Quality {
+        val own = reason.substringBefore(" | ")
+        return when {
+            kind != PlanKind.BEAT_MATCHED || Harmony.CLASH_TAG in own || VocalClash.CLASH_TAG in own -> Quality.OTHER
+            PlanTags.STRUCTURE in own -> if (PlanTags.SECOND_TIER in own) Quality.TAIL else Quality.BEST
+            else -> Quality.CLEAN
+        }
+    }
 
     private suspend fun analysisOf(id: String, priority: AnalysisPriority, waitMs: Long): TrackAnalysis? {
         analyses.get(id)?.let { return it }

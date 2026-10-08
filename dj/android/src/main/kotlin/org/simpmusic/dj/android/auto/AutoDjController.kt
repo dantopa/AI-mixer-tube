@@ -62,9 +62,9 @@ data class AutoDjDecision(
  *
  *  1. The DJ only ever ADDS tracks, through the player's own "play next" / "add to queue". It never removes or reorders
  *     anything, so the radio's queue is always intact underneath it.
- *  2. **Radio queue** (a YouTube `RD…` radio): the DJ keeps the track right after the current one its own. Each time a
- *     track starts it inserts the best follow-up as "play next"; the radio's tracks are pushed back and only play when the
- *     DJ has nothing to offer. A track the user put next by hand is respected (never jumped over).
+ *  2. **Radio queue** (a YouTube `RD…` radio): the DJ adds nothing. YouTube's radio picks tracks of the same style far
+ *     better than tempo and energy can; `QueueLookAhead` only reorders the radio's own next tracks for the best mix.
+ *     (Until 2026-10-08 the DJ inserted its own pick as "play next" here, and filled cumbia radios with ~85 BPM reggaeton.)
  *  3. **Finite queue** (playlist, album, local list, favourites...): untouched until it is about to run out
  *     (`tracksAhead <= APPEND_WHEN_AHEAD`), then the DJ APPENDS. The app's endless queue only reacts at 1 track left, the
  *     DJ acts at 2, so with the DJ succeeding the radio is never asked for more.
@@ -138,7 +138,18 @@ class AutoDjController(
             return
         }
         lastBlockedReason = null
-        val mode = if (s.isRadio) AutoDjDecision.Action.INSERT_NEXT else AutoDjDecision.Action.APPEND
+        if (s.isRadio) {
+            // YouTube's radio already chooses tracks of the same style, and much better than tempo and energy can (build an
+            // inserted Ozuna and a reggaeton remix into a cumbia radio because they were all ~85 BPM). The DJ only reorders
+            // the radio's own upcoming tracks (QueueLookAhead) and never adds its own here.
+            val key = "radio|$current"
+            if (key != lastKey) {
+                lastKey = key
+                record(AutoDjDecision(clock(), current, null, null, AutoDjDecision.Action.SKIPPED, "YouTube's radio picks the style; the DJ only reorders its next tracks"))
+            }
+            return
+        }
+        val mode = AutoDjDecision.Action.APPEND
         when (mode) {
             AutoDjDecision.Action.APPEND -> if (s.tracksAhead > APPEND_WHEN_AHEAD) return
             else -> {
