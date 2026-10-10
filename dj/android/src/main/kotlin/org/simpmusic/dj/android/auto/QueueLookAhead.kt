@@ -173,6 +173,7 @@ class QueueLookAhead(
     private fun TransitionPlan.quality(): Quality {
         val own = reason.substringBefore(" | ")
         return when {
+            kind == PlanKind.BEAT_MATCHED && own.startsWith(org.simpmusic.dj.planner.MixMarks.TAG) -> Quality.BEST
             kind != PlanKind.BEAT_MATCHED || Harmony.CLASH_TAG in own || VocalClash.CLASH_TAG in own -> Quality.OTHER
             PlanTags.STRUCTURE in own -> if (PlanTags.SECOND_TIER in own) Quality.TAIL else Quality.BEST
             else -> Quality.CLEAN

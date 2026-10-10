@@ -43,6 +43,43 @@ class OwnerCasesTest {
         assertTrue(p.reason.contains("vocals: one at a time") || p.reason.contains("none in the overlap"), p.reason)
     }
 
+    /**
+     * Case 1 with the owner's MIX MARKS instead of their vocal ranges: the phone's detector still hears the instrumentals as
+     * voice, and the marks alone must give the mix (exit at Lo Dejaría Todo's 1:33, entry at A Prueba de Balas's 1:20, the
+     * second alone from 1:31).
+     */
+    @Test
+    fun case1FromTheOwnersMixMarksDespiteTheDetector() {
+        val marks = mapOf("cXkiDWOrRZE" to org.simpmusic.dj.planner.MixMarks(exitMs = 93_000), "7GUt3ooPJ1k" to org.simpmusic.dj.planner.MixMarks(entryMs = 80_000, soloMs = 91_000))
+        val before = org.simpmusic.dj.planner.MixMarks.provider
+        org.simpmusic.dj.planner.MixMarks.provider = { marks[it] }
+        try {
+            val p = planner.plan(load("cXkiDWOrRZE"), load("7GUt3ooPJ1k"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
+            println("case 1 (marks): exit=${p.exitPointMs} entry=${p.entryPointMs} overlap=${p.overlapMs} | ${p.reason.take(200)}")
+            assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+            assertTrue(p.reason.startsWith(org.simpmusic.dj.planner.MixMarks.TAG), p.reason)
+            assertTrue(p.exitPointMs in 92_000..95_000, "exit at the marked 1:33: ${p.exitPointMs}")
+            assertTrue(p.entryPointMs in 79_000..82_000, "entry at the marked 1:20: ${p.entryPointMs}")
+            assertTrue(p.entryPointMs + p.overlapMs in 90_000..93_500, "the second alone from the marked 1:31: ${p.entryPointMs + p.overlapMs}")
+        } finally {
+            org.simpmusic.dj.planner.MixMarks.provider = before
+        }
+    }
+
+    @Test
+    fun marksOnOnlyOneTrackChangeNothing() {
+        val before = org.simpmusic.dj.planner.MixMarks.provider
+        val plain = planner.plan(load("cXkiDWOrRZE"), load("7GUt3ooPJ1k"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
+        org.simpmusic.dj.planner.MixMarks.provider = { if (it == "cXkiDWOrRZE") org.simpmusic.dj.planner.MixMarks(exitMs = 93_000) else null }
+        try {
+            val p = planner.plan(load("cXkiDWOrRZE"), load("7GUt3ooPJ1k"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
+            assertEquals(plain.exitPointMs, p.exitPointMs)
+            assertEquals(plain.entryPointMs, p.entryPointMs)
+        } finally {
+            org.simpmusic.dj.planner.MixMarks.provider = before
+        }
+    }
+
     /** Manual: the same pair with the vocals the phone's detector stored (prints, asserts nothing). */
     @Test
     fun case1WithTheDetectorsOwnVocals() {

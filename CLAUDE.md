@@ -351,6 +351,17 @@ Service modules:
   - **The detector is the bottleneck**: YAMNet hears the first's instrumental 94.8–113 s as voice and puts the second's voice back at 86.6 s, so with the stored vocals the same pair still plans a 1-bar overlap at 110.7 s (`case1WithTheDetectorsOwnVocals` prints it). The audio could not be fetched from the build server (YouTube answers 429 there).
   - **`TrackAnalysis.vocalProfile`** (`VocalProfile`: per 480 ms frame, the log voice score to 1 decimal and the top AudioSet class) is filled by `VocalProvider.detect` (`VocalDetection`) in `CompositeAnalyzer` and in the scheduler's patch. A stored analysis without it is patched once per process, with YAMNet only. The next export lets the threshold be tuned against the owner's marks.
   - Not run on a device, not judged by ear.
+- **The owner's mix marks, and what the vocal detector can and cannot hear (2026-10-10, build aq)**: the owner's idea, "the model learns to mix from my marks". Stage 1 is the marks themselves; on-device learning is stage 2, after ~10–15 marked tracks.
+  - **`MixMarks`** (`dj/brain` `planner/`): per track an `exitMs` (where it can start to leave), an `entryMs` (where it starts when another track mixes into it) and a `soloMs` (from where it plays alone). Set per track, so any two marked tracks mix. `MixMarks.provider` is installed by `UserMixMarks` (`:djAndroid` `perfect/`, SharedPreferences `dj_user_mix_marks`).
+  - **Planner**: `planAnywhere` step −1 (`ownerMarked`) runs when the outgoing has an exit and the incoming an entry. Both are snapped to downbeats; the overlap runs to the solo mark in bars (≤ `OWNER_MAX_BARS` 32), or the requested length without one. It is planned with `Ctx.owned()`, which ignores the detector's vocals, and its reason starts `MixMarks.TAG`. With `preferPerfect` it beats Perfect and the structure hand-off. `QueueLookAhead` ranks it `Quality.BEST`. Tests: `OwnerCasesTest.case1FromTheOwnersMixMarksDespiteTheDetector` (detector vocals, owner marks → exit 93.6 s, entry 80.9 s, 4 bars) and `marksOnOnlyOneTrackChangeNothing`.
+  - **UI**: a second row under the bar counter (Settings → AI DJ → Bar counter) with Out / In / Solo pills (`DjHooks.markMix` / `clearMix` / `mixMarks`), snapped to the nearest bar line, long-press to forget. Marking the playing track's exit re-plans the prepared pair. The export carries `mixmarks.tsv`.
+  - **Measured on the build server, on audio** (the owner's 3 mp3s plus 40 CC cumbia/Latin tracks from FMA via `benjamin-paine/free-music-archive-full`; none of the audio is in the repo):
+    - **YAMNet's voice score barely separates cumbia voice from instrumental**: −3.5 to −5 everywhere, with the level shifting per track.
+    - **Demucs 4.1 `htdemucs`** (42 M params) separates well: it agrees with the owner on "A Prueba de Balas". It runs at 0.5× real time on one server core.
+    - **MDX-Net `Kim_Vocal_2`** (67 MB) is no cheaper: 0.67× real time on one core. Both are ruled out for the phone (heat).
+    - **A logistic regression on YAMNet's 1024-d embeddings with Demucs labels**: 8 s windows, instrumental caught 74 % → 78 % at the same 86 % precision. Too little to ship.
+    - **The owner's "instrumental" is not "no voice"**: cumbia breaks carry 2–3 s shouts or coros at band level. With a −12 dB voice-to-band rule, Demucs finds no 8 s instrumental window in any of the owner's 3 tracks.
+  - Not run on a device, not judged by ear.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
@@ -1134,6 +1145,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-10-08
+**Last updated**: 2026-10-10
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors

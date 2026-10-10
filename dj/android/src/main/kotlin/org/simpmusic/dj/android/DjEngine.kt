@@ -229,6 +229,15 @@ interface DjHooks {
     /** Forget the owner's phrase mark for the playing track (back to detection). */
     fun clearPhrase() {}
 
+    /** One of the owner's mix marks for the playing track at [positionMs], snapped to the nearest bar line. */
+    fun markMix(mark: org.simpmusic.dj.android.perfect.MixMark, positionMs: Long): Long? = null
+
+    /** Forget one of the owner's mix marks for the playing track. */
+    fun clearMix(mark: org.simpmusic.dj.android.perfect.MixMark) {}
+
+    /** The owner's mix marks of the playing track, null when it has none. */
+    fun mixMarks(): org.simpmusic.dj.planner.MixMarks? = null
+
     /** Playback position of the current track (ms), for countdowns. */
     val positionMs: Long get() = 0L
 
@@ -396,6 +405,42 @@ class DjEngine(
         val id = pairFrom ?: return
         org.simpmusic.dj.android.perfect.UserPhrases.clear(id)
         _debug.update { it.copy(lastOutcome = "phrases back to automatic") }
+    }
+
+    override fun markMix(mark: org.simpmusic.dj.android.perfect.MixMark, positionMs: Long): Long? {
+        val id = pairFrom ?: return null
+        val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
+        val r = currentRefined()
+        val beats = r?.beatTimesMs?.value
+        val downs = r?.downbeatBeatIndices?.value
+        // a mix point sits on a bar line; without bars yet the raw time is kept (the planner snaps it again)
+        val t = if (beats.isNullOrEmpty() || downs.isNullOrEmpty()) heard else downs.map { beats[it].toLong() }.minBy { kotlin.math.abs(it - heard) }
+        org.simpmusic.dj.android.perfect.UserMixMarks.set(id, mark, t, "marked at $heard ms")
+        _debug.update { it.copy(lastOutcome = "mix mark: ${mark.key} at %d:%02d".format(t / 60_000, t / 1000 % 60)) }
+        // the exit of the PLAYING track changes the plan of the pair being prepared: plan it again (unless it is mixing)
+        if (mark == org.simpmusic.dj.android.perfect.MixMark.EXIT) replanForMarks()
+        return t
+    }
+
+    override fun clearMix(mark: org.simpmusic.dj.android.perfect.MixMark) {
+        val id = pairFrom ?: return
+        org.simpmusic.dj.android.perfect.UserMixMarks.clear(id, mark)
+        _debug.update { it.copy(lastOutcome = "mix mark ${mark.key} forgotten") }
+        if (mark == org.simpmusic.dj.android.perfect.MixMark.EXIT) replanForMarks()
+    }
+
+    override fun mixMarks(): org.simpmusic.dj.planner.MixMarks? = pairFrom?.let { org.simpmusic.dj.android.perfect.UserMixMarks.get(it) }
+
+    private fun replanForMarks() {
+        val from = pairFrom ?: return
+        val to = pairTo ?: return
+        if (_debug.value.isMixing || pairKey == consumedKey) return
+        DjLog.i(TAG, "mix marks changed: re-planning $from -> $to")
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        mixNowKey = null
+        startPipeline(from, to)
     }
 
     /** Taps of the current session: (beat index, tap time). */

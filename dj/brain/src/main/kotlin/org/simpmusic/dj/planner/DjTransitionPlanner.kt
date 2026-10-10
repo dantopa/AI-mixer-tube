@@ -21,6 +21,7 @@ import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.TransitionPlanner
 import org.simpmusic.dj.model.Trust
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -58,12 +59,15 @@ class DjTransitionPlanner : TransitionPlanner {
                 constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
                     // The songs' own structure (StructureHandoff) comes first: a 1-on-1 elsewhere in the track would cut a
                     // sung section that the hand-off leaves whole. Perfect is next, the regular scored plan last.
+                    // The owner's own marks come before anything the planner could find by itself.
+                    val regularFirst = planUnsafe(from, to, s, earliest, latest)
+                    if (regularFirst.reason.startsWith(MixMarks.TAG)) return regularFirst
                     val p = planPerfect(from, to, s, earliest, latest, keepTiming = true)
                     val perfectOk = p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)
                     if (perfectOk && StructureHandoff.TAG in p.reason) {
                         p
                     } else {
-                        val regular = planUnsafe(from, to, s, earliest, latest)
+                        val regular = regularFirst
                         when {
                             regular.reason.startsWith(StructureHandoff.TAG) -> regular
                             perfectOk -> p
@@ -110,14 +114,19 @@ class DjTransitionPlanner : TransitionPlanner {
         val settings: DjSettings, val earliest: Long, val latest: Long, val barsMode: Boolean, val conf: Float, val notes: List<String>,
         val key: KeyDecision, val requestedUnits: Int, val minUnits: Int, val softFloor: Int,
         val perfect: Boolean = false,
+        /** The owner placed this mix by ear: the detector's vocals must not shorten it. */
+        val ignoreVocals: Boolean = false,
     ) {
+        /** The same pair, planned as the owner's marks say (no vocal check). */
+        fun owned() = Ctx(from, to, out, inc, settings, earliest, latest, barsMode, conf, notes, key, requestedUnits, minUnits, softFloor, perfect, ignoreVocals = true)
+
         /** Chroma of each track for the LOCAL harmonic fit of an overlap (null for analyses without structure frames). */
         val hOut: Harmony.Profile? = Harmony.profile(from)
         val hIn: Harmony.Profile? = Harmony.profile(to)
 
         /** Where each track has a voice (null for analyses without vocal detection). */
-        val vOut = VocalClash.ranges(from)
-        val vIn = VocalClash.ranges(to)
+        val vOut = if (ignoreVocals) null else VocalClash.ranges(from)
+        val vIn = if (ignoreVocals) null else VocalClash.ranges(to)
 
         val fromId: String get() = out.id
         val toId: String get() = inc.id
@@ -336,6 +345,9 @@ class DjTransitionPlanner : TransitionPlanner {
         //    when it comes out at its full length with no voice over voice.
         // The hand-off may leave earlier than the regular minimum played: with the DJ on, a mix on the song's structure
         // beats hearing the whole song (the owner). Never before the constraints' earliest exit.
+        // -1. the owner's own marks: leave the outgoing where they marked its exit, enter the incoming at its marked entry,
+        //     and overlap until its marked solo point. Never before the constraints' earliest exit.
+        ownerMarked(c, max(c.earliest, (4 * beat + 250.0).toLong()), upper)?.let { return it }
         val lowerS = max(max(c.earliest, min((STRUCTURE_MIN_PLAYED_FRACTION * out.audibleEndMs).toLong(), STRUCTURE_MIN_PLAYED_MS)), (4 * beat + 250.0).toLong())
         for (h in StructureHandoff.find(out, inc, c.vOut, c.vIn, lowerS, upper, c.requestedUnits.coerceAtLeast(StructureHandoff.BAR_CHOICES.last())).take(MAX_STRUCTURE_TRIES)) {
             if (!c.barsMode) break
@@ -470,6 +482,34 @@ class DjTransitionPlanner : TransitionPlanner {
     private fun TransitionPlan.withReason(prefix: String): TransitionPlan = copy(reason = prefix + reason)
 
     /** Median beat interval right after (or, when there is none, around) [t]: the local tempo where a mix would happen. */
+    /** The downbeat of [c] nearest [t] within half a bar, or null. */
+    private fun nearestDownbeat(c: TrackContext, t: Long): Long? {
+        val d = c.downbeatTimes
+        if (d.isEmpty()) return null
+        val best = d.minBy { abs(it - t) }
+        return best.takeIf { abs(it - t) <= c.beatsPerBar * c.medianBeatMs / 2 }
+    }
+
+    private fun ownerMarked(c: Ctx, lower: Long, upper: Long): TransitionPlan? {
+        if (!c.barsMode) return null
+        val markOut = MixMarks.of(c.from.videoId)?.exitMs ?: return null
+        val markIn = MixMarks.of(c.to.videoId) ?: return null
+        val out = c.out
+        val inc = c.inc
+        val exit = nearestDownbeat(out, markOut) ?: return null
+        val entry = nearestDownbeat(inc, markIn.entryMs ?: return null) ?: return null
+        if (exit < lower || exit > upper) return null
+        val barIn = inc.beatsPerBar * inc.medianBeatMs
+        val bars = markIn.soloMs?.let { ((it - entry) / barIn).roundToInt() }?.takeIf { it >= 1 }?.coerceAtMost(OWNER_MAX_BARS) ?: c.requestedUnits
+        val t = chooseTempo(localPeriod(out, exit, ahead = true), localPeriod(inc, entry, ahead = true), c.settings.maxTempoBend.toDouble()) ?: return null
+        val a = beatAttempt(c.owned(), Pick(exit, "downbeat", false), Pick(entry, "downbeat", false), t, units = bars)
+        val p = a.plan ?: return null
+        val solo = markIn.soloMs?.let { ", solo from %.1f s".format(it / 1000.0) } ?: ""
+        return p.copy(reason = p.reason.replace(CLAMPED_NOTE, "")).withReason(
+            MixMarks.TAG + "exit %.1f s, entry %.1f s%s; %d bars; ".format(exit / 1000.0, entry / 1000.0, solo, bars),
+        )
+    }
+
     private fun localPeriod(c: TrackContext, t: Long, ahead: Boolean): Double {
         if (ahead) c.medianIbiIn(t, t + 24_000L).takeIf { it > 0 }?.let { return it }
         return c.medianIbiIn(t - 24_000L, t + 24_000L).takeIf { it > 0 } ?: c.medianBeatMs
@@ -1175,6 +1215,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val MAX_STRUCTURE_TRIES = 8
         private const val STRUCTURE_MIN_PLAYED_FRACTION = 0.3
         private const val STRUCTURE_MIN_PLAYED_MS = 40_000L
+        /** Longest overlap the owner's marks may ask for. */
+        const val OWNER_MAX_BARS = 32
+
         private val CLAMPED_NOTE = Regex(""" \(clamped from \d+(, the beat grid was irregular over a longer overlap)?\)""")
         private val DEBUG_STRUCTURE = System.getenv("DJ_DEBUG_STRUCTURE") != null
         /** Clash treatment: the high-pass that keeps only hats and top of a deck while the other one carries the harmony. */

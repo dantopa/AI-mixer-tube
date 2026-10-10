@@ -694,4 +694,7 @@
     <string name="lt_block">Bloquear permanentemente</string>
     <string name="lt_block_desc">No pueden volver a unirse, incluso con el código</string>
     <string name="lt_waiting_approval">Esperando al host</string>
+    <string name="dj_mark_exit">Salida</string>
+    <string name="dj_mark_entry">Entrada</string>
+    <string name="dj_mark_solo">Solo</string>
 </resources>

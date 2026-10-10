@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -69,6 +70,9 @@ import simpmusic.composeapp.generated.resources.dj_chip_last
 import simpmusic.composeapp.generated.resources.dj_chip_mix_playing
 import simpmusic.composeapp.generated.resources.dj_chip_mix_playing_simple
 import simpmusic.composeapp.generated.resources.dj_chip_mixing
+import simpmusic.composeapp.generated.resources.dj_mark_entry
+import simpmusic.composeapp.generated.resources.dj_mark_exit
+import simpmusic.composeapp.generated.resources.dj_mark_solo
 import simpmusic.composeapp.generated.resources.dj_mix_now
 import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
 import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
@@ -100,7 +104,8 @@ actual fun DjStatusChip(modifier: Modifier, castRemote: Boolean) {
     val scope = rememberCoroutineScope()
     val on = enabled.enabled
 
-    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Surface(
             modifier = Modifier.toggleable(value = on, role = Role.Switch, onValueChange = { v -> scope.launch { settings.setEnabled(v) } }),
             shape = CircleShape,
@@ -126,6 +131,50 @@ actual fun DjStatusChip(modifier: Modifier, castRemote: Boolean) {
             }
         }
         if (on) DjStatusLine(showCounter)
+    }
+    // The owner's mix marks, with the other correction tools: "Out" where this track can start to leave, "In" where it
+    // starts when another one mixes into it, "Solo" from where it plays alone. Lit when set; long-press forgets.
+    if (on && showCounter) DjMixMarksRow()
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DjMixMarksRow() {
+    val hooks = koinInject<DjHooks>()
+    val handler = koinInject<MediaPlayerHandler>()
+    val media by handler.simpleMediaState.collectAsStateWithLifecycle()
+    val dataStore = koinInject<DataStoreManager>()
+    val outputDelayMs by dataStore.lyricsOffsetMs.collectAsStateWithLifecycle(0)
+    val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
+    val heard = (positionMs - outputDelayMs).coerceAtLeast(0L)
+    // re-read after every tap (the marks live in the engine's store, not in Compose state)
+    val debug by hooks.debug.collectAsStateWithLifecycle()
+    var version by remember { mutableStateOf(0) }
+    val marks = remember(version, debug.fromId) { hooks.mixMarks() }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        for ((mark, label, at) in listOf(
+            Triple(org.simpmusic.dj.android.perfect.MixMark.EXIT, stringResource(Res.string.dj_mark_exit), marks?.exitMs),
+            Triple(org.simpmusic.dj.android.perfect.MixMark.ENTRY, stringResource(Res.string.dj_mark_entry), marks?.entryMs),
+            Triple(org.simpmusic.dj.android.perfect.MixMark.SOLO, stringResource(Res.string.dj_mark_solo), marks?.soloMs),
+        )) {
+            Surface(
+                modifier = Modifier.combinedClickable(
+                    onClick = { if (hooks.markMix(mark, heard) != null) version++ },
+                    onLongClick = { hooks.clearMix(mark); version++ },
+                ),
+                shape = CircleShape,
+                color = if (at != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+            ) {
+                Text(
+                    text = if (at != null) "$label %d:%02d".format(at / 60_000, at / 1000 % 60) else label,
+                    style = typo().labelMedium,
+                    fontWeight = if (at != null) FontWeight.Bold else null,
+                    color = Color.White.copy(alpha = 0.9f),
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                )
+            }
+        }
     }
 }
 

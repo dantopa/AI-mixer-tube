@@ -303,6 +303,8 @@ private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, name
             put("taps.tsv", org.simpmusic.dj.android.perfect.UserDownbeats.all().entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
             // The owner's phrase marks (videoId -> source ms): ground truth for the phrase lines.
             put("phrases.tsv", org.simpmusic.dj.android.perfect.UserPhrases.all().entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
+            // The owner's mix marks (videoId, exit, entry, solo; empty = not marked): labels for learning to mix.
+            put("mixmarks.tsv", org.simpmusic.dj.android.perfect.UserMixMarks.all().entries.joinToString("\n") { (id, m) -> "$id\t${m.exitMs ?: ""}\t${m.entryMs ?: ""}\t${m.soloMs ?: ""}" }.toByteArray())
             // One phasegram per analysis that carries the bar-phase evidence: does the "1" sit where the network hears it?
             File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
                 runCatching {
