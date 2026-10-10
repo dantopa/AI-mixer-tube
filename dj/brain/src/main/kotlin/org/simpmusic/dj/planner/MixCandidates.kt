@@ -126,10 +126,11 @@ internal object MixCandidates {
      * Exit candidates in [lowerMs, upperMs]: every phrase start (else downbeat, else beat) of the outgoing track, plus
      * the classic end-of-track pick when it is allowed. Each carries the features the pair score needs.
      */
-    fun exits(out: TrackContext, lowerMs: Long, upperMs: Long, endPick: DjTransitionPlanner.Pick?, overlapWantedMs: Double, minPlayedFraction: Float): List<ExitCand> {
+    fun exits(out: TrackContext, lowerMs: Long, upperMs: Long, endPick: DjTransitionPlanner.Pick?, overlapWantedMs: Double, minPlayedFraction: Float, onlyAt: DjTransitionPlanner.Pick? = null): List<ExitCand> {
         val picks = ArrayList<DjTransitionPlanner.Pick>()
         val bar = out.beatsPerBar * out.medianBeatMs
-        val levels = gridLevels(out)
+        val levels = if (onlyAt != null) emptyList() else gridLevels(out)
+        if (onlyAt != null) picks += onlyAt
         for ((idx, lv) in levels.withIndex()) {
             val (name, all) = lv
             var inRange = all.filter { it in lowerMs..upperMs }
@@ -139,7 +140,7 @@ internal object MixCandidates {
             for (t in thin(inRange, MixScoring.MAX_EXIT_CANDIDATES)) picks += DjTransitionPlanner.Pick(t, name, false)
             break
         }
-        if (endPick != null && picks.none { abs(it.timeMs - endPick.timeMs) < 50 } && endPick.timeMs in lowerMs..upperMs) picks += endPick
+        if (onlyAt == null && endPick != null && picks.none { abs(it.timeMs - endPick.timeMs) < 50 } && endPick.timeMs in lowerMs..upperMs) picks += endPick
         val tol = 1.5 * bar
         val end = max(1L, out.audibleEndMs).toDouble()
         val list = ArrayList<ExitCand>(picks.size)
@@ -198,12 +199,13 @@ internal object MixCandidates {
     // ------------------------------------------------------------------------------------------ entries
 
     /** Entry candidates: phrase starts (else downbeat, else beat) from the first audible sound to ~60% of the incoming track. */
-    fun entries(inc: TrackContext, minAfterMs: Double, firstPick: DjTransitionPlanner.Pick?): List<EntryCand> {
+    fun entries(inc: TrackContext, minAfterMs: Double, firstPick: DjTransitionPlanner.Pick?, onlyAt: DjTransitionPlanner.Pick? = null): List<EntryCand> {
         val tol = (inc.medianBeatMs * 0.5).toLong()
         val lo = inc.firstAudibleMs - tol
         val hi = (inc.durationMs * MixScoring.ENTRY_MAX_FRACTION).toLong()
         val picks = ArrayList<DjTransitionPlanner.Pick>()
-        val levels = gridLevels(inc)
+        val levels = if (onlyAt != null) emptyList() else gridLevels(inc)
+        if (onlyAt != null) picks += onlyAt
         for ((idx, lv) in levels.withIndex()) {
             val (name, all) = lv
             var inRange = all.filter { it >= lo && it <= hi && inc.durationMs - it >= minAfterMs }
@@ -213,7 +215,7 @@ internal object MixCandidates {
             for (t in thin(inRange, MixScoring.MAX_ENTRY_CANDIDATES)) picks += DjTransitionPlanner.Pick(t, name, false)
             break
         }
-        if (firstPick != null && picks.none { abs(it.timeMs - firstPick.timeMs) < 50 }) picks += firstPick
+        if (onlyAt == null && firstPick != null && picks.none { abs(it.timeMs - firstPick.timeMs) < 50 }) picks += firstPick
         val bar = inc.beatsPerBar * inc.medianBeatMs
         val tolS = 1.0 * bar
         val list = ArrayList<EntryCand>(picks.size)

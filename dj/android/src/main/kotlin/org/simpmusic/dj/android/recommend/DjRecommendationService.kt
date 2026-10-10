@@ -91,7 +91,7 @@ class DjRecommendationService(
                     track = entry.track,
                     score = rec.score,
                     camelot = entry.analysis.key?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.KEY }?.value?.camelot(),
-                    bpm = entry.analysis.bpm?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.BPM }?.value,
+                    bpm = org.simpmusic.dj.analysis.AnalysisRefiner.cached(entry.analysis).bpm?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.BPM }?.value,
                     energy = meanEnergy(entry.analysis),
                     reason = rec.reason,
                     breakdown = rec.breakdown,
@@ -100,7 +100,7 @@ class DjRecommendationService(
             }
         return DjNextResult.Ready(
             currentCamelot = current.key?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.KEY }?.value?.camelot(),
-            currentBpm = current.bpm?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.BPM }?.value,
+            currentBpm = org.simpmusic.dj.analysis.AnalysisRefiner.cached(current).bpm?.takeIf { it.confidence >= org.simpmusic.dj.model.Trust.BPM }?.value,
             items = items,
             poolSize = entries.size,
         )

@@ -125,7 +125,7 @@ object DjMixViewBuilder {
 
         return DjMixDeck(
             title = title,
-            bpm = analysis?.bpm?.value,
+            bpm = (grid ?: analysis)?.bpm?.value,
             key = analysis?.key?.value?.camelot(),
             hasEnergy = hasEnergy,
             energy = energy.asList(),

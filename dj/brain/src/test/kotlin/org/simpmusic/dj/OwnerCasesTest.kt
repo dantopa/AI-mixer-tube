@@ -3,6 +3,8 @@ package org.simpmusic.dj
 import kotlinx.serialization.json.Json
 import org.simpmusic.dj.model.*
 import org.simpmusic.dj.planner.DjTransitionPlanner
+import org.simpmusic.dj.planner.MixMarks
+import org.simpmusic.dj.planner.TrackContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -66,18 +68,66 @@ class OwnerCasesTest {
         }
     }
 
+    /** A marked exit is honoured on its own: the owner marked where the outgoing may leave, whatever comes next. */
     @Test
-    fun marksOnOnlyOneTrackChangeNothing() {
-        val before = org.simpmusic.dj.planner.MixMarks.provider
-        val plain = planner.plan(load("cXkiDWOrRZE"), load("7GUt3ooPJ1k"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
-        org.simpmusic.dj.planner.MixMarks.provider = { if (it == "cXkiDWOrRZE") org.simpmusic.dj.planner.MixMarks(exitMs = 93_000) else null }
-        try {
+    fun aMarkedExitAloneIsHonoured() {
+        withMarks(mapOf("cXkiDWOrRZE" to MixMarks(exitMs = 93_000))) {
             val p = planner.plan(load("cXkiDWOrRZE"), load("7GUt3ooPJ1k"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
-            assertEquals(plain.exitPointMs, p.exitPointMs)
-            assertEquals(plain.entryPointMs, p.entryPointMs)
-        } finally {
-            org.simpmusic.dj.planner.MixMarks.provider = before
+            println("exit only: exit=${p.exitPointMs} entry=${p.entryPointMs} | ${p.reason.take(200)}")
+            assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+            assertTrue(p.reason.startsWith(MixMarks.TAG), p.reason)
+            assertTrue(p.exitPointMs in 92_000..95_000, "exit at the marked 1:33: ${p.exitPointMs}")
         }
+    }
+
+    /**
+     * Owner export of 2026-10-10: "Carita Triste" (OZGBG-GUDSo) exit marked at 1:00, "Ahora Estoy Solo" unmarked. The DJ left at
+     * 0:48 because a single mark was ignored.
+     */
+    @Test
+    fun caritaTristeLeavesAtItsMarkedExitIntoAnUnmarkedTrack() {
+        withMarks(exportMarks) {
+            val p = planner.plan(load("OZGBG-GUDSo"), load("Lw2aYkmrQcM"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
+            println("carita -> ahora: exit=${p.exitPointMs} entry=${p.entryPointMs} overlap=${p.overlapMs} | ${p.reason.take(300)}")
+            assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+            assertTrue(p.reason.startsWith(MixMarks.TAG), p.reason)
+            assertTrue(p.exitPointMs in 59_000..61_500, "exit at the marked 1:00: ${p.exitPointMs}")
+        }
+    }
+
+    /** Same export: "No Fuimos" (exit 1:29) into "Carita Triste" (entry 0:12, alone from 0:36), both marked. */
+    @Test
+    fun noFuimosIntoCaritaTristeFromBothMarks() {
+        withMarks(exportMarks) {
+            val p = planner.plan(load("lb5KOCVZB_E"), load("OZGBG-GUDSo"), settings, PlanConstraints(preferPerfect = true, earliestExitMs = 30_000))
+            println("no fuimos -> carita: exit=${p.exitPointMs} entry=${p.entryPointMs} overlap=${p.overlapMs} | ${p.reason.take(300)}")
+            assertEquals(PlanKind.BEAT_MATCHED, p.kind)
+            assertTrue(p.reason.startsWith(MixMarks.TAG), p.reason)
+            assertTrue(p.exitPointMs in 88_000..90_500, "exit at the marked 1:29: ${p.exitPointMs}")
+            assertTrue(p.entryPointMs in 11_500..13_000, "entry at the marked 0:12: ${p.entryPointMs}")
+            assertTrue(p.entryPointMs + p.overlapMs in 34_000..38_500, "Carita alone from the marked 0:36: ${p.entryPointMs + p.overlapMs}")
+        }
+    }
+
+    /** Carita Triste's own tempo after refinement: the owner hears a normal cumbia, the stored DSP field says 134. */
+    @Test
+    fun caritaTristeIsAnOrdinaryCumbiaTempoOnceRefined() {
+        val a = org.simpmusic.dj.analysis.AnalysisRefiner.cached(load("OZGBG-GUDSo"))
+        val t = TrackContext(a)
+        println("carita: field ${a.bpm?.value} grid ${t.gridBpm} beatsPerBar ${t.beatsPerBar}")
+        assertTrue(t.gridBpm in 70.0..100.0, "grid ${t.gridBpm}")
+    }
+
+    private val exportMarks = mapOf(
+        "lb5KOCVZB_E" to MixMarks(exitMs = 89_000, entryMs = 10_800, soloMs = 35_060),
+        "cXkiDWOrRZE" to MixMarks(exitMs = 93_580, entryMs = 2_146, soloMs = 25_009),
+        "OZGBG-GUDSo" to MixMarks(exitMs = 60_260, entryMs = 12_280, soloMs = 36_280),
+    )
+
+    private fun withMarks(m: Map<String, MixMarks>, block: () -> Unit) {
+        val before = MixMarks.provider
+        MixMarks.provider = { m[it] }
+        try { block() } finally { MixMarks.provider = before }
     }
 
     /** Manual: the same pair with the vocals the phone's detector stored (prints, asserts nothing). */

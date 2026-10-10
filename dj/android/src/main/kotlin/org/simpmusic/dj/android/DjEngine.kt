@@ -921,8 +921,9 @@ class DjEngine(
                 kind = plan.kind,
                 reason = plan.reason,
                 mixBpm = plan.mixBpm,
-                fromBpm = from.bpm?.value,
-                toBpm = to.bpm?.value,
+                // the tempo of the repaired grid the plan used, not the raw DSP field (which reads cumbia's tresillo as 134)
+                fromBpm = AnalysisRefiner.cached(from).bpm?.value,
+                toBpm = AnalysisRefiner.cached(to).bpm?.value,
                 fromKey = from.key?.value?.camelot(),
                 toKey = to.key?.value?.camelot(),
                 confidence = plan.confidence,
