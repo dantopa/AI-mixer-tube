@@ -41,7 +41,20 @@ object VocalClash {
     }
 
     /** Vocal ranges of [a], sorted; null when the analysis has no vocal detection (made before build ak). */
-    fun ranges(a: TrackAnalysis): List<TimeRange>? = a.vocals?.value?.sortedBy { it.startMs }
+    /**
+     * The detected vocal ranges, or null (= unknown) when the detector calls [UNTRUSTED_COVERAGE] or more of the track voice:
+     * on the owner's cumbias YAMNet hears the band as voice (detected coverage 65-98 %, median 89 %, across 33 tracks of
+     * the build-aq export), and acting on that cut nearly every overlap to one bar.
+     */
+    fun ranges(a: TrackAnalysis): List<TimeRange>? {
+        val r = a.vocals?.value?.sortedBy { it.startMs } ?: return null
+        val dur = a.durationMs.takeIf { it > 0 } ?: return r
+        val sung = r.sumOf { (minOf(it.endMs, dur) - maxOf(it.startMs, 0L)).coerceAtLeast(0L) }
+        return r.takeIf { sung < UNTRUSTED_COVERAGE * dur }
+    }
+
+    /** Detected voice over this share of a track means the detector cannot tell the voice from the band there. */
+    const val UNTRUSTED_COVERAGE = 0.90
 
     private fun inside(r: List<TimeRange>, t: Long): Boolean {
         var lo = 0

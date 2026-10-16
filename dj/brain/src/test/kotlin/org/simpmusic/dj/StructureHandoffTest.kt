@@ -72,7 +72,8 @@ class StructureHandoffTest {
     fun anIncomingThatSingsAtOnceStartsOverTheOutgoingsInstrumental() {
         // no intro: the incoming sings from 0.5 s; its first 4 bars go over the last 4 of the outgoing's 8-bar bridge
         val out = analysis("out", 300, listOf(TimeRange(4_000, 96_000), TimeRange(112_000, 140_000)))
-        val inc = analysis("in", 300, listOf(TimeRange(500, 140_000)))
+        // (sung until 130 s of 150: a detection covering 90 % or more of the track is ignored as untrustworthy)
+        val inc = analysis("in", 300, listOf(TimeRange(500, 130_000)))
         val plan = planner.plan(out, inc, settings)
         println("sings at once: ${plan.reason}")
         assertTrue(plan.reason.startsWith("STRUCTURE"), plan.reason)

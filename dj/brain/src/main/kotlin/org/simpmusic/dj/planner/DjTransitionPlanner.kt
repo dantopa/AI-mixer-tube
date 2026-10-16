@@ -522,7 +522,9 @@ class DjTransitionPlanner : TransitionPlanner {
                         )
                     }
                 if (isVoiceOverVoice(done)) {
-                    if (sung == null) sung = done
+                    // a real overlap with two voices beats a 1-2 bar one at the very end of the track, which only scores
+                    // better because less of it can clash (the owner: "overlap of almost nothing")
+                    if (sung == null || (tooShort(sung!!) && !tooShort(done))) sung = done
                 } else if (!tooShort(done)) {
                     return done
                 } else if (short == null) {
@@ -531,8 +533,10 @@ class DjTransitionPlanner : TransitionPlanner {
             }
             if (lastFail == null) lastFail = a.fail
         }
+        if (c.perfect) return short // a perfect mix is beat-matched or nothing, and never voice over voice
+        // order of the fallbacks: a real overlap with voices, then a short one without, then a short one with voices
+        sung?.takeIf { !tooShort(it) }?.let { return it }
         short?.let { return it }
-        if (c.perfect) return null // a perfect mix is beat-matched or nothing, and never voice over voice
         sung?.let { return it }
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
         val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
@@ -686,21 +690,24 @@ class DjTransitionPlanner : TransitionPlanner {
         val harmony = Harmony.fit(c.hOut, exitMs, (desiredUnits * unit * rateOut).toLong(), c.hIn, entryMs, (desiredUnits * unit * rateIn).toLong())
         val clash = harmony?.clash ?: c.key.clash
         // (a mix the owner placed on both tracks keeps its length: the EQ swap lanes still keep one tonal layer at a time)
-        if (clash && !c.ignoreVocals) units = min(units, max(minUnits, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
+        // The harmony and voice rules may shorten the overlap, never below [cutFloor]: half of what was asked, at least
+        // 4 bars (16 beats). Cutting to a single bar made every mix a 2-3 s crossfade (owner, 16 bars asked: median 2 s).
+        val cutFloor = min(units, max(desiredUnits / 2, if (barsMode) CUT_FLOOR_BARS else CUT_FLOOR_BARS * out.beatsPerBar))
+        if (clash && !c.ignoreVocals) units = min(units, max(cutFloor, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
         // Voice over voice: end the overlap (whole units) before the second singer joins, so the outgoing deck is gone when
         // the incoming voice starts. When the clash starts too early for even the shortest overlap it stays, and is said.
         var vocalNote: String? = null
         VocalClash.of(c.vOut, exitMs, rateOut, c.vIn, entryMs, rateIn, (units * unit).toLong())?.let { v ->
             if (!v.clash) return@let
             val fit = floor(v.firstMs / unit + UNIT_EPS).toInt()
-            if (fit >= minUnits && fit < units) {
+            if (fit >= cutFloor && fit < units) {
                 vocalNote = "overlap ended before the second voice (${units} -> $fit ${if (barsMode) "bars" else "beats"})"
                 units = fit
-            } else if (fit < minUnits && units > minUnits) {
-                // both sing from the first beat of the overlap: keep it as short as a mix can be, so it is a moment and not
-                // 20 s of two singers (the planner only lands here when no other point avoids it)
-                vocalNote = "both sing from the start of the overlap, cut to the shortest (${units} -> $minUnits ${if (barsMode) "bars" else "beats"})"
-                units = minUnits
+            } else if (fit < cutFloor && units > cutFloor) {
+                // the second voice comes in early: keep the shortest overlap that still is a mix (the incoming is quiet
+                // over its first part); the planner only lands here when no other point avoids it
+                vocalNote = "the second voice comes in early, cut to ${cutFloor} ${if (barsMode) "bars" else "beats"} (from ${units})"
+                units = cutFloor
             }
         }
         if (units < minUnits) {
@@ -1299,6 +1306,9 @@ class DjTransitionPlanner : TransitionPlanner {
         private const val BEAT_MODE_MAX_BARS = 4
         private const val PHRASE_BEATS = 16
         private const val CLASH_MAX_MS = 9000.0
+
+        /** The harmony / voice rules never cut an overlap below this many bars (or half of what was asked, if more). */
+        private const val CUT_FLOOR_BARS = 4
         /** Structure hand-offs tried before the scored pairs. */
         private const val MAX_STRUCTURE_TRIES = 8
         private const val STRUCTURE_MIN_PLAYED_FRACTION = 0.3

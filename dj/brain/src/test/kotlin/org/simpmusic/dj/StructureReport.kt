@@ -20,13 +20,14 @@ class StructureReport {
         val all = (File(dir, "analysis").listFiles() ?: emptyArray()).sortedBy { it.name }.mapNotNull { f ->
             runCatching { json.decodeFromString(TrackAnalysis.serializer(), f.readText()) }.getOrNull()
         }.filter { it.vocals != null }
-        val settings = DjSettings(enabled = true, allowEchoOut = false, allowKeyShift = false, maxTempoBend = 0.06f)
+        val settings = DjSettings(enabled = true, allowEchoOut = false, allowKeyShift = false, maxTempoBend = 0.06f, overlapBars = System.getenv("STRUCTURE_BARS")?.toIntOrNull() ?: 8)
         val planner = DjTransitionPlanner()
         var structure = 0
         var clash = 0
         var bm = 0
         var atOnce = 0
         var short = 0
+        var exitsLate = 0
         val overlaps = ArrayList<Long>()
         for (a in all) for (b in all) {
             if (a === b) continue
@@ -34,7 +35,7 @@ class StructureReport {
             if (p.kind == PlanKind.BEAT_MATCHED) bm++
             if ("STRUCTURE" in p.reason) structure++
             if ("second tier" in p.reason) atOnce++
-            if (p.kind == PlanKind.BEAT_MATCHED) { overlaps += p.overlapMs; if (p.overlapMs < 8_000) short++ }
+            if (p.kind == PlanKind.BEAT_MATCHED) { overlaps += p.overlapMs; if (p.overlapMs < 8_000) short++; if (p.exitPointMs >= 0.9 * a.durationMs) exitsLate++ }
             // only the chosen plan's own reason, not the refused Perfect attempt appended after " | "
             if ("voice over voice" in p.reason.substringBefore(" | ")) { clash++; println("VOICE OVER VOICE: " + p.reason.substringBefore(" | ")) }
             val oc = org.simpmusic.dj.planner.TrackContext(org.simpmusic.dj.analysis.AnalysisRefiner.cached(a))
@@ -44,6 +45,6 @@ class StructureReport {
             println("%-22s -> %-22s %s %s".format(titles[a.videoId]?.take(22) ?: a.videoId, titles[b.videoId]?.take(22) ?: b.videoId, p.kind, p.reason.take(230)))
         }
         val n = all.size * (all.size - 1)
-        println("pairs $n: beat-matched $bm, structure hand-offs $structure (second tier $atOnce), voice over voice $clash, overlaps under 8 s $short, median overlap ${overlaps.sorted().getOrNull(overlaps.size / 2)?.div(1000)} s")
+        println("pairs $n: beat-matched $bm, structure hand-offs $structure (second tier $atOnce), voice over voice $clash, overlaps under 8 s $short, overlap p25/median/p75 ${listOf(4, 2).map { overlaps.sorted().getOrNull(overlaps.size / it)?.div(1000) }.let { "${it[0]}/${it[1]}" }}/${overlaps.sorted().getOrNull(overlaps.size * 3 / 4)?.div(1000)} s, exit at >= 90 % of the track ${exitsLate}")
     }
 }

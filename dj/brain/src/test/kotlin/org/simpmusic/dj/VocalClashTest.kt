@@ -46,14 +46,35 @@ class VocalClashTest {
 
     @Test
     fun anUnavoidableSecondVoiceEndsTheOverlap() {
-        // both sing all the way, except the incoming's first 8 s (4 bars): the overlap must end there
-        val out = analysis("out", vocals = listOf(TimeRange(0, 100_000)))
-        val inc = analysis("in", vocals = listOf(TimeRange(8_000, 100_000)))
+        // both sing nearly all the way (under the 90 % a detection is trusted to), except the incoming's first 8 s (4 bars):
+        // the overlap must end there
+        val out = analysis("out", vocals = listOf(TimeRange(12_000, 101_000)))
+        val inc = analysis("in", vocals = listOf(TimeRange(8_000, 97_000)))
         val plan = planner.plan(out, inc, settings)
         println("unavoidable: ${plan.reason}")
         assertEquals(PlanKind.BEAT_MATCHED, plan.kind)
         assertTrue(plan.overlapMs <= 8_000, "overlap ${plan.overlapMs}")
         assertTrue("overlap ended before the second voice" in plan.reason)
+    }
+
+    /** A second voice 1 s into the overlap no longer cuts it to a single bar: half of what was asked, at least 4 bars. */
+    @Test
+    fun anEarlySecondVoiceKeepsAtLeastFourBars() {
+        val out = analysis("out", vocals = listOf(TimeRange(12_000, 101_000)))
+        val inc = analysis("in", vocals = listOf(TimeRange(1_000, 90_000)))
+        val plan = planner.plan(out, inc, settings)
+        println("early voice: ${plan.reason}")
+        assertEquals(PlanKind.BEAT_MATCHED, plan.kind)
+        assertTrue(plan.overlapMs >= 4 * 2_000 - 50, "overlap ${plan.overlapMs}")
+    }
+
+    /** A detector that calls 90 % or more of a track voice is not believed: the plan is the one without vocals. */
+    @Test
+    fun voiceAllOverTheTrackIsIgnored() {
+        val a = planner.plan(analysis("out", vocals = listOf(TimeRange(0, 100_000))), analysis("in", vocals = listOf(TimeRange(0, 100_000))), settings)
+        val b = planner.plan(analysis("out"), analysis("in"), settings)
+        assertEquals(b.exitPointMs, a.exitPointMs)
+        assertEquals(b.overlapMs, a.overlapMs)
     }
 
     @Test

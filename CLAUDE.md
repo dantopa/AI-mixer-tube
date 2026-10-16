@@ -369,6 +369,12 @@ Service modules:
   - Why a mark is not used is appended to the plan reason (`| owner marks not used: …`).
   - **"134 BPM"** was the raw DSP field (it counts the tresillo); the repaired grid says 79-80. The chip, the mix sheet and "DJ: what next?" now show `AnalysisRefiner.cached(...).bpm`.
   - Tests: `OwnerCasesTest` on the export's analyses (fixtures `lb5KOCVZB_E`, `OZGBG-GUDSo`, `Lw2aYkmrQcM`): exit-only honoured, No Fuimos -> Carita Triste from both marks (exit 89.0 s, entry 12.3 s, alone from 36.3 s, 8 bars), Carita's refined tempo 70-100. Not run on a device, not judged by ear.
+- **Overlaps of almost nothing: the voice rules cut every mix to a bar (2026-10-16, build at)**: the owner set 16 bars and still heard 2-3 s mixes. Measured with `StructureReport` (`STRUCTURE_BARS=16`) on the build-aq export (33 tracks, 1056 pairs): median overlap 2 s, 740 of 985 beat-matched plans under 8 s, 419 exits in the last 10 % of the track. Three causes:
+  - **YAMNet calls 65-98 % of each cumbia voice (median 89 %)**, so the voice-over-voice rule fired on nearly every pair and cut the overlap to `minUnits` (1 bar). `VocalClash.ranges` now returns null (unknown) when the detection covers `UNTRUSTED_COVERAGE` 90 % or more of the track.
+  - **The harmony-clash cap and the voice cut never go below `cutFloor`**: half of what was asked, at least `CUT_FLOOR_BARS` 4 (16 beats in beat mode). The reason says `the second voice comes in early, cut to N bars`.
+  - **Fallback order**: a voice-over-voice plan was the last resort and the first one found was kept, which was the 1-2 bar exit at the very end of the track (it scores best because less of it can clash). Now: a real-length plan with voices, then a short plan without, then a short one with voices.
+  - Result on the same export: median 22 s (p25 14, p75 43), 63 plans under 8 s, 113 late exits; at 8 bars median 11 s. Tests: `VocalClashTest.anEarlySecondVoiceKeepsAtLeastFourBars`, `voiceAllOverTheTrackIsIgnored`; two synthetic tests moved their vocals under 90 % coverage. Not run on a device, not judged by ear.
+- **No upstream updates (2026-10-16, build as)**: `SharedViewModel.checkForUpdate` returns at once (`FORK_SKIPS_UPSTREAM_UPDATES`): both channels describe the original SimpMusic, and installing it over Bagracho DJ drops the DJ.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
@@ -1152,6 +1158,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-10-10
+**Last updated**: 2026-10-16
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors
