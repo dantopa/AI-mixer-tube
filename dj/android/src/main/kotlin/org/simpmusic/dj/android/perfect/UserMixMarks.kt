@@ -10,15 +10,14 @@ enum class MixMark(val key: String) { EXIT("exit"), ENTRY("entry"), SOLO("solo")
 
 /**
  * The owner's mix marks, three source times per track at most (SharedPreferences `dj_user_mix_marks`, keys `<id>|exit`,
- * `<id>|entry`, `<id>|solo`), kept forever and handed to the planner through [MixMarks.provider]. Each mark is a label
- * too: the export carries them (`mixmarks.tsv`) for measuring and, later, learning.
+ * `<id>|entry`, `<id>|solo`), kept forever and handed to the planner through [UserAnnotations] (read by
+ * [MixMarks.provider]). Each mark is a label too: the export carries them (`mixmarks.tsv`) for measuring and, later, learning.
  */
 object UserMixMarks {
     @Volatile private var prefs: SharedPreferences? = null
 
     fun install(context: Context) {
         prefs = context.getSharedPreferences("dj_user_mix_marks", Context.MODE_PRIVATE)
-        MixMarks.provider = ::get
         DjLog.i("perfect", "mix marks: ${all().size} tracks")
     }
 

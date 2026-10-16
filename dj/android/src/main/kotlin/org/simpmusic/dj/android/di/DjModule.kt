@@ -102,7 +102,8 @@ val djModule =
             DjLog.i("boot", "DJ log installed: file=${File(androidContext().filesDir, "dj/dj-debug.log").path} pid=${android.os.Process.myPid()} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} abi=${android.os.Build.SUPPORTED_ABIS.joinToString()}")
             DjLogInstaller
         }
-        single { DjSettingsRepository(androidContext()).also { org.simpmusic.dj.android.perfect.UserDownbeats.install(androidContext()); org.simpmusic.dj.android.perfect.UserPhrases.install(androidContext()); org.simpmusic.dj.android.perfect.UserMixMarks.install(androidContext()) } }
+        // the owner's tapped 1s, phrase marks and mix marks: one install wires the bar phase, the phrases and the planner
+        single { DjSettingsRepository(androidContext()).also { org.simpmusic.dj.android.perfect.UserAnnotations.install(androidContext()) } }
         single<StateFlow<DjSettings>>(named("djSettings")) {
             get<DjLogInstaller>()
             get<DjSettingsRepository>().settings.stateIn(get<CoroutineScope>(named(SERVICE_SCOPE)), SharingStarted.Eagerly, DjSettings())

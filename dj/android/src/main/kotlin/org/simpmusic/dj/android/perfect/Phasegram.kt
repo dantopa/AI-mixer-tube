@@ -4,9 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import org.simpmusic.dj.analysis.AnalysisRefiner
-import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.timeline.Timelines
 import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.min
@@ -30,7 +29,8 @@ object Phasegram {
     private const val GAP = 18
 
     fun png(raw: TrackAnalysis, title: String?): ByteArray? {
-        val r = AnalysisRefiner.cached(raw)
+        val timeline = Timelines.of(raw)
+        val r = timeline.refined
         val info = r.barPhase ?: return null
         val beats = r.beatTimesMs?.value ?: return null
         val downs = r.downbeatBeatIndices?.value ?: return null
@@ -38,7 +38,7 @@ object Phasegram {
         if (downs.isEmpty()) return null
         val bpb = r.beatsPerBar ?: 4
         val picked = raw.downbeatBeatIndices?.value?.mapNotNull { idx -> raw.beatTimesMs?.value?.getOrNull(idx) }?.toHashSet() ?: emptySet<Int>()
-        val anchor = BarPhase.anchors(raw.videoId)
+        val anchor = timeline.downbeatAnchorMs
 
         val bars = downs.size
         val columns = (bars + ROWS_PER_COLUMN - 1) / ROWS_PER_COLUMN

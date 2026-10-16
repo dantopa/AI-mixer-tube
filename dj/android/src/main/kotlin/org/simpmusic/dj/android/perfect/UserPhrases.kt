@@ -13,9 +13,9 @@ import org.simpmusic.dj.android.log.DjLog
 object UserPhrases {
     @Volatile private var prefs: SharedPreferences? = null
 
+    /** Opens the store; [UserAnnotations] hands it to [PhraseGrid] (through `Annotations.installed`). */
     fun install(context: Context) {
         prefs = context.getSharedPreferences("dj_user_phrases", Context.MODE_PRIVATE)
-        PhraseGrid.anchors = ::get
         DjLog.i("perfect", "marked phrases: ${prefs?.all?.size ?: 0} tracks")
     }
 

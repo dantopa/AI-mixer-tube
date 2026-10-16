@@ -22,9 +22,9 @@ object UserDownbeats {
 
     @Volatile private var prefs: SharedPreferences? = null
 
+    /** Opens the store; [UserAnnotations] hands it to [BarPhase] (through `Annotations.installed`). */
     fun install(context: Context) {
         prefs = context.getSharedPreferences("dj_user_downbeats", Context.MODE_PRIVATE)
-        BarPhase.anchors = ::get
         DjLog.i("perfect", "tapped 1s: ${prefs?.all?.size ?: 0} tracks")
     }
 

@@ -108,7 +108,8 @@ object DjMixViewBuilder {
         }
 
         // Beats: source ms -> plan ms through the (monotone) source(t) table.
-        val grid = analysis?.let(org.simpmusic.dj.analysis.AnalysisRefiner::cached) // the grid the planner used
+        val timeline = analysis?.let(org.simpmusic.dj.timeline.Timelines::of)
+        val grid = timeline?.refined // the grid the planner used
         val beatsSrc = grid?.beatTimesMs?.value.orEmpty()
         val beats = ArrayList<Float>()
         val downbeats = ArrayList<Float>()
@@ -125,7 +126,7 @@ object DjMixViewBuilder {
 
         return DjMixDeck(
             title = title,
-            bpm = (grid ?: analysis)?.bpm?.value,
+            bpm = timeline?.bpm?.value,
             key = analysis?.key?.value?.camelot(),
             hasEnergy = hasEnergy,
             energy = energy.asList(),
