@@ -1,6 +1,6 @@
 package org.simpmusic.dj.planner
 
-import org.simpmusic.dj.analysis.AnalysisRefiner
+import org.simpmusic.dj.timeline.Timelines
 import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.Harmony
 import org.simpmusic.dj.analysis.VocalClash
@@ -52,8 +52,10 @@ class DjTransitionPlanner : TransitionPlanner {
     override fun plan(fromRaw: TrackAnalysis?, toRaw: TrackAnalysis?, settings: DjSettings, constraints: PlanConstraints): TransitionPlan {
         // Beat grids that lose the beat (dropped beats, a switch to the tresillo subdivision) are rebuilt from the
         // bar first; regular grids pass through untouched (see GridRepair).
-        val from = fromRaw?.let(AnalysisRefiner::cached)
-        val to = toRaw?.let(AnalysisRefiner::cached)
+        // One truth per track: the planner reads the same resolved timeline as the bar counter, the mix view and the
+        // recommender (repaired grid, voted 1, phrases, the owner's marks); `refined` is the cached refined analysis.
+        val from = fromRaw?.let { Timelines.of(it).refined }
+        val to = toRaw?.let { Timelines.of(it).refined }
         val s = sanitise(settings)
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
