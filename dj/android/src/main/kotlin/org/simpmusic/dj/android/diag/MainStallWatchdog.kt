@@ -8,7 +8,7 @@ import org.simpmusic.dj.android.log.DjLog
 
 /** Which build of the DJ code this is, printed at boot so a pasted log says what it came from. Bump it with every shipped change. */
 object DjBuild {
-    const val ID = "2026-10-16-ax stuck-playing, call-off, 4/4 tresillo"
+    const val ID = "2026-10-16-ay AI Mix (Claude), mix picture on the live engine"
 }
 
 /**
@@ -24,6 +24,9 @@ object MainStallWatchdog {
     private const val STALL_MS = 300L
     private const val MAX_REPORTS_PER_MINUTE = 30
     private const val TAG = "stall"
+
+    /** Kept by R8 (`consumer-rules.pro` keeps `org.simpmusic.dj.**`), so these frames keep their names in a profile build. */
+    private val OWN_PACKAGES = listOf("org.simpmusic.", "com.maxrave.")
 
     private val main = Handler(Looper.getMainLooper())
 
@@ -92,9 +95,16 @@ object MainStallWatchdog {
 
     private fun mainStack(): String =
         try {
-            Looper.getMainLooper().thread.stackTrace
-                .take(14)
-                .joinToString(" <- ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+            val frames = Looper.getMainLooper().thread.stackTrace
+            fun name(f: StackTraceElement) = "${f.className.substringAfterLast('.')}.${f.methodName}:${f.lineNumber}"
+            val top = frames.take(14).joinToString(" <- ") { name(it) }
+            // The top frames are usually library internals (a build-ax stall showed 14 frames of JSON parsing and never
+            // reached the caller): also name the first frames of our own code below them, which say who blocked.
+            val ours =
+                frames.drop(14)
+                    .filter { f -> OWN_PACKAGES.any { f.className.startsWith(it) } }
+                    .take(6)
+            if (ours.isEmpty()) top else "$top ... called from ${ours.joinToString(" <- ") { name(it) }}"
         } catch (e: Throwable) {
             "unavailable (${e.javaClass.simpleName})"
         }

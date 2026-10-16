@@ -17,6 +17,9 @@ enum class PlanSource {
     /** One side from the owner's marks, the other chosen by the planner. */
     OWNER_PARTIAL,
 
+    /** Both points and the overlap chosen by Claude ("AI Mix", [AiMixPoints]), executed by the planner. */
+    AI_MIX,
+
     /** A structure hand-off: the outgoing's instrumental over the incoming's (first tier, `StructureHandoff`). */
     STRUCTURE,
 
@@ -58,7 +61,7 @@ enum class MixQuality {
     companion object {
         /** The ranking the look-ahead used to compute from the reason text, from the structured facts. */
         fun of(kind: PlanKind, source: PlanSource, features: MixFeatures?): MixQuality = when {
-            kind == PlanKind.BEAT_MATCHED && (source == PlanSource.OWNER_MARKS || source == PlanSource.OWNER_PARTIAL) -> BEST
+            kind == PlanKind.BEAT_MATCHED && (source == PlanSource.OWNER_MARKS || source == PlanSource.OWNER_PARTIAL || source == PlanSource.AI_MIX) -> BEST
             kind != PlanKind.BEAT_MATCHED || features?.harmonyClash == true || features?.voiceClash == true -> OTHER
             source == PlanSource.STRUCTURE -> BEST
             source == PlanSource.STRUCTURE_SECOND_TIER -> TAIL

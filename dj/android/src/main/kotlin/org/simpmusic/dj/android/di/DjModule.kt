@@ -108,7 +108,12 @@ val djModule =
             DjLogInstaller
         }
         // the owner's tapped 1s, phrase marks and mix marks: one install wires the bar phase, the phrases and the planner
-        single { DjSettingsRepository(androidContext()).also { org.simpmusic.dj.android.perfect.UserAnnotations.install(androidContext()) } }
+        single {
+            DjSettingsRepository(androidContext()).also {
+                org.simpmusic.dj.android.perfect.UserAnnotations.install(androidContext())
+                org.simpmusic.dj.android.ai.ClaudeSettings.install(androidContext())
+            }
+        }
         single<StateFlow<DjSettings>>(named("djSettings")) {
             get<DjLogInstaller>()
             get<DjSettingsRepository>().settings.stateIn(get<CoroutineScope>(named(SERVICE_SCOPE)), SharingStarted.Eagerly, DjSettings())

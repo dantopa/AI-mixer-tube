@@ -162,6 +162,10 @@ android {
             // dropped here. Desktop is untouched: its jars keep the resources and kuromoji's
             // default classpath resolver keeps working there.
             excludes += "com/atilika/kuromoji/ipadic/*.bin"
+            // The Anthropic SDK ("AI Mix", :djAndroid) brings jackson-core, which ships the same third-party licence file
+            // as the fastdoubleparser it depends on.
+            excludes += "META-INF/thirdparty-LICENSE"
+            excludes += "META-INF/FastDoubleParser-*"
         }
     }
     compileOptions {

@@ -132,6 +132,12 @@ data class DjDebugState(
     val mixDurationMs: Long? = null,
     /** The prepared / playing plan is a "Perfect" one (1 on 1 on trusted bars, see `PlanConstraints.perfect`). */
     val perfect: Boolean = false,
+    /** "AI Mix": what Claude is doing or said ("asking Haiku 5.5…", its choice, or why there is none), and when. */
+    val aiStatus: String? = null,
+    val aiStatusAtEpochMs: Long? = null,
+    val aiAsking: Boolean = false,
+    /** The prepared / playing plan is Claude's ([PlanSource.AI_MIX]). */
+    val aiPlan: Boolean = false,
 ) {
     /** A DJ mix is audible right now (the adapter started the window). */
     val isMixing: Boolean get() = phase == "mixing"
@@ -182,6 +188,22 @@ enum class MixNowResult {
     ALREADY_PERFECT,
 }
 
+/** What an "AI Mix" tap did; Claude's answer (or why there is none) arrives later in `DjDebugState.aiStatus`. */
+enum class AiMixResult {
+    /** Asking Claude now. */
+    ASKING,
+    /** AI DJ is off. */
+    DISABLED,
+    /** No Claude API key in Settings -> AI DJ. */
+    NO_KEY,
+    /** No next track to mix into, or this pair was already played. */
+    NO_PAIR,
+    /** A mix is playing right now. */
+    ALREADY_MIXING,
+    /** Still waiting for the previous answer. */
+    BUSY,
+}
+
 /**
  * Everything the player adapter sees of the DJ. Narrow on purpose: the adapter patch stays tiny and every
  * decision (analysis, planning, rendering, thresholds) lives here.
@@ -228,6 +250,12 @@ interface DjHooks {
 
     /** The user asked for the mix to happen as soon as possible (UI, main thread). See [MixNowResult]. */
     fun mixNow(): MixNowResult = MixNowResult.DISABLED
+
+    /**
+     * "AI Mix": ask Claude where to mix the pair (a per-bar table of both tracks and their lyrics, no audio) and re-plan on
+     * its points. UI, main thread; the answer arrives in [debug] (`aiStatus`).
+     */
+    fun aiMix(): AiMixResult = AiMixResult.DISABLED
 
     /**
      * "Perfect mix": re-plan for the best point within the next couple of minutes where BOTH 1s are trusted, phrase on
@@ -337,6 +365,8 @@ class DjEngine(
     private val lyrics: org.simpmusic.dj.android.lyrics.DjLyricsSource? = null,
     /** The real-time engine's mixer (one output for every player); null = the window + splice path only. */
     private val bus: org.simpmusic.dj.android.bus.AndroidMixBus? = null,
+    /** "AI Mix": asks Claude (the key and the model are the owner's, `ClaudeSettings`). */
+    private val claude: org.simpmusic.dj.android.ai.ClaudeMixClient = org.simpmusic.dj.android.ai.ClaudeMixClient(),
 ) : DjHooks {
     override fun createAudioOutputProvider(): androidx.media3.exoplayer.audio.AudioOutputProvider? {
         val b = bus ?: return null
@@ -382,6 +412,11 @@ class DjEngine(
     private var pairTo: String? = null
     /** The running pipeline serves a "mix now" request (cleared when the pair changes). */
     private var mixNowKey: String? = null
+
+    /** "AI Mix": the pair Claude chose points for, and the points (main thread). */
+    private var aiKey: String? = null
+    private var aiPoints: org.simpmusic.dj.model.AiMixPoints? = null
+    private var aiJob: kotlinx.coroutines.Job? = null
     /** The running pipeline serves a "perfect mix" request (cleared when the pair changes). */
     private var perfectKey: String? = null
     private var pipeline: Job? = null
@@ -623,7 +658,7 @@ class DjEngine(
 
     override fun onMixStarted(prepared: PreparedTransition) {
         val plan = prepared.plan
-        val total = plan.overlapMs - prepared.timeline.startRelMs
+        val total = plan.overlapMs - prepared.timeline.planTimeOfWindow(startWindowMs(prepared)).toLong()
         DjLog.i(TAG, "MIX STARTED ${prepared.fromId} -> ${prepared.toId} (${plan.kind}), overlap ${plan.overlapMs} ms, window runs ${total} ms until the overlap is over")
         val now = System.currentTimeMillis()
         val id = "$now:${prepared.fromId}>${prepared.toId}"
@@ -661,9 +696,98 @@ class DjEngine(
         pairKey = null
         mixNowKey = null
         perfectKey = null
+        aiKey = null
         consumedKey = null
         stopMixView()
     }
+
+    override fun aiMix(): AiMixResult {
+        if (!settingsFlow.value.enabled) return AiMixResult.DISABLED
+        if (org.simpmusic.dj.android.ai.ClaudeSettings.apiKey() == null) return AiMixResult.NO_KEY
+        val k = pairKey
+        val from = pairFrom
+        val to = pairTo
+        if (k == null || from == null || to == null || k == consumedKey) return AiMixResult.NO_PAIR
+        if (_debug.value.isMixing) return AiMixResult.ALREADY_MIXING
+        if (aiJob?.isActive == true) return AiMixResult.BUSY
+        val model = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model
+        aiSay("AI: asking ${model.label}…", asking = true)
+        aiJob =
+            scope.launch {
+                try {
+                    aiAsk(k, from, to)
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    DjLog.e(TAG, "ai mix $from -> $to failed", e)
+                    aiSay("AI: ${e.javaClass.simpleName}")
+                } finally {
+                    _debug.update { it.copy(aiAsking = false) }
+                }
+            }
+        return AiMixResult.ASKING
+    }
+
+    private fun aiSay(status: String, asking: Boolean = false) {
+        _debug.update { it.copy(aiStatus = status, aiStatusAtEpochMs = System.currentTimeMillis(), aiAsking = asking) }
+    }
+
+    /** Main thread, suspending for the analyses, the brief and Claude's answer. */
+    private suspend fun aiAsk(k: String, fromId: String, toId: String) {
+        val from = scheduler.get(fromId)
+        val to = scheduler.get(toId)
+        if (from == null || to == null) {
+            aiSay("AI: the tracks are still being analysed")
+            return
+        }
+        val settings = settingsFlow.value
+        // the answer takes seconds, then the mix needs its usual lead: no exit before both have passed
+        val lead = AI_ANSWER_BUDGET_MS + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
+        val position = playbackPositionMs
+        val titleFrom = runCatching { titleOf(fromId) }.getOrNull() ?: fromId
+        val titleTo = runCatching { titleOf(toId) }.getOrNull() ?: toId
+        val brief =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                org.simpmusic.dj.ai.MixBrief.build(
+                    org.simpmusic.dj.ai.MixBrief.Track(titleFrom, Timelines.of(from), lyrics?.linesOnTrack(fromId)),
+                    org.simpmusic.dj.ai.MixBrief.Track(titleTo, Timelines.of(to), lyrics?.linesOnTrack(toId)),
+                    earliestExitMs = position + lead,
+                    requestedBars = settings.overlapBars,
+                    positionMs = position,
+                )
+            }
+        if (brief == null) {
+            aiSay("AI: not enough of this track left to mix")
+            return
+        }
+        val answer = withContext(kotlinx.coroutines.Dispatchers.IO) { claude.ask(brief) }.getOrElse {
+            DjLog.w(TAG, "ai mix: ${it.message}")
+            aiSay("AI: ${it.message}")
+            return
+        }
+        val pts = org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json).getOrElse {
+            DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
+            aiSay("AI: unusable answer (${it.message})")
+            return
+        }
+        if (pairKey != k || k == consumedKey || _debug.value.isMixing) {
+            aiSay("AI: the pair changed meanwhile")
+            return
+        }
+        val cost = claude.costUsd(answer)
+        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
+        aiKey = k
+        aiPoints = pts
+        mixNowKey = null
+        perfectKey = null
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        startPipeline(fromId, toId)
+        aiSay("AI: out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars · ${pts.why}")
+    }
+
+    private fun clockOf(ms: Long) = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
 
     override fun mixNow(): MixNowResult {
         if (!settingsFlow.value.enabled) return MixNowResult.DISABLED
@@ -738,6 +862,7 @@ class DjEngine(
         pairTo = next
         mixNowKey = null
         perfectKey = null
+        aiKey = null
         startPipeline(context.currentId, next)
     }
 
@@ -850,8 +975,23 @@ class DjEngine(
         // The real-time engine only needs the incoming player cued (a few seconds): the mix can come much sooner.
         val earliest = playbackPositionMs + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
         val constraints = PlanConstraints(earliestExitMs = earliest)
+        val aiFor = aiPoints?.takeIf { aiKey == key(fromId, toId) }
         val plan =
-            if (perfectKey == key(fromId, toId)) {
+            if (aiFor != null) {
+                // "AI Mix": Claude's exit, entry and overlap; anywhere in the track, nothing has to have played
+                val anywhere = settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
+                DjLog.i(TAG, "planning AI MIX: exit ${aiFor.exitMs}, entry ${aiFor.entryMs}, ${aiFor.overlapBars} bars, earliest exit $earliest ms (position $playbackPositionMs ms)")
+                val p = withContext(heavyDispatcher) { planner.plan(from, to, anywhere, PlanConstraints(earliestExitMs = earliest, aiPoints = aiFor)) }
+                if (p.meta?.source == org.simpmusic.dj.model.PlanSource.AI_MIX) {
+                    p
+                } else {
+                    val why = p.reason.substringAfter(org.simpmusic.dj.model.AiMixPoints.NOT_USED, "no beat-matched mix at those points")
+                    DjLog.i(TAG, "ai mix: not possible ($why); keeping the regular plan")
+                    aiKey = null
+                    aiSay("AI mix not possible: ${why.take(120)}")
+                    withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints.copy(preferPerfect = true)) }
+                }
+            } else if (perfectKey == key(fromId, toId)) {
                 val latest = earliest + PERFECT_SPAN_MS
                 DjLog.i(TAG, "planning PERFECT: exit between $earliest and $latest ms (position $playbackPositionMs ms); ${AnalysisRefiner.cached(from).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }} | ${AnalysisRefiner.cached(to).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }}")
                 val p = withContext(heavyDispatcher) { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest, perfect = true)) }
@@ -1034,6 +1174,7 @@ class DjEngine(
                 toKey = to.key?.value?.camelot(),
                 confidence = plan.confidence,
                 perfect = isPerfect(plan),
+                aiPlan = plan.meta?.source == org.simpmusic.dj.model.PlanSource.AI_MIX,
             )
         }
     }
@@ -1051,16 +1192,24 @@ class DjEngine(
     private fun startMixTicker(prepared: PreparedTransition) {
         mixTicker?.cancel()
         val t0 = System.nanoTime()
+        // Where the mix is when it starts. A rendered window starts at its own sample 0. The real-time engine arms ~5 s
+        // before the bus switch (BUS_CUE_LEAD_MS), which is far into the window's lead-in: the owner saw the picture run
+        // seconds late ("it starts before the graph shows", 2026-10-16). There the outgoing's heard position says where.
+        val startWindowMs = startWindowMs(prepared)
         mixTicker =
             scope.launch {
                 while (isActive) {
-                    val windowMs = (System.nanoTime() - t0) / 1_000_000.0
+                    val windowMs = startWindowMs + (System.nanoTime() - t0) / 1_000_000.0
                     if (windowMs > prepared.timeline.windowMs) break
                     _mixView.update { it?.withNow(prepared.timeline.planTimeOfWindow(windowMs)) }
                     delay(100)
                 }
             }
     }
+
+    /** Window time the mix is at when the adapter starts it: 0 for a rendered window, the heard outgoing position on the bus. */
+    private fun startWindowMs(prepared: PreparedTransition): Double =
+        if (prepared.viaBus) prepared.timeline.windowOfOutgoingSource(playbackPositionMs.toDouble()) else 0.0
 
     private fun cancelPipeline() {
         pipelineCancel?.set(true)
@@ -1089,6 +1238,9 @@ private const val BUS_EARLIEST_EXIT_AHEAD_MS = 16_000L
 
 /** "Mix now": how far past the earliest possible exit the planner may look for a good phrase start. */
 private const val MIX_NOW_SPAN_MS = 20_000L
+
+/** "AI Mix": how long Claude's answer may take; exits before playhead + this + the usual lead are not offered. */
+private const val AI_ANSWER_BUDGET_MS = 25_000L
 
 /** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
 private const val PERFECT_SPAN_MS = 120_000L

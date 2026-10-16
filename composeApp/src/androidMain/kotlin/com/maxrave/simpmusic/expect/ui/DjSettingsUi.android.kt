@@ -70,6 +70,13 @@ import simpmusic.composeapp.generated.resources.ai_dj_log
 import simpmusic.composeapp.generated.resources.ai_dj_log_description
 import simpmusic.composeapp.generated.resources.ai_dj_advanced
 import simpmusic.composeapp.generated.resources.ai_dj_advanced_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_key
+import simpmusic.composeapp.generated.resources.ai_dj_claude_key_label
+import simpmusic.composeapp.generated.resources.ai_dj_claude_key_message
+import simpmusic.composeapp.generated.resources.ai_dj_claude_key_none
+import simpmusic.composeapp.generated.resources.ai_dj_claude_key_set
+import simpmusic.composeapp.generated.resources.ai_dj_claude_model
+import simpmusic.composeapp.generated.resources.ai_dj_claude_model_choice
 import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter
 import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter_description
 import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift_description
@@ -233,6 +240,49 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                     smallSubtitle = true,
                     switch = (showBarCounter to { on -> scope.launch { repo.setShowBarCounter(on) }; Unit }),
                 )
+                // "AI Mix": the owner's Claude key (stored on the phone only) and the model to ask
+                val claude by org.simpmusic.dj.android.ai.ClaudeSettings.state.collectAsStateWithLifecycle()
+                val keyTitle = stringResource(Res.string.ai_dj_claude_key)
+                val keyMessage = stringResource(Res.string.ai_dj_claude_key_message)
+                val keyLabel = stringResource(Res.string.ai_dj_claude_key_label)
+                val modelTitle = stringResource(Res.string.ai_dj_claude_model)
+                val modelLabels = org.simpmusic.dj.android.ai.ClaudeModel.entries.map { it to stringResource(Res.string.ai_dj_claude_model_choice, it.label, it.price) }
+                SettingItem(
+                    title = keyTitle,
+                    subtitle = claude.keyHint?.let { stringResource(Res.string.ai_dj_claude_key_set, it) } ?: stringResource(Res.string.ai_dj_claude_key_none),
+                    smallSubtitle = true,
+                    onClick = {
+                        viewModel.setAlertData(
+                            SettingAlertState(
+                                title = keyTitle,
+                                message = keyMessage,
+                                textField = SettingAlertState.TextFieldData(label = keyLabel, value = ""),
+                                confirm = confirm to { state -> org.simpmusic.dj.android.ai.ClaudeSettings.setKey(state.textField?.value) },
+                                dismiss = dismiss,
+                            ),
+                        )
+                    },
+                )
+                AnimatedVisibility(visible = claude.hasKey) {
+                    SettingItem(
+                        title = modelTitle,
+                        subtitle = modelLabels.first { it.first == claude.model }.second,
+                        smallSubtitle = true,
+                        onClick = {
+                            viewModel.setAlertData(
+                                SettingAlertState(
+                                    title = modelTitle,
+                                    selectOne = SettingAlertState.SelectData(listSelect = modelLabels.map { (m, label) -> (m == claude.model) to label }),
+                                    confirm =
+                                        confirm to { state ->
+                                            modelLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.ai.ClaudeSettings.setModel(it) }
+                                        },
+                                    dismiss = dismiss,
+                                ),
+                            )
+                        },
+                    )
+                }
                 // the library analysis in one row: the action as title, the progress and its state below
                 SettingItem(
                     title = if (library.running) stringResource(Res.string.ai_dj_library_pause) else stringResource(Res.string.ai_dj_library_analyse),

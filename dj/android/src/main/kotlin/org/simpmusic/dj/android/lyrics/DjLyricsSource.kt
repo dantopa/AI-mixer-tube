@@ -92,6 +92,16 @@ class DjLyricsSource(
         }
     }
 
+    /**
+     * The stored lyric lines of [videoId] on the TRACK's clock (the offset the validation found applied), for "AI Mix"; null
+     * when there are none. Blocking file read: call it off the main thread.
+     */
+    fun linesOnTrack(videoId: String): List<org.simpmusic.dj.timeline.LyricLine>? {
+        val lines = readFile(videoId)?.lines ?: return null
+        val offset = LyricVocalsCache.get(videoId)?.offsetMs ?: 0L
+        return lines.map { it.copy(startMs = it.startMs + offset, endMs = it.endMs?.plus(offset), wordStartsMs = it.wordStartsMs.map { w -> w + offset }) }
+    }
+
     private suspend fun load(id: String) {
         val now = clock()
         val cached = readFile(id)

@@ -200,10 +200,28 @@ data class PlanConstraints(
      * regular way. Only with `MixPoint.ANYWHERE`; ignored when [perfect] is set.
      */
     val preferPerfect: Boolean = false,
+    /**
+     * "AI Mix": the exit, the entry and the overlap Claude chose for this pair. The planner snaps them to the grid and
+     * beat-matches them (bending up to `OWNER_TEMPO_BEND`, the detector's vocals ignored, as for the owner's marks); when
+     * that is not possible it plans the regular way and the reason says why the AI's points were not used.
+     */
+    val aiPoints: AiMixPoints? = null,
 ) {
     companion object {
         const val PERFECT_OK = "PERFECT: "
         const val PERFECT_REFUSED = "perfect not possible: "
+    }
+}
+
+/** Where Claude would mix one pair (source times, ms), and its one-line why. See [PlanConstraints.aiPoints]. */
+@Serializable
+data class AiMixPoints(val exitMs: Long, val entryMs: Long, val overlapBars: Int, val why: String) {
+    companion object {
+        /** Start of a plan's reason when Claude placed it. */
+        const val TAG = "AI MIX: "
+
+        /** Appended to a regular plan's reason when the AI's points could not be planned. */
+        const val NOT_USED = " | AI mix not used: "
     }
 }
 

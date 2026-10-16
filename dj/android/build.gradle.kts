@@ -53,6 +53,9 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.kotlinx.serialization.json)
 
+    // "AI Mix": the official Anthropic Java SDK (Messages API over OkHttp). It ships its own R8 rules (META-INF/proguard).
+    implementation("com.anthropic:anthropic-java:2.73.0")
+
     // Media3: cache-backed DataSource for decoding, ExoPlayer for the window/deck implementations.
     api(libs.media3.exoplayer)
     implementation(libs.media3.common)

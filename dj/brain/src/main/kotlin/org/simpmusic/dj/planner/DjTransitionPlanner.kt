@@ -3,6 +3,7 @@ package org.simpmusic.dj.planner
 import org.simpmusic.dj.timeline.Timelines
 import org.simpmusic.dj.timeline.TrackTimeline
 import org.simpmusic.dj.model.TimeRange
+import org.simpmusic.dj.model.AiMixPoints
 import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.Harmony
 import org.simpmusic.dj.analysis.VocalClash
@@ -67,6 +68,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
             when {
+                constraints.aiPoints != null -> planUnsafe(from, to, s.copy(mixPoint = MixPoint.ANYWHERE), earliest, latest, voc, ai = constraints.aiPoints)
                 constraints.perfect -> planPerfect(from, to, s, earliest, latest, voc)
                 constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
                     // The songs' own structure (StructureHandoff) comes first: a 1-on-1 elsewhere in the track would cut a
@@ -232,7 +234,7 @@ class DjTransitionPlanner : TransitionPlanner {
         return base.copy(reason = PlanConstraints.PERFECT_REFUSED + why.joinToString("; "))
     }
 
-    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, voc: PairVocals, perfect: Boolean = false): TransitionPlan {
+    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, voc: PairVocals, perfect: Boolean = false, ai: AiMixPoints? = null): TransitionPlan {
         val fromId = from?.videoId.orEmpty()
         val toId = to?.videoId.orEmpty()
         if (from == null || to == null) {
@@ -275,6 +277,13 @@ class DjTransitionPlanner : TransitionPlanner {
             minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8,
             vocalsOut = voc.out, vocalsIn = voc.inc, perfect = perfect,
         )
+        if (ai != null) {
+            // Claude chose the points: exactly those, else the regular plan with why not
+            val a = aiMarked(c, ai)
+            a.plan?.let { return it }
+            val regular = planUnsafe(from, to, settings, earliest, latest, voc)
+            return regular.copy(reason = regular.reason + AiMixPoints.NOT_USED + a.fail)
+        }
         if (perfect) {
             if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest, PlanFailCode.GRID_UNTRUSTED)
             return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair in range where both 1s are sure (local margin >= ${BarPhase.PERFECT_MARGIN})", earliest, PlanFailCode.NOTHING_IN_RANGE)
@@ -652,6 +661,33 @@ class DjTransitionPlanner : TransitionPlanner {
             p.copy(reason = p.reason.replace(CLAMPED_NOTE, "")).withReason(
                 MixMarks.TAG + "exit %.1f s, entry %.1f s%s; %s; ".format(exit / 1000.0, entry / 1000.0, solo, if (c.barsMode) "$units bars" else "$units beats (bars untrusted, the marks used)"),
             ).sourced(PlanSource.OWNER_MARKS),
+        )
+    }
+
+    /**
+     * "AI Mix": Claude's exit, entry and overlap, planned like the owner's marks (snapped to the grid, the detector's vocals
+     * ignored since the AI read the vocals and the lyrics itself, up to [OWNER_TEMPO_BEND] of bend).
+     */
+    private fun aiMarked(c: Ctx, p: AiMixPoints): Attempt {
+        val out = c.out
+        val inc = c.inc
+        val beat = out.medianBeatMs
+        val upper = min(out.audibleEndMs - (out.beatsPerBar * beat + MARGIN_MS).toLong(), c.latest)
+        val lower = max(c.earliest, (4 * beat + 250.0).toLong())
+        val exit = markPoint(out, p.exitMs) ?: return Attempt.fail("no beat near the AI's exit %.1f s".format(p.exitMs / 1000.0))
+        val entry = markPoint(inc, p.entryMs) ?: return Attempt.fail("no beat near the AI's entry %.1f s".format(p.entryMs / 1000.0))
+        if (exit < lower || exit > upper) return Attempt.fail("the AI's exit %.1f s is outside %.1f-%.1f s".format(exit / 1000.0, lower / 1000.0, upper / 1000.0))
+        val units = ownerUnits(c, p.overlapBars.coerceIn(1, OWNER_MAX_BARS))
+        val t = chooseTempo(localPeriod(out, exit, ahead = true), localPeriod(inc, entry, ahead = true), max(c.settings.maxTempoBend, OWNER_TEMPO_BEND).toDouble())
+            ?: return Attempt.fail("tempos at the AI's points are beyond the bend (%.1f vs %.1f bpm)".format(60000.0 / localPeriod(out, exit, true), 60000.0 / localPeriod(inc, entry, true)))
+        val a = beatAttempt(c.owned(), Pick(exit, "downbeat", false), Pick(entry, "downbeat", false), t, units = units)
+        val plan = a.plan ?: return Attempt.fail(a.fail ?: "?")
+        return Attempt.ok(
+            plan.copy(reason = plan.reason.replace(CLAMPED_NOTE, "")).withReason(
+                AiMixPoints.TAG + "exit %.1f s, entry %.1f s, %s (%s); ".format(
+                    exit / 1000.0, entry / 1000.0, if (c.barsMode) "$units bars" else "$units beats (bars untrusted)", p.why.take(AI_WHY_CHARS),
+                ),
+            ).sourced(PlanSource.AI_MIX),
         )
     }
 
@@ -1405,6 +1441,9 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** How far each deck may be stretched for a mix the owner marked by ear (a DJ's pitch fader: +-8 to 10 %). */
         const val OWNER_TEMPO_BEND = 0.10f
+
+        /** How much of the AI's why goes into the plan's reason. */
+        private const val AI_WHY_CHARS = 160
 
         private val CLAMPED_NOTE = Regex(""" \(clamped from \d+(, the beat grid was irregular over a longer overlap)?\)""")
         private val DEBUG_STRUCTURE = System.getenv("DJ_DEBUG_STRUCTURE") != null

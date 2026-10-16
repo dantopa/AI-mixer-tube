@@ -48,6 +48,7 @@ import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.koinInject
 import org.simpmusic.dj.android.DjDebugState
 import org.simpmusic.dj.android.DjHooks
+import org.simpmusic.dj.android.AiMixResult
 import org.simpmusic.dj.android.MixNowResult
 import org.simpmusic.dj.android.scheduler.AnalysisStatus
 import org.simpmusic.dj.android.scheduler.BlockReason
@@ -75,6 +76,9 @@ import simpmusic.composeapp.generated.resources.dj_chip_mixing
 import simpmusic.composeapp.generated.resources.dj_mark_entry
 import simpmusic.composeapp.generated.resources.dj_mark_exit
 import simpmusic.composeapp.generated.resources.dj_mark_solo
+import simpmusic.composeapp.generated.resources.dj_ai_busy
+import simpmusic.composeapp.generated.resources.dj_ai_mix
+import simpmusic.composeapp.generated.resources.dj_ai_no_key
 import simpmusic.composeapp.generated.resources.dj_mix_now
 import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
 import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
@@ -220,7 +224,32 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
             MixNowResult.ALREADY_SOON -> stringResource(Res.string.dj_mix_now_soon)
             MixNowResult.ALREADY_PERFECT, MixNowResult.DISABLED, null -> null
         }
-    val text = (if (tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: chipText(debug, positionMs, nowMs)
+    // "AI Mix": the tap's own answer for a few seconds, then what Claude is doing or said (for AI_STATUS_MS after it spoke)
+    var aiAnswer by remember { mutableStateOf<AiMixResult?>(null) }
+    LaunchedEffect(aiAnswer) {
+        if (aiAnswer != null) {
+            delay(3500)
+            aiAnswer = null
+        }
+    }
+    val aiNow by produceState(System.currentTimeMillis(), debug.aiStatusAtEpochMs) {
+        value = System.currentTimeMillis()
+        val at = debug.aiStatusAtEpochMs ?: return@produceState
+        val left = AI_STATUS_MS - (System.currentTimeMillis() - at)
+        if (left > 0) {
+            delay(left)
+            value = System.currentTimeMillis()
+        }
+    }
+    val aiText =
+        when (aiAnswer) {
+            AiMixResult.NO_KEY -> stringResource(Res.string.dj_ai_no_key)
+            AiMixResult.BUSY -> stringResource(Res.string.dj_ai_busy)
+            AiMixResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
+            AiMixResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
+            else -> null
+        } ?: debug.aiStatus?.takeIf { debug.aiAsking || (debug.aiStatusAtEpochMs?.let { aiNow - it < AI_STATUS_MS } == true) }
+    val text = (if (tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: aiText ?: chipText(debug, positionMs, nowMs)
 
     Surface(
         // Tap: the picture of the mix (both tracks overlapping) when there is one, else the log. Long-press: always the log.
@@ -256,6 +285,23 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
                 contentDescription = stringResource(Res.string.dj_mix_now),
                 modifier = Modifier.padding(5.dp).size(16.dp),
                 colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
+            )
+        }
+    }
+    // "AI Mix": Claude reads both tracks bar by bar (and their lyrics) and chooses the exit, the entry and the overlap.
+    // Only with a key in Settings -> AI DJ -> Claude.
+    val claude by org.simpmusic.dj.android.ai.ClaudeSettings.state.collectAsStateWithLifecycle()
+    if (!mixing && claude.hasKey) {
+        val aiDescription = stringResource(Res.string.dj_ai_mix)
+        Surface(
+            modifier = Modifier.semantics { contentDescription = aiDescription }.clickable { aiAnswer = hooks.aiMix() },
+            shape = CircleShape,
+            color = if (debug.aiPlan || debug.aiAsking) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+        ) {
+            Text(
+                text = "✨",
+                style = typo().labelMedium,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
             )
         }
     }
@@ -456,3 +502,6 @@ private fun formatMinSec(ms: Long): String {
 
 /** How long the thumbs up / down stay next to the chip after a mix ends (the journal accepts a rating for longer). */
 private const val RATE_PROMPT_MS = 60_000L
+
+/** How long Claude's last word ("out 2:31 → in 0:12, 8 bars · …", or why not) stays in the chip. */
+private const val AI_STATUS_MS = 12_000L

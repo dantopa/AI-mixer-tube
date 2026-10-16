@@ -247,12 +247,12 @@ object DjLog {
         val m = lineShape.find(line) ?: return false
         val tag = m.groupValues[1]
         val level = m.groupValues[2]
-        return tag == "xition" || tag == "bus" || level == "W" || level == "E" ||
+        return tag == "xition" || tag == "bus" || tag == "ai" || level == "W" || level == "E" ||
             (tag == "planner" && line.contains("[dj-render]")) ||
             MIX_WORDS.any { line.contains(it) }
     }
 
-    private val MIX_WORDS = listOf("LIVE", "consumed ", "fallback", "pipeline start", "aborted")
+    private val MIX_WORDS = listOf("LIVE", "consumed ", "fallback", "pipeline start", "aborted", "AI MIX", "ai mix")
 
     fun redactUrl(url: String?): String = DjLogger.redactUrl(url)
 
