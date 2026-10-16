@@ -195,6 +195,15 @@ interface DjHooks {
     /** The adapter started the prepared window (the mix is now running). Main thread. */
     fun onMixStarted(prepared: PreparedTransition) {}
 
+    /**
+     * The owner's thumbs up / down on the last mix that ended (written to the mix journal). False when there is none to
+     * rate: no mix yet, or it ended more than `MixJournal.RATEABLE_MS` ago. UI, main thread.
+     */
+    fun rateLastMix(up: Boolean): Boolean = false
+
+    /** The last mix that ended (with its rating, if any), for the rating prompt; null when none. */
+    fun lastMix(): org.simpmusic.dj.android.journal.LastMix? = null
+
     /** Called on the main thread when a window finished rendering for the pair the player is waiting on. */
     fun setOnPrepared(listener: ((PreparedTransition) -> Unit)?)
 
@@ -515,6 +524,13 @@ class DjEngine(
 
     override fun consumed(prepared: PreparedTransition, outcome: String) {
         DjLog.i(TAG, "consumed ${prepared.fromId}->${prepared.toId}: $outcome")
+        // a mix that started is journaled as ended (with the adapter's outcome) and becomes the one the owner may rate
+        mixInFlight?.takeIf { it.prepared === prepared }?.let { m ->
+            val now = System.currentTimeMillis()
+            org.simpmusic.dj.android.journal.MixJournal.ended(m.id, outcome, now)
+            lastEndedMix = org.simpmusic.dj.android.journal.LastMix(m.id, prepared.fromId, prepared.toId, endedAtEpochMs = now)
+            mixInFlight = null
+        }
         consumedKey = key(prepared.fromId, prepared.toId)
         if (ready === prepared) ready = null
         deleteWindow(prepared)
@@ -526,9 +542,33 @@ class DjEngine(
         val plan = prepared.plan
         val total = plan.overlapMs - prepared.timeline.startRelMs
         DjLog.i(TAG, "MIX STARTED ${prepared.fromId} -> ${prepared.toId} (${plan.kind}), overlap ${plan.overlapMs} ms, window runs ${total} ms until the overlap is over")
+        val now = System.currentTimeMillis()
+        val id = "$now:${prepared.fromId}>${prepared.toId}"
+        mixInFlight = MixInFlight(id, prepared)
+        org.simpmusic.dj.android.journal.MixJournal.started(id, plan, now)
         startMixTicker(prepared)
         _debug.update { it.copy(phase = "mixing", kind = plan.kind, mixStartedAtEpochMs = System.currentTimeMillis(), mixDurationMs = total, mixAtMs = null) }
     }
+
+    /** The mix the adapter is playing (journaled as started, not yet ended). */
+    private class MixInFlight(val id: String, val prepared: PreparedTransition)
+
+    @Volatile private var mixInFlight: MixInFlight? = null
+
+    @Volatile private var lastEndedMix: org.simpmusic.dj.android.journal.LastMix? = null
+
+    override fun rateLastMix(up: Boolean): Boolean {
+        val m = lastEndedMix ?: return false
+        val now = System.currentTimeMillis()
+        if (!m.rateableAt(now)) return false
+        // a second tap (a change of mind) is journaled too: the last rating of a mix is the one that counts
+        org.simpmusic.dj.android.journal.MixJournal.rated(m.id, up, now)
+        lastEndedMix = m.copy(rating = if (up) 1 else -1)
+        DjLog.i(TAG, "mix ${m.id} rated ${if (up) "+1" else "-1"} by the owner")
+        return true
+    }
+
+    override fun lastMix(): org.simpmusic.dj.android.journal.LastMix? = lastEndedMix
 
     override fun reset(reason: String) {
         DjLog.i(TAG, "reset: $reason (pair=$pairKey ready=${ready?.let { it.fromId + "->" + it.toId }})")
@@ -726,7 +766,7 @@ class DjEngine(
                 val latest = earliest + PERFECT_SPAN_MS
                 DjLog.i(TAG, "planning PERFECT: exit between $earliest and $latest ms (position $playbackPositionMs ms); ${AnalysisRefiner.cached(from).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }} | ${AnalysisRefiner.cached(to).let { BarPhase.describe(it) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(it) }}")
                 val p = withContext(heavyDispatcher) { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliest, latestExitMs = latest, perfect = true)) }
-                if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) {
+                if (p.kind == PlanKind.BEAT_MATCHED && isPerfect(p)) {
                     DjLog.i(TAG, "perfect: ${p.reason}")
                     p
                 } else {
@@ -887,10 +927,13 @@ class DjEngine(
                 fromKey = from.key?.value?.camelot(),
                 toKey = to.key?.value?.camelot(),
                 confidence = plan.confidence,
-                perfect = plan.reason.startsWith(PlanConstraints.PERFECT_OK),
+                perfect = isPerfect(plan),
             )
         }
     }
+
+    /** The planner says so in its meta; the reason prefix only for plans made without one (a stand-in planner). */
+    private fun isPerfect(plan: TransitionPlan): Boolean = plan.meta?.perfect ?: plan.reason.startsWith(PlanConstraints.PERFECT_OK)
 
     private fun stopMixView() {
         mixTicker?.cancel()

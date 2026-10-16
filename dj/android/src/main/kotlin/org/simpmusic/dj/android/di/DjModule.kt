@@ -100,6 +100,8 @@ val djModule =
         single<DjLogInstaller>(createdAtStart = true) {
             DjLog.install(File(androidContext().filesDir, "dj"))
             DjLog.i("boot", "DJ log installed: file=${File(androidContext().filesDir, "dj/dj-debug.log").path} pid=${android.os.Process.myPid()} sdk=${android.os.Build.VERSION.SDK_INT} device=${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} abi=${android.os.Build.SUPPORTED_ABIS.joinToString()}")
+            // what each mix was and how the owner rated it, next to the log (filesDir/dj/mixes.jsonl)
+            org.simpmusic.dj.android.journal.MixJournal.install(File(androidContext().filesDir, "dj"))
             DjLogInstaller
         }
         // the owner's tapped 1s, phrase marks and mix marks: one install wires the bar phase, the phrases and the planner

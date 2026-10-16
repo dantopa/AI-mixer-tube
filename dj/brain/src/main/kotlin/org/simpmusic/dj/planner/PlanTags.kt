@@ -1,6 +1,6 @@
 package org.simpmusic.dj.planner
 
-/** Markers the planner writes into `TransitionPlan.reason` that the app reads back (the look-ahead ranks pairs by them). */
+/** Markers the planner writes into `TransitionPlan.reason`. Code reads `TransitionPlan.meta` now; these remain for plans without it. */
 object PlanTags {
     /** A structure hand-off: an instrumental of the outgoing laid over the incoming's (see `StructureHandoff`). */
     const val STRUCTURE = "STRUCTURE: "
