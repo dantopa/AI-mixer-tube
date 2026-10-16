@@ -296,6 +296,8 @@ class DjEngine(
     /** Human title of a track for the mix picture; null = show the id. */
     private val titleOf: suspend (String) -> String? = { null },
     private val splicerRegistry: org.simpmusic.dj.android.splice.SplicerRegistry = org.simpmusic.dj.android.splice.SplicerRegistry(),
+    /** Where the voice is from the songs' synced lyrics (fetched for the playing and the next track); null = detector only. */
+    private val lyrics: org.simpmusic.dj.android.lyrics.DjLyricsSource? = null,
 ) : DjHooks {
     override fun createSplicer(): androidx.media3.common.audio.AudioProcessor = splicerRegistry.create()
 
@@ -336,6 +338,8 @@ class DjEngine(
         windowDir.mkdirs()
         windowDir.listFiles()?.forEach { it.delete() } // windows never survive a process
         scope.launch { settingsFlow.collect { s -> _debug.update { it.copy(enabled = s.enabled) } } }
+        // lyrics land on a background thread; the pipeline state lives on the engine's scope
+        lyrics?.onChanged = { id -> scope.launch { onLyricVocals(id) } }
     }
 
     @Volatile private var playbackPositionMs: Long = 0L
@@ -373,7 +377,8 @@ class DjEngine(
         if (raw == null || raw.videoId != id) return null
         val t = timeline
         if (t != null && t.raw === raw && t.downbeatAnchorMs == BarPhase.anchors(id) &&
-            t.phraseAnchorMs == org.simpmusic.dj.analysis.PhraseGrid.anchors(id) && t.mixMarks == org.simpmusic.dj.planner.MixMarks.of(id)
+            t.phraseAnchorMs == org.simpmusic.dj.analysis.PhraseGrid.anchors(id) && t.mixMarks == org.simpmusic.dj.planner.MixMarks.of(id) &&
+            t.lyricVocals == org.simpmusic.dj.timeline.Annotations.installed.lyricVocals(id)
         ) {
             return t
         }
@@ -431,16 +436,32 @@ class DjEngine(
 
     override fun mixMarks(): org.simpmusic.dj.planner.MixMarks? = pairFrom?.let { org.simpmusic.dj.android.perfect.UserMixMarks.get(it) }
 
-    private fun replanForMarks() {
+    private fun replanForMarks(why: String = "mix marks changed") {
         val from = pairFrom ?: return
         val to = pairTo ?: return
         if (_debug.value.isMixing || pairKey == consumedKey) return
-        DjLog.i(TAG, "mix marks changed: re-planning $from -> $to")
+        DjLog.i(TAG, "$why: re-planning $from -> $to")
         cancelPipeline()
         ready?.let { deleteWindow(it) }
         ready = null
         mixNowKey = null
         startPipeline(from, to)
+    }
+
+    /**
+     * A track's lyric vocals landed or changed (see `DjLyricsSource`). A pipeline still waiting for the analyses reads them
+     * when it plans; a pair already planned (not mixing, not about to) is planned again with them, as for a new mix mark.
+     */
+    private fun onLyricVocals(id: String) {
+        if (id != pairFrom && id != pairTo) return
+        val d = _debug.value
+        if (d.phase == "waiting-analysis") return
+        val mixAt = d.mixAtMs
+        if (mixAt != null && mixAt - playbackPositionMs < EARLIEST_EXIT_AHEAD_MS) {
+            DjLog.i(TAG, "lyrics of $id landed, but the prepared mix is due in ${mixAt - playbackPositionMs} ms: kept")
+            return
+        }
+        replanForMarks("lyrics of $id changed where the voice is")
     }
 
     /** Taps of the current session: (beat index, tap time). */
@@ -635,6 +656,9 @@ class DjEngine(
             _debug.update { it.copy(phase = "blocked", reason = context.blockedReason ?: "no next track", kind = null) }
             return
         }
+        // Where the voice is, from the lyrics: asked once per track per process (a no-op after that).
+        lyrics?.request(context.currentId)
+        lyrics?.request(next)
         // Analyses: the current track matters most, the next one is what the transition is about.
         scope.launch {
             scheduler.cancelStale(context.currentId, next)

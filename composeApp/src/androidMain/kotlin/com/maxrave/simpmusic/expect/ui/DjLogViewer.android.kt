@@ -305,6 +305,12 @@ private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, name
             put("phrases.tsv", org.simpmusic.dj.android.perfect.UserPhrases.all().entries.joinToString("\n") { "${it.key}\t${it.value}" }.toByteArray())
             // The owner's mix marks (videoId, exit, entry, solo; empty = not marked): labels for learning to mix.
             put("mixmarks.tsv", org.simpmusic.dj.android.perfect.UserMixMarks.all().entries.joinToString("\n") { (id, m) -> "$id\t${m.exitMs ?: ""}\t${m.entryMs ?: ""}\t${m.soloMs ?: ""}" }.toByteArray())
+            // Where the voice is from the songs' synced lyrics (id, provider, offset ms, confidence, ranges), and the lyric
+            // lines they were read from (filesDir/dj/lyrics): to check the lyrics against the vocal detector offline.
+            put("lyrics_vocals.tsv", org.simpmusic.dj.android.lyrics.LyricVocalsCache.tsv().toByteArray())
+            File(context.filesDir, "dj/lyrics").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
+                put("lyrics/${f.name}", f.readBytes())
+            }
             // The mix journal (one JSON line per mix started / ended / rated): what each mix was and how the owner rated it.
             for (name in listOf(org.simpmusic.dj.android.journal.MixJournal.FILE_NAME + ".1", org.simpmusic.dj.android.journal.MixJournal.FILE_NAME)) {
                 val f = File(context.filesDir, "dj/$name")

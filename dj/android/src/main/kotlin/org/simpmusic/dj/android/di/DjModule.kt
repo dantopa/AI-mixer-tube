@@ -39,6 +39,9 @@ import org.simpmusic.dj.android.library.LibraryAnalysisPolicy
 import org.simpmusic.dj.android.library.LibrarySource
 import org.simpmusic.dj.android.library.SchedulerBackgroundPort
 import org.simpmusic.dj.android.log.DjLog
+import org.simpmusic.dj.android.lyrics.DjLyricsSource
+import com.maxrave.domain.repository.LyricsCanvasRepository
+import com.maxrave.domain.repository.SongRepository
 import org.simpmusic.dj.android.log.LoggingPlanner
 import org.simpmusic.dj.android.log.LoggingRenderer
 import org.simpmusic.dj.android.recommend.AnalysisPool
@@ -152,6 +155,20 @@ val djModule =
             )
         }
 
+        // where the voice is, from the songs' synced lyrics (the app's lyrics cache, else its providers)
+        single {
+            val store = get<AnalysisStore>()
+            val scheduler = get<DjAnalysisScheduler>()
+            DjLyricsSource(
+                lyrics = get<LyricsCanvasRepository>(),
+                songs = get<SongRepository>(),
+                dir = File(androidContext().filesDir, "dj/lyrics"),
+                analysisOf = { id -> store.get(id) },
+                analysisUpdates = { id -> scheduler.observe(id) },
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            )
+        }
+
         single<DjHooks> {
             val librarySource = get<LibrarySource>()
             val engine =
@@ -166,6 +183,8 @@ val djModule =
                     windowDir = File(androidContext().cacheDir, "dj/windows"),
                     calibrator = persistentCalibrator(androidContext()),
                     titleOf = { id -> librarySource.find(id)?.title },
+                    // the lyrics only refine where the voice is: without them (no repository, any failure) the DJ uses the detector
+                    lyrics = runCatching { get<DjLyricsSource>() }.onFailure { DjLog.e("boot", "lyric vocals are OFF", it) }.getOrNull(),
                 )
             // The library analysis, the recommender, Auto DJ and the diagnostics start with the engine (they idle while off).
             // A failure here must never take the player down with it: the transition engine works without any of this.
