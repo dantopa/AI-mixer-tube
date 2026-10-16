@@ -345,6 +345,7 @@ class DjTransitionRunner(
 
     private var busPlanId: Int? = null
     private var busIncoming: ExoPlayer? = null
+    private var busOutPlayer: ExoPlayer? = null
     @Volatile private var busCommitted = false
 
     /**
@@ -373,16 +374,22 @@ class DjTransitionRunner(
         // the bus holds the cued deck silent (standby) until its entry frame: the player itself plays at the user's level
         inPlayer.volume = port.userVolume()
         busIncoming = inPlayer
+        busOutPlayer = outPlayer
         busPlanId = id
         isRunning = true
         bus.transitionListener = busListener(id, inPlayer)
         hooks.log(
             "xition",
             "LIVE ${prepared.fromId} -> ${prepared.toId} ${plan.kind}: plan $id armed on decks $outDeck -> $inDeck, outgoing at ${outPlayer.currentPosition} ms, " +
-                "incoming cued at $seek ms (entry ${plan.entryPointMs} ms), bus leaves the copy path at src ${bus.core.armedSwitchFrame()?.let { it * 1000 / bus.sampleRate }} ms",
+                "incoming cued at $seek ms (entry ${plan.entryPointMs} ms), bus leaves the copy path at src ${bus.core.armedSwitchFrame()?.let { it * 1000 / bus.sampleRate }} ms, " +
+                "outgoing deck heard at src ${deckMs(bus, outDeck)} ms",
         )
         return true
     }
+
+    /** Source position (ms) deck [deck] is heard at now, from the bus's own history; null when unknown. */
+    private fun deckMs(bus: org.simpmusic.dj.android.bus.AndroidMixBus, deck: Int): Long? =
+        runCatching { bus.core.deckSourceFrameAt(deck, bus.playedFrame()) }.getOrNull()?.takeIf { !it.isNaN() }?.let { (it * 1000 / bus.sampleRate).toLong() }
 
     private fun busRefuse(why: String): Boolean {
         hooks.log("xition", "LIVE refused: $why")
@@ -410,7 +417,9 @@ class DjTransitionRunner(
 
             override fun onTransitionAborted(planId: Int, reason: org.simpmusic.dj.bus.MixBusCore.AbortReason, incomingStarted: Boolean) {
                 if (planId != id || isDone) return
-                hooks.log("xition", "LIVE plan $id aborted: $reason (incoming started=$incomingStarted, queue moved=$busCommitted)")
+                val b = hooks.mixBus
+                val where = if (b == null) "" else ", outgoing deck at src ${busOutPlayer?.let { b.deckOf(it) }?.let { deckMs(b, it) }} ms, switch at src ${b.core.armedSwitchFrame()?.let { it * 1000 / b.sampleRate }} ms"
+                hooks.log("xition", "LIVE plan $id aborted: $reason (incoming started=$incomingStarted, queue moved=$busCommitted$where)")
                 busFinish(if (incomingStarted && busCommitted) null else "live: $reason")
             }
         }

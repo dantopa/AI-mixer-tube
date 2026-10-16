@@ -283,6 +283,12 @@ interface DjHooks {
     /** The rate a player on the real-time engine must deliver (its Sonic processor resamples to it). */
     val busSampleRate: Int get() = org.simpmusic.dj.android.bus.AndroidMixBus.SAMPLE_RATE
 
+    /**
+     * The audio processor that must sit first in the chain of a player built on [provider]: it tells the deck where each
+     * stream starts in the song (Media3 gives the output renderer time only). Null = none needed.
+     */
+    fun busStreamTap(provider: androidx.media3.exoplayer.audio.AudioOutputProvider): androidx.media3.common.audio.AudioProcessor? = null
+
     /** The adapter built [player] on [provider] (from [createAudioOutputProvider]). */
     fun bindBusPlayer(player: androidx.media3.exoplayer.ExoPlayer, provider: androidx.media3.exoplayer.audio.AudioOutputProvider) {}
 
@@ -338,6 +344,9 @@ class DjEngine(
         if (!s.enabled || !s.realtimeEngine) return null
         return org.simpmusic.dj.android.bus.BusAudioOutputProvider(b)
     }
+
+    override fun busStreamTap(provider: androidx.media3.exoplayer.audio.AudioOutputProvider): androidx.media3.common.audio.AudioProcessor? =
+        (provider as? org.simpmusic.dj.android.bus.BusAudioOutputProvider)?.streamTap
 
     override fun bindBusPlayer(player: androidx.media3.exoplayer.ExoPlayer, provider: androidx.media3.exoplayer.audio.AudioOutputProvider) {
         val b = bus ?: return

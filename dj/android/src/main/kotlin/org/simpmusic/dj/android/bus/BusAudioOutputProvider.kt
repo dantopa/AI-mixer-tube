@@ -29,6 +29,34 @@ class BusAudioOutputProvider(private val bus: AndroidMixBus) : AudioOutputProvid
     /** Channel count of the format the sink asked for last ([getOutputConfig] always precedes [getAudioOutput]). */
     @Volatile private var pendingChannels = 2
 
+    /** First in the player's chain: reports where each stream starts in the song (see [BusStreamTap]). */
+    val streamTap = BusStreamTap(this)
+
+    /** Song time (us) of the first frame of the stream the sink writes next, from [streamTap]; [UNSET_US] before any. */
+    @Volatile var streamStartUs: Long = UNSET_US
+        private set
+
+    @Volatile private var warnedNoTap = false
+
+    internal fun onStreamStart(positionOffsetUs: Long) {
+        streamStartUs = positionOffsetUs
+    }
+
+    /**
+     * Song time to address the deck by for a stream whose first write carries [presentationTimeUs] (renderer time).
+     * Without the tap (an older core patch) the renderer time is the only clue: it is used and the problem is logged,
+     * since every mix on that player would then be refused as too late.
+     */
+    internal fun streamOriginUs(presentationTimeUs: Long): Long {
+        val s = streamStartUs
+        if (s != UNSET_US) return s
+        if (!warnedNoTap) {
+            warnedNoTap = true
+            DjLog.e("bus", "deck $deckId: no stream tap in the player's chain; the deck is addressed by renderer time $presentationTimeUs us and cannot mix")
+        }
+        return presentationTimeUs
+    }
+
     override fun getFormatSupport(formatConfig: AudioOutputProvider.FormatConfig): AudioOutputProvider.FormatSupport {
         val f = formatConfig.format
         val pcm = MimeTypes.AUDIO_RAW == f.sampleMimeType && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)
@@ -69,7 +97,7 @@ class BusAudioOutputProvider(private val bus: AndroidMixBus) : AudioOutputProvid
             DjLog.e("bus", "deck $deckId: ${e.message}")
             throw AudioOutputProvider.InitializationException(e)
         }
-        return BusAudioOutput(bus, deckId, outputConfig.sampleRate)
+        return BusAudioOutput(bus, this, deckId, outputConfig.sampleRate)
     }
 
     override fun addListener(listener: AudioOutputProvider.Listener) {}
@@ -86,16 +114,37 @@ class BusAudioOutputProvider(private val bus: AndroidMixBus) : AudioOutputProvid
             DjLog.w("bus", "deck $deckId kept: ${e.message}")
         }
     }
+
+    companion object {
+        const val UNSET_US = Long.MIN_VALUE
+
+        /**
+         * Buffer the output REPORTS to Media3 (the deck ring really holds 12 s). ExoPlayer 1.11.1 schedules its playback
+         * thread dynamically: the audio renderer asks to be woken after half the buffered audio, capped at 1 s, and the
+         * player's reported position only moves on those wakes. With the ring's 12 s the position moved in ~1.1 s steps
+         * (the build-au log: 4.39 / 5.49 s per 5.02 s of wall time), which made the 1-2-3-4 counter jump 1 -> 3 -> 1.
+         * 100 ms keeps the wakes at ~50 ms, as with a normal AudioTrack.
+         */
+        const val REPORTED_BUFFER_MS = 100L
+    }
 }
 
 /** One Media3 output stream into a deck: written by the player's playback thread. */
-private class BusAudioOutput(private val bus: AndroidMixBus, private val deckId: Int, private val sampleRate: Int) : AudioOutput {
+private class BusAudioOutput(
+    private val bus: AndroidMixBus,
+    private val provider: BusAudioOutputProvider,
+    private val deckId: Int,
+    private val sampleRate: Int,
+) : AudioOutput {
     private val ring = bus.core.ring(deckId)
     private val listeners = CopyOnWriteArraySet<AudioOutput.Listener>()
     @Volatile private var released = false
     @Volatile private var playing = false
     @Volatile private var advancingReported = false
     @Volatile private var params = PlaybackParameters.DEFAULT
+
+    /** Song time of this stream's first frame (decided at its first write; the ring only reads the first write's time). */
+    private var originUs = BusAudioOutputProvider.UNSET_US
 
     override fun play() {
         if (released) return
@@ -115,12 +164,17 @@ private class BusAudioOutput(private val bus: AndroidMixBus, private val deckId:
 
     override fun write(buffer: ByteBuffer, encodedAccessUnitCount: Int, presentationTimeUs: Long): Boolean {
         if (released) return true
-        ring.write(buffer, presentationTimeUs)
+        if (originUs == BusAudioOutputProvider.UNSET_US) {
+            originUs = provider.streamOriginUs(presentationTimeUs)
+            DjLog.d("bus", "deck $deckId: stream starts at song ${originUs / 1000} ms (renderer pts $presentationTimeUs us)")
+        }
+        ring.write(buffer, originUs)
         return !buffer.hasRemaining()
     }
 
     override fun flush() {
         if (!released) ring.flush()
+        originUs = BusAudioOutputProvider.UNSET_US
         advancingReported = false
     }
 
@@ -150,7 +204,7 @@ private class BusAudioOutput(private val bus: AndroidMixBus, private val deckId:
 
     override fun getSampleRate(): Int = sampleRate
 
-    override fun getBufferSizeInFrames(): Long = AndroidMixBus.RING_SECONDS.toLong() * sampleRate
+    override fun getBufferSizeInFrames(): Long = BusAudioOutputProvider.REPORTED_BUFFER_MS * sampleRate / 1000
 
     /** The deck's frames already HEARD (bus frame at the speaker mapped to the deck), as Media3's playout position. */
     override fun getPositionUs(): Long {

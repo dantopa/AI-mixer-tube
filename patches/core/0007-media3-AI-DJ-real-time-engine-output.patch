@@ -8,24 +8,27 @@ Subject: [PATCH] media3: AI DJ real-time engine (players write into the DJ's
   the player's DefaultAudioSink writes into the player's deck on the DJ mixer (setAudioOutputProvider) instead of
   its own AudioTrack, the sink's Sonic processor resamples to the mixer's rate, audio-output playback parameters
   are off (Sonic does speed), and the player is registered with the DJ (bindBusPlayer)
+- the provider's stream tap goes first in the chain: Media3 gives the output renderer time (offset 1e12 us), and
+  the tap reports each stream's start in song time (the processors' positionOffsetUs), so the deck is addressed in song time
 - with no provider (engine off, DJ off, no hooks) nothing changes
 
 ---
 diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
-index 92c8c7e..311869d 100644
 --- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
 +++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
-@@ -556,6 +556,9 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -556,6 +556,11 @@ internal class CrossfadeExoPlayerAdapter(
          val reverb = ConvolutionReverbAudioProcessor { internalAudioEffects }
          // AI DJ: splices a pre-rendered mix into this player's own audio at exact frames (pass-through otherwise).
          val djSplicer = dj?.createSplicer()
 +        // AI DJ real-time engine: the player writes into its deck on the DJ's one mixer instead of its own AudioTrack, so
 +        // every player shares one output clock; Sonic resamples to the mixer's rate. Null = the player's own AudioTrack.
 +        val djBus = dj?.createAudioOutputProvider()
++        // ...and first in its chain, the tap that tells the deck where each stream starts in the song.
++        val djBusTap = djBus?.let { dj?.busStreamTap(it) }
  
          val perPlayerRenderers =
              object : DefaultRenderersFactory(context) {
-@@ -567,7 +570,8 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -567,7 +572,8 @@ internal class CrossfadeExoPlayerAdapter(
                      DefaultAudioSink
                          .Builder(context)
                          .setEnableFloatOutput(enableFloatOutput)
@@ -35,7 +38,16 @@ index 92c8c7e..311869d 100644
                          .setAudioProcessorChain(
                              DefaultAudioSink.DefaultAudioProcessorChain(
                                  // Equalizer first, matching the desktop graph, where the ten
-@@ -587,7 +591,7 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -579,7 +585,7 @@ internal class CrossfadeExoPlayerAdapter(
+                                 // crossfade has to be able to sweep them out along with it rather
+                                 // than the other way round. The sleep fade stays last, because it
+                                 // is the master attenuation and has to survive everything above.
+-                                listOfNotNull(djSplicer, equalizer, echo, reverb, crossfadeFilter, sleepFade).toTypedArray(),
++                                listOfNotNull(djBusTap, djSplicer, equalizer, echo, reverb, crossfadeFilter, sleepFade).toTypedArray(),
+                                 SilenceSkippingAudioProcessor(
+                                     2_000_000,
+                                     (20_000 / 2_000_000).toFloat(),
+@@ -587,7 +593,7 @@ internal class CrossfadeExoPlayerAdapter(
                                      0,
                                      256,
                                  ),
@@ -44,7 +56,7 @@ index 92c8c7e..311869d 100644
                              ),
                          ).build()
              }
-@@ -613,6 +617,7 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -613,6 +619,7 @@ internal class CrossfadeExoPlayerAdapter(
                  .setRenderersFactory(perPlayerRenderers)
                  .build()
          if (djSplicer != null) dj?.bindSplicer(player, djSplicer)
