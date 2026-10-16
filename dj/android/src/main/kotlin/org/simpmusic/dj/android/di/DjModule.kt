@@ -185,6 +185,8 @@ val djModule =
                     titleOf = { id -> librarySource.find(id)?.title },
                     // the lyrics only refine where the voice is: without them (no repository, any failure) the DJ uses the detector
                     lyrics = runCatching { get<DjLyricsSource>() }.onFailure { DjLog.e("boot", "lyric vocals are OFF", it) }.getOrNull(),
+                    // the real-time engine: one mixer and ONE audio output for every player (players opt in when they are built)
+                    bus = runCatching { org.simpmusic.dj.android.bus.AndroidMixBus() }.onFailure { DjLog.e("boot", "real-time engine is OFF", it) }.getOrNull(),
                 )
             // The library analysis, the recommender, Auto DJ and the diagnostics start with the engine (they idle while off).
             // A failure here must never take the player down with it: the transition engine works without any of this.

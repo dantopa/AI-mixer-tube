@@ -36,6 +36,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_analyze_on_metered_descrip
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere
 import simpmusic.composeapp.generated.resources.ai_dj_precise_splice
 import simpmusic.composeapp.generated.resources.ai_dj_precise_splice_description
+import simpmusic.composeapp.generated.resources.ai_dj_realtime_engine
+import simpmusic.composeapp.generated.resources.ai_dj_realtime_engine_description
 import simpmusic.composeapp.generated.resources.ai_dj_simple_mode
 import simpmusic.composeapp.generated.resources.ai_dj_simple_mode_description
 import simpmusic.composeapp.generated.resources.ai_dj_mix_anywhere_description
@@ -390,6 +392,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             subtitle = stringResource(Res.string.ai_dj_precise_splice_description),
                             smallSubtitle = true,
                             switch = (settings.preciseSplice to { on -> scope.launch { repo.setPreciseSplice(on) }; Unit }),
+                            isEnable = notCasting,
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_realtime_engine),
+                            subtitle = stringResource(Res.string.ai_dj_realtime_engine_description),
+                            smallSubtitle = true,
+                            switch = (settings.realtimeEngine to { on -> scope.launch { repo.setRealtimeEngine(on) }; Unit }),
                             isEnable = notCasting,
                         )
                     }

@@ -636,6 +636,8 @@
     <string name="dj_mark_solo">Solo</string>
     <string name="dj_rate_up">That mix sounded good</string>
     <string name="dj_rate_down">That mix sounded bad</string>
+    <string name="ai_dj_realtime_engine">Real-time engine</string>
+    <string name="ai_dj_realtime_engine_description">Both tracks play through one mixer with one audio output: the mix is sample-exact and live, with nothing pre-rendered. Applies from the next track. Turn off to go back to the previous engine.</string>
     <string name="ai_dj_precise_splice">Precise splice (experimental)</string>
     <string name="ai_dj_precise_splice_description">Plays the mix inside the two track players, switching at the exact sample instead of locking a third player by its position. Turn off if mixes start to sound wrong.</string>
     <string name="dj_mix_now_started">DJ: looking for the next good spot…</string>

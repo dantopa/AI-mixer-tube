@@ -55,6 +55,7 @@ class DjSettingsRepository(
             prefs[AUTO_DJ_ARC] = next.autoDjArc.name
             prefs[MIX_POINT] = next.mixPoint.name
             prefs[PRECISE_SPLICE] = next.preciseSplice
+            prefs[REALTIME_ENGINE] = next.realtimeEngine
         }
     }
 
@@ -73,6 +74,8 @@ class DjSettingsRepository(
     suspend fun setMixAnywhere(anywhere: Boolean) = update { it.copy(mixPoint = if (anywhere) MixPoint.ANYWHERE else MixPoint.AT_END) }
 
     suspend fun setPreciseSplice(on: Boolean) = update { it.copy(preciseSplice = on) }
+
+    suspend fun setRealtimeEngine(on: Boolean) = update { it.copy(realtimeEngine = on) }
 
     suspend fun setAutoDjArc(arc: EnergyArc) = update { it.copy(autoDjArc = arc) }
 
@@ -112,6 +115,7 @@ class DjSettingsRepository(
             autoDjArc = this[AUTO_DJ_ARC]?.let { name -> EnergyArc.entries.firstOrNull { it.name == name } } ?: d.autoDjArc,
             mixPoint = this[MIX_POINT]?.let { name -> MixPoint.entries.firstOrNull { it.name == name } } ?: d.mixPoint,
             preciseSplice = this[PRECISE_SPLICE] ?: d.preciseSplice,
+            realtimeEngine = this[REALTIME_ENGINE] ?: d.realtimeEngine,
         )
     }
 
@@ -136,6 +140,7 @@ class DjSettingsRepository(
 
         private val ENABLED = booleanPreferencesKey("dj_enabled")
         private val PRECISE_SPLICE = booleanPreferencesKey("dj_precise_splice")
+        private val REALTIME_ENGINE = booleanPreferencesKey("dj_realtime_engine")
         private val OVERLAP_BARS = intPreferencesKey("dj_overlap_bars")
         private val MAX_TEMPO_BEND = floatPreferencesKey("dj_max_tempo_bend")
         private val ALLOW_KEY_SHIFT = booleanPreferencesKey("dj_allow_key_shift")

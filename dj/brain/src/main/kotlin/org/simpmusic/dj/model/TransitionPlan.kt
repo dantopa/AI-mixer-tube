@@ -242,6 +242,12 @@ data class DjSettings(
      * pointer-locked) instead of a third player locked by position. Off = the three-player path.
      */
     val preciseSplice: Boolean = true,
+    /**
+     * The real-time engine: every player writes into one mixer (`org.simpmusic.dj.bus.MixBusCore`) with ONE audio output,
+     * and a mix is played live from the plan, sample-exact, with no pre-rendered window. Off = the window + splice path.
+     * Read when a player is created, so a change applies from the next track.
+     */
+    val realtimeEngine: Boolean = true,
 )
 
 /** Shape of the energy over an Auto DJ session; feeds [org.simpmusic.dj.recommend.RecommendContext.energyTrend]. */

@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 16 Oct 2026 20:00:00 +0000
+Subject: [PATCH] media3: AI DJ real-time engine (players write into the DJ's
+ one mixer)
+
+- createExoPlayerInstance asks the DJ hooks for an AudioOutputProvider; when there is one (real-time engine on),
+  the player's DefaultAudioSink writes into the player's deck on the DJ mixer (setAudioOutputProvider) instead of
+  its own AudioTrack, the sink's Sonic processor resamples to the mixer's rate, audio-output playback parameters
+  are off (Sonic does speed), and the player is registered with the DJ (bindBusPlayer)
+- with no provider (engine off, DJ off, no hooks) nothing changes
+
+---
+diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+index 92c8c7e..311869d 100644
+--- a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
++++ b/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeExoPlayerAdapter.kt
+@@ -556,6 +556,9 @@ internal class CrossfadeExoPlayerAdapter(
+         val reverb = ConvolutionReverbAudioProcessor { internalAudioEffects }
+         // AI DJ: splices a pre-rendered mix into this player's own audio at exact frames (pass-through otherwise).
+         val djSplicer = dj?.createSplicer()
++        // AI DJ real-time engine: the player writes into its deck on the DJ's one mixer instead of its own AudioTrack, so
++        // every player shares one output clock; Sonic resamples to the mixer's rate. Null = the player's own AudioTrack.
++        val djBus = dj?.createAudioOutputProvider()
+ 
+         val perPlayerRenderers =
+             object : DefaultRenderersFactory(context) {
+@@ -567,7 +570,8 @@ internal class CrossfadeExoPlayerAdapter(
+                     DefaultAudioSink
+                         .Builder(context)
+                         .setEnableFloatOutput(enableFloatOutput)
+-                        .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams)
++                        .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams && djBus == null)
++                        .apply { if (djBus != null) setAudioOutputProvider(djBus) }
+                         .setAudioProcessorChain(
+                             DefaultAudioSink.DefaultAudioProcessorChain(
+                                 // Equalizer first, matching the desktop graph, where the ten
+@@ -587,7 +591,7 @@ internal class CrossfadeExoPlayerAdapter(
+                                     0,
+                                     256,
+                                 ),
+-                                SonicAudioProcessor(),
++                                SonicAudioProcessor().apply { if (djBus != null) setOutputSampleRateHz(dj?.busSampleRate ?: 48_000) },
+                             ),
+                         ).build()
+             }
+@@ -613,6 +617,7 @@ internal class CrossfadeExoPlayerAdapter(
+                 .setRenderersFactory(perPlayerRenderers)
+                 .build()
+         if (djSplicer != null) dj?.bindSplicer(player, djSplicer)
++        if (djBus != null) dj?.bindBusPlayer(player, djBus)
+ 
+         return PlayerWithFilter(player, crossfadeFilter)
+     }

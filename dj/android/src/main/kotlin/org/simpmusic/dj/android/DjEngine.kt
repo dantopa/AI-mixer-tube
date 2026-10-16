@@ -69,12 +69,22 @@ class PreparedTransition(
     val splice: org.simpmusic.dj.android.splice.SpliceSchedule? = null,
     /** Our decode of the incoming track where its player will start (to measure that player's decode skew). */
     val incomingReference: org.simpmusic.dj.android.splice.ReferenceAudio? = null,
+    /** Played live by the real-time engine (no rendered window: [window] is a placeholder). */
+    val viaBus: Boolean = false,
 ) {
-    /** Outgoing source position at which the window player must start playing (silently) so it is running at window sample 0. */
-    fun triggerSourceMs(startLatencyMs: Double): Double = timeline.outgoingSourceAtWindowStart - startLatencyMs
+    /**
+     * Outgoing source position at which the window player must start playing (silently) so it is running at window sample 0.
+     * On the real-time engine: when the incoming player is cued ([BUS_CUE_LEAD_MS] before the plan's first frame).
+     */
+    fun triggerSourceMs(startLatencyMs: Double): Double =
+        if (viaBus) busStartSourceMs() - BUS_CUE_LEAD_MS else timeline.outgoingSourceAtWindowStart - startLatencyMs
 
     /** After this outgoing position the chance is gone (the lock-out budget no longer fits before the mix). */
-    fun lastStartSourceMs(): Double = timeline.outgoingSourceAtWindowStart + LATE_START_SLACK_MS
+    fun lastStartSourceMs(): Double =
+        if (viaBus) busStartSourceMs() - BUS_LAST_CUE_MS else timeline.outgoingSourceAtWindowStart + LATE_START_SLACK_MS
+
+    /** The outgoing source position where the bus leaves the copy path (T0 minus the pre-roll, at the plan's rates; a bend <= 10 %). */
+    fun busStartSourceMs(): Double = plan.exitPointMs - (-plan.preRollMs).coerceAtLeast(0L) * 1.12
 
     fun isTriggeredAt(outgoingPositionMs: Long, startLatencyMs: Double): Boolean =
         outgoingPositionMs >= triggerSourceMs(startLatencyMs) && outgoingPositionMs <= lastStartSourceMs()
@@ -84,6 +94,12 @@ class PreparedTransition(
 
     private companion object {
         const val LATE_START_SLACK_MS = 600.0
+
+        /** The incoming player is started this long before the bus needs its entry frame (prepare, seek, fill its ring). */
+        const val BUS_CUE_LEAD_MS = 5_000.0
+
+        /** A cue later than this before the bus start would arrive too late (the incoming ring would not be filled). */
+        const val BUS_LAST_CUE_MS = 1_500.0
     }
 }
 
@@ -258,6 +274,21 @@ interface DjHooks {
     /** The adapter built [player] with [splicer] in its chain. */
     fun bindSplicer(player: androidx.media3.exoplayer.ExoPlayer, splicer: androidx.media3.common.audio.AudioProcessor) {}
 
+    /**
+     * The real-time engine: the output a new player writes into (its deck on the one mixer), or null when the player keeps
+     * its own AudioTrack (engine off, DJ off). Asked once per player, when the adapter builds it.
+     */
+    fun createAudioOutputProvider(): androidx.media3.exoplayer.audio.AudioOutputProvider? = null
+
+    /** The rate a player on the real-time engine must deliver (its Sonic processor resamples to it). */
+    val busSampleRate: Int get() = org.simpmusic.dj.android.bus.AndroidMixBus.SAMPLE_RATE
+
+    /** The adapter built [player] on [provider] (from [createAudioOutputProvider]). */
+    fun bindBusPlayer(player: androidx.media3.exoplayer.ExoPlayer, provider: androidx.media3.exoplayer.audio.AudioOutputProvider) {}
+
+    /** The real-time engine's mixer, for the transition runner; null = not in use. */
+    val mixBus: org.simpmusic.dj.android.bus.AndroidMixBus? get() = null
+
     /** The players' splicers, for the transition runner. */
     val splicers: org.simpmusic.dj.android.splice.SplicerRegistry? get() = null
 
@@ -298,7 +329,23 @@ class DjEngine(
     private val splicerRegistry: org.simpmusic.dj.android.splice.SplicerRegistry = org.simpmusic.dj.android.splice.SplicerRegistry(),
     /** Where the voice is from the songs' synced lyrics (fetched for the playing and the next track); null = detector only. */
     private val lyrics: org.simpmusic.dj.android.lyrics.DjLyricsSource? = null,
+    /** The real-time engine's mixer (one output for every player); null = the window + splice path only. */
+    private val bus: org.simpmusic.dj.android.bus.AndroidMixBus? = null,
 ) : DjHooks {
+    override fun createAudioOutputProvider(): androidx.media3.exoplayer.audio.AudioOutputProvider? {
+        val b = bus ?: return null
+        val s = settingsFlow.value
+        if (!s.enabled || !s.realtimeEngine) return null
+        return org.simpmusic.dj.android.bus.BusAudioOutputProvider(b)
+    }
+
+    override fun bindBusPlayer(player: androidx.media3.exoplayer.ExoPlayer, provider: androidx.media3.exoplayer.audio.AudioOutputProvider) {
+        val b = bus ?: return
+        (provider as? org.simpmusic.dj.android.bus.BusAudioOutputProvider)?.let { b.bind(player, it) }
+    }
+
+    override val mixBus: org.simpmusic.dj.android.bus.AndroidMixBus? get() = bus
+
     override fun createSplicer(): androidx.media3.common.audio.AudioProcessor = splicerRegistry.create()
 
     override fun bindSplicer(player: androidx.media3.exoplayer.ExoPlayer, splicer: androidx.media3.common.audio.AudioProcessor) =
@@ -785,7 +832,8 @@ class DjEngine(
         _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
         val settings = settingsFlow.value
         // The window needs the outgoing audio decoded and rendered before it plays, so the mix cannot start sooner than that.
-        val earliest = playbackPositionMs + EARLIEST_EXIT_AHEAD_MS
+        // The real-time engine only needs the incoming player cued (a few seconds): the mix can come much sooner.
+        val earliest = playbackPositionMs + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
         val constraints = PlanConstraints(earliestExitMs = earliest)
         val plan =
             if (perfectKey == key(fromId, toId)) {
@@ -842,6 +890,23 @@ class DjEngine(
             DjLog.w(TAG, "window bounds rejected: $bounds (${plan.reason}) -> normal crossfade")
             _mixView.value = null
             _debug.update { it.copy(phase = "fallback", kind = PlanKind.SIMPLE_CROSSFADE, reason = "$bounds (${plan.reason})") }
+            return
+        }
+        if (bus != null && settings.realtimeEngine) {
+            // The real-time engine plays the plan live from the two players: nothing to decode or render.
+            val prepared = PreparedTransition(
+                fromId, toId, plan, timeline, RenderedWindow(File(windowDir, "none.wav"), bus.sampleRate, 0L), to.durationMs, viaBus = true,
+            )
+            ready = prepared
+            val titles = (runCatching { titleOf(fromId) }.getOrNull() ?: fromId) to (runCatching { titleOf(toId) }.getOrNull() ?: toId)
+            _mixView.value = runCatching { DjMixViewBuilder.build(plan, from, to, titles) }.onFailure { DjLog.w(TAG, "mix view could not be built: ${it.message}") }.getOrNull()
+            _debug.update { it.copy(phase = "ready", mixAtMs = plan.exitPointMs) }
+            DjLog.i(
+                TAG,
+                "LIVE mix READY $fromId -> $toId in ${since()} ms since pipeline start (real-time engine): bus leaves the copy path at outgoing src " +
+                    "${"%.0f".format(prepared.busStartSourceMs())} ms, incoming cued at ${"%.0f".format(prepared.triggerSourceMs(0.0))} ms (${plan.kind}: ${plan.reason})",
+            )
+            listener?.invoke(prepared)
             return
         }
         val cancel = CancelSignal { cancelFlag.get() || !scope.isActive }
@@ -1003,6 +1068,9 @@ private const val TAG = "engine"
 
 /** Time the pipeline needs (decode + render + player warm-up; measured 9.4 s end to end on a Pixel 10 Pro, 2026-09-30) between "now" and the earliest audible instant of a mix. */
 private const val EARLIEST_EXIT_AHEAD_MS = 25_000L
+
+/** With the real-time engine: the cue lead plus the plan's pre-roll (tempo ramp) plus margin. */
+private const val BUS_EARLIEST_EXIT_AHEAD_MS = 16_000L
 
 /** "Mix now": how far past the earliest possible exit the planner may look for a good phrase start. */
 private const val MIX_NOW_SPAN_MS = 20_000L

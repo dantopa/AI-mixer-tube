@@ -699,4 +699,6 @@
     <string name="dj_mark_solo">Solo</string>
     <string name="dj_rate_up">Esa mezcla sonó bien</string>
     <string name="dj_rate_down">Esa mezcla sonó mal</string>
+    <string name="ai_dj_realtime_engine">Motor en tiempo real</string>
+    <string name="ai_dj_realtime_engine_description">Los dos temas suenan por un solo mezclador con una sola salida de audio: la mezcla es exacta a la muestra y en vivo, sin nada pre-armado. Se aplica desde el próximo tema. Apagalo para volver al motor anterior.</string>
 </resources>
