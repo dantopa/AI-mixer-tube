@@ -130,6 +130,12 @@ data class TrackAnalysis(
     val phrases: PhraseInfo? = null,
     /** What the vocal detector heard frame by frame (what [vocals] was cut from); null for analyses made before it was stored. */
     val vocalProfile: VocalProfile? = null,
+    /**
+     * Which feature layers this record carries, and at which version (`Layer.key` -> `Layer.version`, see
+     * `org.simpmusic.dj.analysis.FeatureLayers`). Empty for records made before layers were stamped: their layers are then
+     * inferred from the fields. Bumping one layer's version re-computes that layer alone.
+     */
+    val layerVersions: Map<String, Int> = emptyMap(),
 ) {
     companion object {
         const val SCHEMA_VERSION = 1

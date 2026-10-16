@@ -1,5 +1,7 @@
 package org.simpmusic.dj.ml
 
+import org.simpmusic.dj.analysis.FeatureLayers
+import org.simpmusic.dj.analysis.Layer
 import org.simpmusic.dj.model.Confident
 import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TrackAnalysis
@@ -25,7 +27,9 @@ class CompositeAnalyzer(
     override val id: String = "${base.id}+${beats.id}"
 
     override fun analyze(videoId: String, audio: PcmAudio): TrackAnalysis {
-        val analysis = base.analyze(videoId, audio)
+        // A base that stamps nothing (a test fake, the envelope-only one) is materialised under ITS id first: once the record
+        // carries this analyzer's id, the legacy inference would read "beat-this" as a neural grid that may not be there.
+        val analysis = base.analyze(videoId, audio).let { if (FeatureLayers.isLegacy(it)) FeatureLayers.stamp(it, emptySet()) else it }
         val grid = try {
             beats.grid(audio)
         } catch (e: Exception) {
@@ -34,13 +38,20 @@ class CompositeAnalyzer(
         // Without a grid the DSP result is kept, but it must still carry THIS analyzer's id: the store treats a row whose
         // analyzerId differs from the analyzer's id as stale and deletes it on sight, so an untouched "dsp-1" row would be
         // re-analysed forever and the playing track would wait for an analysis that never sticks.
-        val a = if (grid == null) analysis.copy(analyzerId = id) else overlay(analysis, grid)
+        // Stamp only what was really computed: a missing grid leaves GRID / DOWNBEAT_LOGITS absent (the scheduler tries again
+        // in a later process), a failed vocal pass leaves VOCALS absent. The base stamps its own layers (DSP: envelopes + structure).
+        val a = if (grid == null) analysis.copy(analyzerId = id) else FeatureLayers.produced(overlay(analysis, grid), GRID_LAYERS)
         val v = vocals ?: return a
         return try {
-            v.detect(audio)?.let { a.copy(vocals = it.ranges, vocalProfile = it.profile) } ?: a
+            v.detect(audio)?.let { FeatureLayers.produced(a.copy(vocals = it.ranges, vocalProfile = it.profile), setOf(Layer.VOCALS)) } ?: a
         } catch (e: Exception) {
             a
         }
+    }
+
+    private companion object {
+        /** The neural tracker gives both in one inference (the logits may be absent when the model's output has none). */
+        val GRID_LAYERS = setOf(Layer.GRID, Layer.DOWNBEAT_LOGITS)
     }
 
     private fun overlay(a: TrackAnalysis, g: BeatGrid): TrackAnalysis {

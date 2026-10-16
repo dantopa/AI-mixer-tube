@@ -30,9 +30,13 @@ import org.simpmusic.dj.android.scheduler.DeviceConditions
 import org.simpmusic.dj.android.scheduler.DjAnalysisScheduler
 import org.simpmusic.dj.android.scheduler.UnavailableAnalyzer
 import org.simpmusic.dj.android.store.AnalysisStore
+import org.simpmusic.dj.analysis.Layer
+import org.simpmusic.dj.ml.VocalProvider
 import org.simpmusic.dj.model.AnalysisPriority
+import org.simpmusic.dj.model.Confident
 import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.model.TimeRange
 import org.simpmusic.dj.model.TrackAnalyzer
 import java.io.File
 import java.nio.file.Files
@@ -83,14 +87,39 @@ class SchedulerTest {
         override suspend fun decodeStereoRange(videoId: String, startMs: Long, endMs: Long, cancel: CancelSignal): StereoPcm = error("unused")
     }
 
-    private class FakeAnalyzer(override val id: String = "fake-1") : TrackAnalyzer {
+    private class FakeAnalyzer(override val id: String = "fake-1", private val frames: Boolean = false) : TrackAnalyzer {
         var throwUnavailable = false
+        var calls = 0
 
         override fun analyze(videoId: String, audio: PcmAudio): TrackAnalysis {
+            calls++
             if (throwUnavailable) throw AnalyzerUnavailableException("nope")
-            return fakeAnalysis(videoId, analyzerId = id)
+            val a = fakeAnalysis(videoId, analyzerId = id)
+            return if (frames) a.copy(structureHopMs = 500, structureFrames = List(17) { 0.3f }, highBandEnergy = List(20) { 0.2f }) else a
         }
     }
+
+    /** A vocal detector that hears one voice (or, with [hears] false, can say nothing: its model did not load). */
+    private class FakeVocals(private val hears: Boolean = true) : VocalProvider {
+        override val id = "test-vocals"
+        var calls = 0
+
+        override fun vocals(audio: PcmAudio): Confident<List<TimeRange>>? {
+            calls++
+            return if (hears) Confident(listOf(TimeRange(1_000, 5_000)), 0.85f) else null
+        }
+    }
+
+    /** A record of the device's full analyzer, with or without the logits and the structure frames, never with vocals. */
+    private fun storedFull(id: String, analyzerId: String = FULL, logits: Boolean = true, frames: Boolean = true): TrackAnalysis =
+        fakeAnalysis(id, analyzerId = analyzerId).let { a ->
+            a.copy(
+                beatDownbeatLogits = if (logits) List(a.beatTimesMs!!.value.size) { 0f } else null,
+                structureHopMs = if (frames) 500 else 0,
+                structureFrames = if (frames) List(17) { 0.1f } else emptyList(),
+                highBandEnergy = if (frames) List(20) { 0.1f } else emptyList(),
+            )
+        }
 
     private class Rig(
         val scope: TestScope,
@@ -102,7 +131,12 @@ class SchedulerTest {
         var meteredAllowed: Boolean = false,
     )
 
-    private fun TestScope.rig(analyzer: TrackAnalyzer = FakeAnalyzer(), conditions: Conditions = Conditions(), quick: TrackAnalyzer? = null): Rig {
+    private fun TestScope.rig(
+        analyzer: TrackAnalyzer = FakeAnalyzer(),
+        conditions: Conditions = Conditions(),
+        quick: TrackAnalyzer? = null,
+        vocals: VocalProvider? = null,
+    ): Rig {
         val decoder = FakeDecoder()
         val store = AnalysisStore(dir, keepOtherAnalyzers = setOfNotNull(quick?.id))
         var allowed = false
@@ -118,6 +152,7 @@ class SchedulerTest {
                 clock = { testScheduler.currentTime },
                 blockedRetryMs = 30_000L,
                 quick = quick,
+                vocals = vocals,
             )
         return Rig(this, decoder, analyzer, conditions, scheduler, store).also { r -> r.meteredAllowed = allowed }
     }
@@ -303,4 +338,104 @@ class SchedulerTest {
             assertEquals(listOf("old"), r.decoder.decoded)
             assertEquals("dsp-1", r.scheduler.get("old")!!.analyzerId)
         }
+    // ---- analysis layers: a stored full analysis only gets the layers it lacks ----
+
+    @Test
+    fun vocalsAloneAreAddedToAStoredFullAnalysisWithoutRunningTheAnalyzersAgain() =
+        runTest {
+            AnalysisStore(dir).put(storedFull("aaa"))
+            val full = FakeAnalyzer(FULL)
+            val quick = FakeAnalyzer("dsp-1", frames = true)
+            val voices = FakeVocals()
+            val r = rig(analyzer = full, quick = quick, vocals = voices)
+            assertEquals(setOf(Layer.VOCALS), r.scheduler.missingLayers("aaa"))
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertEquals(listOf("aaa"), r.decoder.decoded)
+            assertEquals("no Beat This!, no DSP pass", 0, full.calls + quick.calls)
+            assertEquals(1, voices.calls)
+            val a = r.scheduler.get("aaa")!!
+            assertNotNull(a.vocals)
+            assertNotNull("the grid evidence is kept", a.beatDownbeatLogits)
+            assertEquals(17, a.structureFrames.size)
+            assertEquals(Layer.VOCALS.version, a.layerVersions[Layer.VOCALS.key])
+            assertTrue(r.scheduler.missingLayers("aaa").isEmpty())
+            // complete now: asking again decodes nothing
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertEquals(1, r.decoder.decoded.size)
+        }
+
+    @Test
+    fun missingStructureFramesTakeTheQuickPassOnlyAndKeepTheGrid() =
+        runTest {
+            AnalysisStore(dir).put(storedFull("aaa", frames = false))
+            val full = FakeAnalyzer(FULL)
+            val quick = FakeAnalyzer("dsp-1", frames = true)
+            val r = rig(analyzer = full, quick = quick)
+            assertEquals(setOf(Layer.STRUCTURE), r.scheduler.missingLayers("aaa"))
+            r.scheduler.request("aaa", AnalysisPriority.NEXT_UP)
+            advanceUntilIdle()
+            assertEquals(0, full.calls)
+            assertEquals(1, quick.calls)
+            val a = r.scheduler.get("aaa")!!
+            assertEquals(FULL, a.analyzerId)
+            assertEquals(17, a.structureFrames.size)
+            assertEquals("the high band came with the frames", 20, a.highBandEnergy.size)
+            assertNotNull(a.beatDownbeatLogits)
+            assertTrue(r.scheduler.missingLayers("aaa").isEmpty())
+        }
+
+    @Test
+    fun missingDownbeatLogitsTakeTheFullAnalyzerOnceInAProcess() =
+        runTest {
+            AnalysisStore(dir).put(storedFull("aaa", logits = false))
+            val full = FakeAnalyzer(FULL)
+            val quick = FakeAnalyzer("dsp-1", frames = true)
+            val r = rig(analyzer = full, quick = quick)
+            assertEquals(setOf(Layer.DOWNBEAT_LOGITS), r.scheduler.missingLayers("aaa"))
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertEquals(1, full.calls)
+            assertEquals(0, quick.calls)
+            // this fake full analyzer produces no logits either: not tried again until the next process
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertEquals(1, r.decoder.decoded.size)
+            assertFalse(r.scheduler.upgradePending("aaa"))
+        }
+
+    @Test
+    fun aVocalModelThatGivesNothingIsNotRetriedForeverButTheLayerStaysMissing() =
+        runTest {
+            AnalysisStore(dir).put(storedFull("aaa"))
+            val voices = FakeVocals(hears = false)
+            val r = rig(analyzer = FakeAnalyzer(FULL), quick = FakeAnalyzer("dsp-1", frames = true), vocals = voices)
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertEquals(1, r.decoder.decoded.size)
+            assertEquals(1, voices.calls)
+            assertEquals(setOf(Layer.VOCALS), r.scheduler.missingLayers("aaa"))
+            assertFalse("nothing is coming: a caller must not wait", r.scheduler.upgradePending("aaa"))
+        }
+
+    @Test
+    fun aDspOnlyDeviceNeverReanalysesForTheNeuralGrid() =
+        runTest {
+            AnalysisStore(dir).put(storedFull("aaa", analyzerId = "dsp-1", logits = false))
+            val dsp = FakeAnalyzer("dsp-1", frames = true)
+            val r = rig(analyzer = dsp)
+            assertTrue(r.scheduler.missingLayers("aaa").isEmpty())
+            r.scheduler.request("aaa", AnalysisPriority.NOW_PLAYING)
+            advanceUntilIdle()
+            assertTrue(r.decoder.decoded.isEmpty())
+            assertEquals(0, dsp.calls)
+        }
+
+    private companion object {
+        /** The device's full analyzer id (DSP + Beat This!): the only one that can give the neural grid and its logits. */
+        const val FULL = "dsp-1+beat-this"
+    }
 }
