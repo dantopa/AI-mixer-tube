@@ -115,6 +115,9 @@ import kotlin.reflect.KClass
 // so the ask comes back after an update - same policy as OPEN_APP_TIME.
 const val FOOTGUNS_STAR_KEY = "footguns_starred"
 
+/** Bagracho DJ fork: never offer the original SimpMusic's releases as an update (see [SharedViewModel.checkForUpdate]). */
+private const val FORK_SKIPS_UPSTREAM_UPDATES = true
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class SharedViewModel(
     private val dataStoreManager: DataStoreManager,
@@ -1065,6 +1068,13 @@ class SharedViewModel(
     val updateResponse: StateFlow<UpdateData?> = _updateResponse
 
     fun checkForUpdate() {
+        // Bagracho DJ is a fork: both channels (GitHub releases of maxrave-dev/SimpMusic, F-Droid) describe the ORIGINAL
+        // app, and installing that over this build would drop the DJ. The fork ships its own APKs, so no update is offered.
+        if (FORK_SKIPS_UPSTREAM_UPDATES) {
+            log("Update check skipped: Bagracho DJ fork, upstream releases are not this app", LogLevel.INFO)
+            _isCheckingUpdate.value = false
+            return
+        }
         viewModelScope.launch {
             _isCheckingUpdate.value = true
             val updateChannel = dataStoreManager.updateChannel.first()
