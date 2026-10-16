@@ -230,6 +230,30 @@ object DjLog {
     /** The two files on disk (older first), for sharing. */
     fun files(): List<File> = installedFile?.files().orEmpty()
 
+    /**
+     * Only what is about the mixes, from every session still on disk (older first; the in-memory ring when nothing is on
+     * disk): the transition runner and the mixer (`xition`, `bus`), the plan the engine actually used (the `dj-render`
+     * thread; the look-ahead's what-if plans are left out), anything that went wrong (W/E), and every line that says
+     * LIVE, consumed or fallback. A few hundred lines instead of megabytes, so it can be sent from a bad connection.
+     */
+    fun mixLines(): List<String> {
+        val source = files().filter { it.isFile }.flatMap { runCatching { it.readLines() }.getOrDefault(emptyList()) }.ifEmpty { lines() }
+        return source.filter(::isMixLine)
+    }
+
+    private val lineShape = Regex("""\] (\S+)\s+([DIWE]) """)
+
+    internal fun isMixLine(line: String): Boolean {
+        val m = lineShape.find(line) ?: return false
+        val tag = m.groupValues[1]
+        val level = m.groupValues[2]
+        return tag == "xition" || tag == "bus" || level == "W" || level == "E" ||
+            (tag == "planner" && line.contains("[dj-render]")) ||
+            MIX_WORDS.any { line.contains(it) }
+    }
+
+    private val MIX_WORDS = listOf("LIVE", "consumed ", "fallback", "pipeline start", "aborted")
+
     fun redactUrl(url: String?): String = DjLogger.redactUrl(url)
 
     /** Runs [block] and logs `what ... ok in N ms` or `what ... FAILED in N ms` with the exception; rethrows. */

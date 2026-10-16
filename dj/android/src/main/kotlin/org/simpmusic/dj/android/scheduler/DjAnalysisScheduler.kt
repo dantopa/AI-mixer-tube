@@ -218,6 +218,9 @@ class DjAnalysisScheduler(
             .map { get(videoId) }
             .onStart { emit(get(videoId)) }
 
+    /** Repeated requests for the same track say the same thing: logged when the answer changes, or once a minute. */
+    private val requestLines = org.simpmusic.dj.android.log.RepeatFilter(everyMs = 60_000L)
+
     override suspend fun request(videoId: String, priority: AnalysisPriority) {
         if (analyzer is UnavailableAnalyzer || !_state.value.analyzerAvailable) {
             DjLog.w(TAG, "request $videoId $priority ignored: no analyzer available")
@@ -225,7 +228,7 @@ class DjAnalysisScheduler(
         }
         val fresh = withContext(io) { fresh(videoId, priority) }
         if (fresh) {
-            DjLog.d(TAG, "request $videoId $priority: already analysed (fresh in store)")
+            if (requestLines.shouldLog("$videoId/$priority", "fresh")) DjLog.d(TAG, "request $videoId $priority: already analysed (fresh in store)")
             return
         }
         var verdict: String
@@ -259,7 +262,10 @@ class DjAnalysisScheduler(
                 verdict += "; preempting background job $runningId"
             }
             publishState()
-            DjLog.i(TAG, "request $videoId $priority: $verdict | ${policy.describe()} | queue=${queueSummary()} running=$runningId")
+            // the engine asks again on every poll: an unchanged "dedup" says nothing new
+            if (!verdict.startsWith("dedup") || requestLines.shouldLog("$videoId/$priority", verdict)) {
+                DjLog.i(TAG, "request $videoId $priority: $verdict | ${policy.describe()} | queue=${queueSummary()} running=$runningId")
+            }
         }
         wake.trySend(Unit)
     }

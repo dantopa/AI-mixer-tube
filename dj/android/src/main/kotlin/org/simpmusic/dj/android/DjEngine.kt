@@ -594,7 +594,13 @@ class DjEngine(
 
     override fun log(message: String) = logger(message)
 
-    override fun log(tag: String, message: String) = DjLog.d(tag, message)
+    override fun log(tag: String, message: String) {
+        // the adapter's poll explains itself every 5 s: logged when what it says changes (numbers aside), or once a minute
+        if (tag == "poll" && !pollLines.shouldLog("poll", org.simpmusic.dj.android.log.RepeatFilter.withoutNumbers(message))) return
+        DjLog.d(tag, message)
+    }
+
+    private val pollLines = org.simpmusic.dj.android.log.RepeatFilter(everyMs = 60_000L)
 
     override fun prepared(currentId: String, nextId: String): PreparedTransition? =
         ready?.takeIf { it.fromId == currentId && it.toId == nextId && key(currentId, nextId) != consumedKey }

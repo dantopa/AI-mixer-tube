@@ -419,7 +419,18 @@ class DjTransitionRunner(
                 if (planId != id || isDone) return
                 val b = hooks.mixBus
                 val where = if (b == null) "" else ", outgoing deck at src ${busOutPlayer?.let { b.deckOf(it) }?.let { deckMs(b, it) }} ms, switch at src ${b.core.armedSwitchFrame()?.let { it * 1000 / b.sampleRate }} ms"
-                hooks.log("xition", "LIVE plan $id aborted: $reason (incoming started=$incomingStarted, queue moved=$busCommitted$where)")
+                // the incoming player's own state says why it was lost: buffering (network), paused, an error, or a seek
+                val inState = runCatching {
+                    val st = when (inPlayer.playbackState) {
+                        androidx.media3.common.Player.STATE_IDLE -> "IDLE"
+                        androidx.media3.common.Player.STATE_BUFFERING -> "BUFFERING"
+                        androidx.media3.common.Player.STATE_READY -> "READY"
+                        else -> "ENDED"
+                    }
+                    ", incoming player $st playWhenReady=${inPlayer.playWhenReady} at ${inPlayer.currentPosition} ms, buffered to ${inPlayer.bufferedPosition} ms" +
+                        (inPlayer.playerError?.let { e -> ", error ${e.errorCodeName}: ${e.message}" } ?: "")
+                }.getOrDefault("")
+                hooks.log("xition", "LIVE plan $id aborted: $reason (incoming started=$incomingStarted, queue moved=$busCommitted$where$inState)")
                 busFinish(if (incomingStarted && busCommitted) null else "live: $reason")
             }
         }

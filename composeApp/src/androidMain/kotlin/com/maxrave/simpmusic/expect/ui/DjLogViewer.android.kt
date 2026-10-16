@@ -236,12 +236,14 @@ private fun levelOf(line: String): Char? {
     return line.getOrNull(afterTag)
 }
 
-/** Writes the whole log to a text file in the cache dir and hands it to the system share sheet (same FileProvider as the image share). */
+/** Writes the log to a text file in the cache dir (the mix lines first, then this session) and hands it to the system share sheet (same FileProvider as the image share). */
 fun shareDjLog(context: Context, chooserTitle: String) {
     runCatching {
         val dir = File(context.cacheDir, "dj_log").apply { mkdirs() }
         val file = File(dir, "dj-log.txt")
-        file.writeText(DjLog.text())
+        // the mixes first (every session still on disk), so a short message from a bad connection already says what failed
+        val mixes = DjLog.mixLines()
+        file.writeText("=== mixes (${mixes.size} lines, all sessions on disk) ===\n" + mixes.joinToString("\n") + "\n\n=== log of this session ===\n" + DjLog.text())
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.FileProvider", file)
         val send =
             Intent(Intent.ACTION_SEND).apply {
@@ -292,6 +294,8 @@ private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, name
                 put("analysis/${f.name}", f.readBytes())
             }
             put("dj-log.txt", DjLog.text().toByteArray())
+            // only the lines about the mixes, from every session on disk: the file to open first
+            put("mixes.txt", DjLog.mixLines().joinToString("\n").toByteArray())
             // The in-memory log starts with this process; the file pair on disk also holds earlier sessions (the
             // app may have been restarted since the mix that went wrong).
             for (name in listOf("dj-debug.log.1", "dj-debug.log")) {
