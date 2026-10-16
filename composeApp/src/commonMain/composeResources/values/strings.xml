@@ -634,6 +634,8 @@
     <string name="dj_mark_exit">Out</string>
     <string name="dj_mark_entry">In</string>
     <string name="dj_mark_solo">Solo</string>
+    <string name="dj_rate_up">That mix sounded good</string>
+    <string name="dj_rate_down">That mix sounded bad</string>
     <string name="ai_dj_precise_splice">Precise splice (experimental)</string>
     <string name="ai_dj_precise_splice_description">Plays the mix inside the two track players, switching at the exact sample instead of locking a third player by its position. Turn off if mixes start to sound wrong.</string>
     <string name="dj_mix_now_started">DJ: looking for the next good spot…</string>

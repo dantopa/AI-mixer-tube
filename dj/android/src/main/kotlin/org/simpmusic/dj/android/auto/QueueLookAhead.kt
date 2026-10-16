@@ -18,6 +18,7 @@ import org.simpmusic.dj.android.recommend.DjPlayerPort
 import org.simpmusic.dj.android.recommend.PlayerSnapshot
 import org.simpmusic.dj.model.AnalysisPriority
 import org.simpmusic.dj.model.DjSettings
+import org.simpmusic.dj.model.MixQuality
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalysisRepository
@@ -171,6 +172,15 @@ class QueueLookAhead(
     }
 
     private fun TransitionPlan.quality(): Quality {
+        // the planner says it as data; the reason text is read only for plans made without it
+        meta?.let { m ->
+            return when (m.quality) {
+                MixQuality.OTHER -> Quality.OTHER
+                MixQuality.CLEAN -> Quality.CLEAN
+                MixQuality.TAIL -> Quality.TAIL
+                MixQuality.BEST -> Quality.BEST
+            }
+        }
         val own = reason.substringBefore(" | ")
         return when {
             kind == PlanKind.BEAT_MATCHED && own.startsWith(org.simpmusic.dj.planner.MixMarks.TAG) -> Quality.BEST

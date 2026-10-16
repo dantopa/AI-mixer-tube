@@ -697,4 +697,6 @@
     <string name="dj_mark_exit">Salida</string>
     <string name="dj_mark_entry">Entrada</string>
     <string name="dj_mark_solo">Solo</string>
+    <string name="dj_rate_up">Esa mezcla sonó bien</string>
+    <string name="dj_rate_down">Esa mezcla sonó mal</string>
 </resources>

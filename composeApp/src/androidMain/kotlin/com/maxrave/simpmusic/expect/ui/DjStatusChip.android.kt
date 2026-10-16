@@ -28,6 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,6 +81,8 @@ import simpmusic.composeapp.generated.resources.dj_mix_now_no_pair
 import simpmusic.composeapp.generated.resources.dj_mix_now_soon
 import simpmusic.composeapp.generated.resources.dj_mix_now_started
 import simpmusic.composeapp.generated.resources.dj_perfect_ready
+import simpmusic.composeapp.generated.resources.dj_rate_down
+import simpmusic.composeapp.generated.resources.dj_rate_up
 import simpmusic.composeapp.generated.resources.dj_tap_one_done
 import simpmusic.composeapp.generated.resources.dj_chip_planning
 import simpmusic.composeapp.generated.resources.dj_chip_ready
@@ -255,6 +259,38 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
             )
         }
     }
+    // After a mix ends: thumbs up / down for RATE_PROMPT_MS (or until rated), written to the mix journal. The engine's
+    // last mix is re-read whenever its state changes (a mix ending updates it).
+    val lastMix = remember(debug) { hooks.lastMix() }
+    var ratedId by remember { mutableStateOf<String?>(null) }
+    var expiredId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(lastMix?.id) {
+        val m = lastMix ?: return@LaunchedEffect
+        val left = RATE_PROMPT_MS - (System.currentTimeMillis() - m.endedAtEpochMs)
+        if (left > 0) delay(left)
+        expiredId = m.id
+    }
+    val rateable = lastMix?.takeIf {
+        !mixing && it.rating == null && it.id != ratedId && it.id != expiredId && System.currentTimeMillis() - it.endedAtEpochMs < RATE_PROMPT_MS
+    }
+    if (rateable != null) {
+        for ((up, glyph, description) in listOf(
+            Triple(true, "👍", stringResource(Res.string.dj_rate_up)),
+            Triple(false, "👎", stringResource(Res.string.dj_rate_down)),
+        )) {
+            Surface(
+                modifier = Modifier.semantics { contentDescription = description }.clickable { if (hooks.rateLastMix(up)) ratedId = rateable.id },
+                shape = CircleShape,
+                color = Color.Black.copy(alpha = 0.45f),
+            ) {
+                Text(
+                    text = glyph,
+                    style = typo().labelMedium,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+        }
+    }
     // The 1-2-3-4 counter follows the DJ's bars: if its "1" does not light up on the 1 you hear, tap "»" to move it one
     // beat later (no timing needed). Tapping the counter on the 1s you hear (a few times) sets it too; long-press forgets.
     // It follows what is HEARD: the 20 Hz position minus the lyrics timing offset the owner sets for Bluetooth; derived,
@@ -417,3 +453,6 @@ private fun formatMinSec(ms: Long): String {
     val total = ms / 1000
     return "%d:%02d".format(total / 60, total % 60)
 }
+
+/** How long the thumbs up / down stay next to the chip after a mix ends (the journal accepts a rating for longer). */
+private const val RATE_PROMPT_MS = 60_000L

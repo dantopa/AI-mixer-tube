@@ -151,6 +151,8 @@ data class TransitionPlan(
     val mixBpm: Float? = null,
     /** Present for [PlanKind.ECHO_OUT]: the delay executed on the outgoing deck. Null otherwise. */
     val echoOut: EchoOutSpec? = null,
+    /** What the planner did, as data (strategy, quality, features, why not beat-matched). Null for plans made elsewhere. */
+    val meta: PlanMeta? = null,
 ) {
     /** Earliest wall-clock time (relative to T0) at which any lane starts moving. Negative if there is a pre-roll ramp. */
     val preRollMs: Long

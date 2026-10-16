@@ -14,8 +14,12 @@ import org.simpmusic.dj.model.DjSettings
 import org.simpmusic.dj.model.Ease
 import org.simpmusic.dj.model.Keyframe
 import org.simpmusic.dj.model.MusicalKey
+import org.simpmusic.dj.model.MixFeatures
 import org.simpmusic.dj.model.ParamCurve
+import org.simpmusic.dj.model.PlanFailCode
 import org.simpmusic.dj.model.PlanKind
+import org.simpmusic.dj.model.PlanMeta
+import org.simpmusic.dj.model.PlanSource
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.TransitionPlanner
@@ -61,15 +65,15 @@ class DjTransitionPlanner : TransitionPlanner {
                     // sung section that the hand-off leaves whole. Perfect is next, the regular scored plan last.
                     // The owner's own marks come before anything the planner could find by itself.
                     val regularFirst = planUnsafe(from, to, s, earliest, latest)
-                    if (regularFirst.reason.startsWith(MixMarks.TAG)) return regularFirst
+                    if (regularFirst.meta?.source.isOwner()) return regularFirst
                     val p = planPerfect(from, to, s, earliest, latest, keepTiming = true)
-                    val perfectOk = p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)
-                    if (perfectOk && StructureHandoff.TAG in p.reason) {
+                    val perfectOk = p.kind == PlanKind.BEAT_MATCHED && p.meta?.perfect == true
+                    if (perfectOk && p.meta?.source.isStructure()) {
                         p
                     } else {
                         val regular = regularFirst
                         when {
-                            regular.reason.startsWith(StructureHandoff.TAG) -> regular
+                            regular.meta?.source.isStructure() -> regular
                             perfectOk -> p
                             else -> regular.copy(reason = regular.reason + " | " + p.reason.take(PERFECT_WHY_CHARS))
                         }
@@ -79,7 +83,7 @@ class DjTransitionPlanner : TransitionPlanner {
             }
         } catch (e: Exception) {
             try {
-                simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), s, "planner error (${e.javaClass.simpleName}): ${e.message}", earliest)
+                simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), s, "planner error (${e.javaClass.simpleName}): ${e.message}", earliest, PlanFailCode.PLANNER_ERROR)
             } catch (e2: Exception) {
                 lastResort(from?.videoId.orEmpty(), to?.videoId.orEmpty(), "planner error twice: ${e2.message}")
             }
@@ -98,10 +102,10 @@ class DjTransitionPlanner : TransitionPlanner {
     )
 
     /** What a plan attempt produced: a plan, or the reason it did not work out (the next candidate is tried). */
-    internal class Attempt(val plan: TransitionPlan?, val fail: String?) {
+    internal class Attempt(val plan: TransitionPlan?, val fail: String?, val code: PlanFailCode = PlanFailCode.OTHER) {
         companion object {
             fun ok(p: TransitionPlan) = Attempt(p, null)
-            fun fail(why: String) = Attempt(null, why)
+            fun fail(why: String, code: PlanFailCode = PlanFailCode.OTHER) = Attempt(null, why, code)
         }
     }
 
@@ -179,6 +183,8 @@ class DjTransitionPlanner : TransitionPlanner {
      */
     private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, keepTiming: Boolean = false): TransitionPlan {
         val why = ArrayList<String>()
+        // why the refusal, as data: a missing analysis first, then the inner plan's own failure, untrusted bars otherwise
+        var code = if (from == null || to == null) PlanFailCode.NO_ANALYSIS else PlanFailCode.GRID_UNTRUSTED
         for ((a, name) in listOf(from to "outgoing", to to "incoming")) {
             val info = a?.barPhase
             when {
@@ -194,10 +200,11 @@ class DjTransitionPlanner : TransitionPlanner {
             // the button mixes as soon as it can; the default mode keeps the settings' minimum played share of the track
             val timing = if (keepTiming) settings.copy(mixPoint = MixPoint.ANYWHERE) else settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
             val p = planUnsafe(found(from!!), found(to!!), timing, earliest, latest, perfect = true)
-            if (p.kind == PlanKind.BEAT_MATCHED && p.reason.startsWith(PlanConstraints.PERFECT_OK)) return p
+            if (p.kind == PlanKind.BEAT_MATCHED && p.meta?.perfect == true) return p
             why += p.reason
+            code = p.meta?.failCode ?: PlanFailCode.NOTHING_IN_RANGE
         }
-        val base = simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), settings, PlanConstraints.PERFECT_REFUSED + why.joinToString("; "), earliest)
+        val base = simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, from?.videoId.orEmpty(), to?.videoId.orEmpty(), settings, PlanConstraints.PERFECT_REFUSED + why.joinToString("; "), earliest, code)
         return base.copy(reason = PlanConstraints.PERFECT_REFUSED + why.joinToString("; "))
     }
 
@@ -205,19 +212,20 @@ class DjTransitionPlanner : TransitionPlanner {
         val fromId = from?.videoId.orEmpty()
         val toId = to?.videoId.orEmpty()
         if (from == null || to == null) {
-            return simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, fromId, toId, settings, "missing analysis (${if (from == null) "outgoing" else "incoming"} track)", earliest)
+            return simplePlan(from?.let { TrackContext(it) }, to?.let { TrackContext(it) }, fromId, toId, settings, "missing analysis (${if (from == null) "outgoing" else "incoming"} track)", earliest, PlanFailCode.NO_ANALYSIS)
         }
         val out = TrackContext(from)
         val inc = TrackContext(to)
 
         // ---- gating on what any grid-based mix needs: a trusted beat grid. The bpm field is informational only ----
         val missing = ArrayList<String>()
-        if (out.beatsConf < Trust.BEATS) missing += "outgoing beat grid (${fmt(out.beatsConf)} < ${Trust.BEATS})"
-        if (inc.beatsConf < Trust.BEATS) missing += "incoming beat grid (${fmt(inc.beatsConf)} < ${Trust.BEATS})"
-        if (out.medianBeatMs <= 0.0 || inc.medianBeatMs <= 0.0) missing += "unusable beat spacing"
-        if (out.durationMs < 4000 || inc.durationMs < 4000) missing += "track too short"
+        val missingCodes = ArrayList<PlanFailCode>()
+        if (out.beatsConf < Trust.BEATS) { missing += "outgoing beat grid (${fmt(out.beatsConf)} < ${Trust.BEATS})"; missingCodes += PlanFailCode.GRID_UNTRUSTED }
+        if (inc.beatsConf < Trust.BEATS) { missing += "incoming beat grid (${fmt(inc.beatsConf)} < ${Trust.BEATS})"; missingCodes += PlanFailCode.GRID_UNTRUSTED }
+        if (out.medianBeatMs <= 0.0 || inc.medianBeatMs <= 0.0) { missing += "unusable beat spacing"; missingCodes += PlanFailCode.GRID_UNTRUSTED }
+        if (out.durationMs < 4000 || inc.durationMs < 4000) { missing += "track too short"; missingCodes += PlanFailCode.TRACK_TOO_SHORT }
         if (missing.isNotEmpty()) {
-            return simplePlan(out, inc, fromId, toId, settings, "not beat-matchable: " + missing.joinToString("; "), earliest)
+            return simplePlan(out, inc, fromId, toId, settings, "not beat-matchable: " + missing.joinToString("; "), earliest, missingCodes.first())
         }
 
         var conf = minOf(out.beatsConf, inc.beatsConf)
@@ -242,8 +250,8 @@ class DjTransitionPlanner : TransitionPlanner {
             minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8, perfect = perfect,
         )
         if (perfect) {
-            if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest)
-            return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair in range where both 1s are sure (local margin >= ${BarPhase.PERFECT_MARGIN})", earliest)
+            if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest, PlanFailCode.GRID_UNTRUSTED)
+            return planAnywhere(c) ?: simplePlan(out, inc, fromId, toId, settings, "no exit/entry pair in range where both 1s are sure (local margin >= ${BarPhase.PERFECT_MARGIN})", earliest, PlanFailCode.NOTHING_IN_RANGE)
         }
         if (settings.mixPoint == MixPoint.ANYWHERE) {
             planAnywhere(c)?.let { return it }
@@ -280,7 +288,7 @@ class DjTransitionPlanner : TransitionPlanner {
                 desiredUnits = max(shortest, desiredUnits / 2)
                 continue
             }
-            loc.fail?.let { return simplePlan(out, inc, c.fromId, c.toId, settings, it + if (desiredUnits < c.requestedUnits) " (also tried overlaps down to $desiredUnits)" else "", c.earliest) }
+            loc.fail?.let { return simplePlan(out, inc, c.fromId, c.toId, settings, it + if (desiredUnits < c.requestedUnits) " (also tried overlaps down to $desiredUnits)" else "", c.earliest, loc.code) }
             val t2 = loc.tempo ?: return echoAtEnd(c, localTempoWhy(c, listOf(roughOut), listOf(roughIn)))
             pass++
             val settled = abs(t2.rateOut / tempo.rateOut - 1.0) < 0.02 && abs(t2.rateIn / tempo.rateIn - 1.0) < 0.02
@@ -288,7 +296,7 @@ class DjTransitionPlanner : TransitionPlanner {
             if (settled || pass >= 2) break
         }
         val r = finishBeat(c, tempo, loc.exitPick!!, loc.entryPick!!, loc.localOut!!, loc.localIn!!, loc.iOut, loc.iIn, desiredUnits)
-        return r.plan ?: simplePlan(out, inc, c.fromId, c.toId, settings, r.fail!!, c.earliest)
+        return r.plan?.sourced(PlanSource.END_OF_TRACK) ?: simplePlan(out, inc, c.fromId, c.toId, settings, r.fail!!, c.earliest, r.code)
     }
 
     private fun tempoWhy(c: Ctx) =
@@ -317,9 +325,10 @@ class DjTransitionPlanner : TransitionPlanner {
         val exit = pickExit(out, out.audibleEndMs, bar + MARGIN_MS, MARGIN_MS + beat, max(dry + 250.0, c.earliest + dry), out.outro()?.range?.startMs)
         val entry = pickEntry(inc, inc.firstAudibleMs, MARGIN_MS + 2 * inc.beatsPerBar * inc.medianBeatMs)
             ?: pickEntry(inc, inc.firstAudibleMs, MARGIN_MS)
-        if (exit == null || entry == null) return simplePlan(out, inc, c.fromId, c.toId, c.settings, "$why; no exit/entry point for an echo-out", c.earliest)
-        val a = buildEchoOut(c, exit, entry, why)
-        return a.plan ?: simplePlan(out, inc, c.fromId, c.toId, c.settings, "$why; echo-out not possible: ${a.fail}", c.earliest)
+        // (only tried because the tempos cannot be matched: that is what a crossfade from here comes down to)
+        if (exit == null || entry == null) return simplePlan(out, inc, c.fromId, c.toId, c.settings, "$why; no exit/entry point for an echo-out", c.earliest, PlanFailCode.TEMPO_BEYOND_BEND)
+        val a = buildEchoOut(c, exit, entry, why, PlanFailCode.TEMPO_BEYOND_BEND)
+        return a.plan ?: simplePlan(out, inc, c.fromId, c.toId, c.settings, "$why; echo-out not possible: ${a.fail}", c.earliest, PlanFailCode.TEMPO_BEYOND_BEND)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -394,8 +403,13 @@ class DjTransitionPlanner : TransitionPlanner {
         val p = if (side.any) planAnywhereCore(c.owned(out = side.exit != null, inc = side.entry != null), side) else planAnywhereCore(c, side)
         return when {
             p == null -> null
-            side.any && p.kind == PlanKind.BEAT_MATCHED -> p.withReason(side.describe()).let { q -> side.why?.let { q.copy(reason = q.reason + " | owner marks: " + it) } ?: q }
-            else -> p.copy(reason = p.reason + " | owner marks not used: " + (side.why ?: "no beat-matched mix at the marks"))
+            side.any && p.kind == PlanKind.BEAT_MATCHED ->
+                p.withReason(side.describe()).let { q -> side.why?.let { q.copy(reason = q.reason + " | owner marks: " + it) } ?: q }
+                    .sourced(if (side.exit != null && side.entry != null) PlanSource.OWNER_MARKS else PlanSource.OWNER_PARTIAL, note = side.why)
+            else -> {
+                val note = side.why ?: "no beat-matched mix at the marks"
+                p.copy(reason = p.reason + " | owner marks not used: " + note, meta = p.meta?.copy(ownerMarksNote = note))
+            }
         }
     }
 
@@ -432,6 +446,7 @@ class DjTransitionPlanner : TransitionPlanner {
             // the overlap was chosen to fit the instrumental, not clamped: drop the "clamped from" note finishBeat writes
             val clean = p.copy(reason = p.reason.replace(CLAMPED_NOTE, ""))
             return clean.withReason((if (c.perfect) PlanConstraints.PERFECT_OK + "structure hand-off, " else "") + h.describe() + where)
+                .sourced(if (h.singsAtOnce) PlanSource.STRUCTURE_SECOND_TIER else PlanSource.STRUCTURE, perfect = c.perfect)
         }
 
         if (upper < lower) return null
@@ -488,6 +503,7 @@ class DjTransitionPlanner : TransitionPlanner {
         }
 
         var lastFail: String? = null
+        var lastFailCode: PlanFailCode? = null
         // A pair whose overlap had to be cut to a bar or two (the exit sits right before the end of the outgoing track) is
         // a poor mix, and too short for the precise splice, which then falls back to the clock-locked three-player path:
         // a device log (build ae) planned a 2-bar overlap at 97 % of the track and the lock aborted to a plain crossfade.
@@ -511,7 +527,7 @@ class DjTransitionPlanner : TransitionPlanner {
                 val where = "mix point ${(100.0 * cand.pair.exit.timeMs / max(1L, out.audibleEndMs)).toInt()}% into the outgoing track (pair score ${fmt(cand.pair.score.toFloat())}); "
                 val done =
                     if (!c.perfect) {
-                        it.withReason(where)
+                        it.withReason(where).sourced(PlanSource.REGULAR, pairScore = cand.pair.score.toFloat())
                     } else {
                         val mo = BarPhase.marginAt(c.from, cand.pair.exit.timeMs) ?: 0f
                         val mi = BarPhase.marginAt(c.to, cand.pair.entry.timeMs) ?: 0f
@@ -519,7 +535,7 @@ class DjTransitionPlanner : TransitionPlanner {
                             PlanConstraints.PERFECT_OK + "${perfectLevel(out, inc, cand.pair.exit.pick, cand.pair.entry.pick)}, 1-on-1 margins out %.1f in %.1f (%s/%s); ".format(
                                 mo, mi, c.from.barPhase?.source, c.to.barPhase?.source,
                             ) + where,
-                        )
+                        ).sourced(PlanSource.PERFECT, perfect = true, pairScore = cand.pair.score.toFloat())
                     }
                 if (isVoiceOverVoice(done)) {
                     // a real overlap with two voices beats a 1-2 bar one at the very end of the track, which only scores
@@ -531,7 +547,7 @@ class DjTransitionPlanner : TransitionPlanner {
                     short = done
                 }
             }
-            if (lastFail == null) lastFail = a.fail
+            if (lastFail == null) { lastFail = a.fail; lastFailCode = a.code }
         }
         if (c.perfect) return short // a perfect mix is beat-matched or nothing, and never voice over voice
         // order of the fallbacks: a real overlap with voices, then a short one without, then a short one with voices
@@ -540,11 +556,12 @@ class DjTransitionPlanner : TransitionPlanner {
         sung?.let { return it }
         // 2. nothing beat-matches: an echo-out, on the best-scoring pairs regardless of tempo
         val why = if (tries == 0) localTempoWhy(c, perOut.values, perIn.values) else "no candidate mix point beat-matches (${lastFail ?: "?"})"
+        val whyCode = if (tries == 0) PlanFailCode.TEMPO_BEYOND_BEND else lastFailCode ?: PlanFailCode.OTHER
         var echoTries = 0
         var echoFail: String? = null
         for (cand in all) {
             if (echoTries++ >= MixScoring.MAX_ECHO_TRIES) break
-            val a = buildEchoOut(c, cand.pair.exit.pick, cand.pair.entry.pick, why, cand.pair.exit, cand.pair.score)
+            val a = buildEchoOut(c, cand.pair.exit.pick, cand.pair.entry.pick, why, whyCode, cand.pair.exit, cand.pair.score)
             a.plan?.let { return it }
             if (echoFail == null) echoFail = a.fail
         }
@@ -552,6 +569,17 @@ class DjTransitionPlanner : TransitionPlanner {
     }
 
     private fun TransitionPlan.withReason(prefix: String): TransitionPlan = copy(reason = prefix + reason)
+
+    /** Attributes the plan to [source] (its quality follows), keeping the features finishBeat recorded. */
+    private fun TransitionPlan.sourced(source: PlanSource, perfect: Boolean = false, pairScore: Float? = null, note: String? = meta?.ownerMarksNote): TransitionPlan {
+        val base = meta ?: PlanMeta.of(kind, source)
+        val scored = if (pairScore != null) base.copy(features = base.features?.copy(pairScore = pairScore)) else base
+        return copy(meta = scored.withSource(kind, source).copy(perfect = perfect, ownerMarksNote = note))
+    }
+
+    private fun PlanSource?.isOwner() = this == PlanSource.OWNER_MARKS || this == PlanSource.OWNER_PARTIAL
+
+    private fun PlanSource?.isStructure() = this == PlanSource.STRUCTURE || this == PlanSource.STRUCTURE_SECOND_TIER
 
     /** Median beat interval right after (or, when there is none, around) [t]: the local tempo where a mix would happen. */
     /** The downbeat of [c] nearest [t] within half a bar, or null. */
@@ -597,7 +625,7 @@ class DjTransitionPlanner : TransitionPlanner {
         return Attempt.ok(
             p.copy(reason = p.reason.replace(CLAMPED_NOTE, "")).withReason(
                 MixMarks.TAG + "exit %.1f s, entry %.1f s%s; %s; ".format(exit / 1000.0, entry / 1000.0, solo, if (c.barsMode) "$units bars" else "$units beats (bars untrusted, the marks used)"),
-            ),
+            ).sourced(PlanSource.OWNER_MARKS),
         )
     }
 
@@ -610,7 +638,7 @@ class DjTransitionPlanner : TransitionPlanner {
      * Full beat-matched attempt at ONE (exit, entry) pair: measures the local grids (shortening the overlap when they
      * are irregular over a long one), refines the tempo, then builds the plan.
      */
-    private fun isVoiceOverVoice(p: TransitionPlan): Boolean = VocalClash.CLASH_TAG in p.reason
+    private fun isVoiceOverVoice(p: TransitionPlan): Boolean = p.meta?.features?.voiceClash == true
 
     private fun beatAttempt(c: Ctx, exitPick: Pick, entryPick: Pick, rough: Tempo, units: Int = c.requestedUnits): Attempt {
         var desired = units
@@ -622,9 +650,9 @@ class DjTransitionPlanner : TransitionPlanner {
             loc = measurePair(c, tempo, desired, exitPick, entryPick)
             if (loc.fail != null) {
                 if (loc.irregular && desired > shortest) { desired = max(shortest, desired / 2); continue }
-                return Attempt.fail(loc.fail)
+                return Attempt.fail(loc.fail, loc.code)
             }
-            val t2 = loc.tempo ?: return Attempt.fail("local tempos are beyond the bend")
+            val t2 = loc.tempo ?: return Attempt.fail("local tempos are beyond the bend", PlanFailCode.TEMPO_BEYOND_BEND)
             pass++
             val settled = abs(t2.rateOut / tempo.rateOut - 1.0) < 0.02 && abs(t2.rateIn / tempo.rateIn - 1.0) < 0.02
             tempo = t2
@@ -646,10 +674,10 @@ class DjTransitionPlanner : TransitionPlanner {
         // A beat-match stretches each deck by the tempo measured HERE. When that is not the tempo the track has overall
         // (typical of an intro, or a tracker that drops / doubles beats), the "beats" being aligned are not the music's.
         if (localOut.medianIbi > 0 && !out.localTempoAgrees(60000.0 / localOut.medianIbi)) {
-            return Attempt.fail("outgoing tempo at the exit (${fmt1(60000.0 / localOut.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(out.avgBpm)}, field ${out.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there")
+            return Attempt.fail("outgoing tempo at the exit (${fmt1(60000.0 / localOut.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(out.avgBpm)}, field ${out.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there", PlanFailCode.GRID_UNTRUSTED)
         }
         if (localIn.medianIbi > 0 && !inc.localTempoAgrees(60000.0 / localIn.medianIbi)) {
-            return Attempt.fail("incoming tempo at the entry (${fmt1(60000.0 / localIn.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(inc.avgBpm)}, field ${inc.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there")
+            return Attempt.fail("incoming tempo at the entry (${fmt1(60000.0 / localIn.medianIbi)} bpm) disagrees with the track's own (avg ${fmt1(inc.avgBpm)}, field ${inc.bpmValue?.let { fmt1(it) }}): the beat grid is not trustworthy there", PlanFailCode.GRID_UNTRUSTED)
         }
         val settings = c.settings
         val barsMode = c.barsMode
@@ -685,6 +713,13 @@ class DjTransitionPlanner : TransitionPlanner {
         if (outroLeft != null) conf = min(conf, out.sectionsConf)
         var units = min(desiredUnits, max(softUnits, min(softFloor, hardUnits)))
         units = min(units, hardUnits)
+        // what set the overlap below the length asked for (the last rule that shortened it), for the plan's features
+        var cutBy: String? = when {
+            units >= desiredUnits -> null
+            units == hardUnits -> "room"
+            outroLeft != null && (introLeft == null || outroLeft / rateOut <= introLeft / rateIn) -> "outro"
+            else -> "intro"
+        }
         // Harmony of THIS overlap from the stored chroma decides the clash treatment; the global key only when there is no
         // chroma (analyses made before build ae). A percussive window is harmonically free, a modulation is seen.
         val harmony = Harmony.fit(c.hOut, exitMs, (desiredUnits * unit * rateOut).toLong(), c.hIn, entryMs, (desiredUnits * unit * rateIn).toLong())
@@ -693,7 +728,11 @@ class DjTransitionPlanner : TransitionPlanner {
         // The harmony and voice rules may shorten the overlap, never below [cutFloor]: half of what was asked, at least
         // 4 bars (16 beats). Cutting to a single bar made every mix a 2-3 s crossfade (owner, 16 bars asked: median 2 s).
         val cutFloor = min(units, max(desiredUnits / 2, if (barsMode) CUT_FLOOR_BARS else CUT_FLOOR_BARS * out.beatsPerBar))
-        if (clash && !c.ignoreVocals) units = min(units, max(cutFloor, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
+        if (clash && !c.ignoreVocals) {
+            val cut = min(units, max(cutFloor, floor(CLASH_MAX_MS / unit + UNIT_EPS).toInt()))
+            if (cut < units) cutBy = "harmony"
+            units = cut
+        }
         // Voice over voice: end the overlap (whole units) before the second singer joins, so the outgoing deck is gone when
         // the incoming voice starts. When the clash starts too early for even the shortest overlap it stays, and is said.
         var vocalNote: String? = null
@@ -703,15 +742,17 @@ class DjTransitionPlanner : TransitionPlanner {
             if (fit >= cutFloor && fit < units) {
                 vocalNote = "overlap ended before the second voice (${units} -> $fit ${if (barsMode) "bars" else "beats"})"
                 units = fit
+                cutBy = "voice"
             } else if (fit < cutFloor && units > cutFloor) {
                 // the second voice comes in early: keep the shortest overlap that still is a mix (the incoming is quiet
                 // over its first part); the planner only lands here when no other point avoids it
                 vocalNote = "the second voice comes in early, cut to ${cutFloor} ${if (barsMode) "bars" else "beats"} (from ${units})"
                 units = cutFloor
+                cutBy = "voice"
             }
         }
         if (units < minUnits) {
-            return Attempt.fail("not enough audio for a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap (room out ${availOut / 1000.0}s, in ${availIn / 1000.0}s)")
+            return Attempt.fail("not enough audio for a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap (room out ${availOut / 1000.0}s, in ${availIn / 1000.0}s)", PlanFailCode.NO_ROOM)
         }
         // ---- drift: constant rates must keep the two local tempo curves in phase across the overlap ----
         val stepsPerUnit = if (barsMode) out.beatsPerBar else 1
@@ -743,7 +784,7 @@ class DjTransitionPlanner : TransitionPlanner {
             }
             if (warp != null) {
                 val shortened = (warp.overlapMs / unit).roundToLong().toInt()
-                if (shortened < units) notes += "overlap shortened from $units to $shortened to keep the tempo-following within the bend"
+                if (shortened < units) { notes += "overlap shortened from $units to $shortened to keep the tempo-following within the bend"; cutBy = "drift" }
                 units = shortened
                 notes += "tempo-following (a constant rate would slide ${fmt1(drift)} ms): out x${fmt3(warp.out0)}->${fmt3(warp.out1)}, in x${fmt3(warp.in0)}->${fmt3(warp.in1)}"
             }
@@ -751,14 +792,14 @@ class DjTransitionPlanner : TransitionPlanner {
         if (warp == null) {
             while (drift > MAX_DRIFT_MS && units > minUnits) { units--; drift = lockError(units) }
             if (drift > MAX_DRIFT_MS) {
-                return Attempt.fail("tempo drifts: beats of the two tracks slide ${fmt1(drift)} ms apart even over a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap, and following the tempo curves needs more than the +-${(settings.maxTempoBend * 100).toInt()}% bend")
+                return Attempt.fail("tempo drifts: beats of the two tracks slide ${fmt1(drift)} ms apart even over a ${minUnits}-${if (barsMode) "bar" else "beat"} overlap, and following the tempo curves needs more than the +-${(settings.maxTempoBend * 100).toInt()}% bend", PlanFailCode.TEMPO_BEYOND_BEND)
             }
-            if (units < unitsBeforeDrift) notes += "overlap shortened from $unitsBeforeDrift to $units because the local tempo drifts"
+            if (units < unitsBeforeDrift) { notes += "overlap shortened from $unitsBeforeDrift to $units because the local tempo drifts"; cutBy = "drift" }
         }
         val overlapMs = (units * unit).roundToLong()
 
         if (conf < settings.minConfidence) {
-            return Attempt.fail("confidence ${fmt(conf)} below minimum ${fmt(settings.minConfidence)}: " + notes.joinToString())
+            return Attempt.fail("confidence ${fmt(conf)} below minimum ${fmt(settings.minConfidence)}: " + notes.joinToString(), PlanFailCode.GRID_UNTRUSTED)
         }
 
         // ---- ramps (pre-roll on the outgoing deck, return-to-native on the incoming one) ----
@@ -784,7 +825,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val rampOutMs = minOf(rampBeats * outBeatWall, beforeRoom / ((1.0 + rateOutAtT0) / 2.0), earliestRoom).let { floor(it).toLong() }
         val minRamp = (4 * outBeatWall).toLong()
         if (rampOutMs < minRamp && (bendOut > 1e-4 || shiftOut != 0)) {
-            return Attempt.fail("not enough audio before the exit point for the tempo pre-roll")
+            return Attempt.fail("not enough audio before the exit point for the tempo pre-roll", PlanFailCode.NO_ROOM)
         }
         val inConsumed = if (warp != null) warp.inSourceMs else overlapMs * rateIn
         val afterRoom = (inc.durationMs - entryMs - 250L - inConsumed).coerceAtLeast(0.0)
@@ -872,8 +913,21 @@ class DjTransitionPlanner : TransitionPlanner {
             confidence = conf.coerceIn(0f, 1f), reason = "", mixBpm = mixBpm,
         )
         if (plan.exitPointMs + plan.preRollMs < c.earliest) {
-            return Attempt.fail("the tempo pre-roll would start before the earliest allowed position (${c.earliest} ms)")
+            return Attempt.fail("the tempo pre-roll would start before the earliest allowed position (${c.earliest} ms)", PlanFailCode.NO_ROOM)
         }
+        val vox = VocalClash.of(c.vOut, exitMs, rateOut, c.vIn, entryMs, rateIn, overlapMs)
+        val features = MixFeatures(
+            overlapUnits = units, unitIsBar = barsMode, overlapMs = overlapMs,
+            exitFraction = (exitMs.toDouble() / max(1L, out.durationMs)).toFloat(),
+            entryFraction = (entryMs.toDouble() / max(1L, inc.durationMs)).toFloat(),
+            exitLevel = exitPick.levelName, entryLevel = entryPick.levelName,
+            rateOut = (warp?.out0 ?: rateOut).toFloat(), rateIn = (warp?.in0 ?: rateIn).toFloat(),
+            vocalsKnownOut = c.vOut != null, vocalsKnownIn = c.vIn != null,
+            voiceOverVoiceMs = vox?.clashMs, voiceClash = vox?.clash == true,
+            harmonyExcess = harmony?.excess?.toFloat(), harmonyClash = harmony?.clash == true, keyClash = c.key.clash,
+            bassSwap = bassSwap, phraseOnPhrase = exitPick.levelName == "phrase" && entryPick.levelName == "phrase",
+            cutBy = cutBy, warped = warp != null,
+        )
         val reason = buildString {
             append("beat-matched ").append(fmt1(out.gridBpm)).append(" -> ").append(fmt1(inc.gridBpm)).append(" bpm at ").append(fmt1(mixBpm.toDouble()))
             append(" (out x").append(fmt3(warp?.out0 ?: rateOut)).append(", in x").append(fmt3(warp?.in0 ?: rateIn))
@@ -884,14 +938,14 @@ class DjTransitionPlanner : TransitionPlanner {
             if (units < requestedUnits) append(" (clamped from $requestedUnits" + (if (desiredUnits < requestedUnits) ", the beat grid was irregular over a longer overlap" else "") + ")")
             append("; ").append(keyNote)
             harmony?.let { append("; ").append(it.describe()).append(if (it.clash) ": one tonal layer at a time (EQ swap), short overlap" else "") }
-            VocalClash.of(c.vOut, exitMs, rateOut, c.vIn, entryMs, rateIn, overlapMs)?.let { append("; ").append(it.describe()) }
+            vox?.let { append("; ").append(it.describe()) }
             vocalNote?.let { append(" (").append(it).append(")") }
             append("; bass swap ").append(if (bassSwap) "on" else if (!settings.bassSwap) "off (setting)" else "off (no bass to swap)")
             if (gainOut < 1.0 || gainIn < 1.0) append("; gain out ${fmt(gainOut.toFloat())} in ${fmt(gainIn.toFloat())}")
             if (notes.isNotEmpty()) append("; ").append(notes.joinToString())
             append("; confidence ").append(fmt(conf))
         }
-        return Attempt.ok(plan.copy(reason = reason))
+        return Attempt.ok(plan.copy(reason = reason, meta = PlanMeta.of(PlanKind.BEAT_MATCHED, PlanSource.REGULAR, features)))
     }
 
     /** Rates of a tempo-following overlap: each deck's rate at T0 and at the end of the overlap, and the source each consumes. */
@@ -943,7 +997,7 @@ class DjTransitionPlanner : TransitionPlanner {
      * fades over about a bar under a rising high-pass while a beat-synced feedback delay rings out; the incoming deck
      * enters at [entryPick] at native tempo and full level. No tempo automation: the decks are never beat-matched.
      */
-    private fun buildEchoOut(c: Ctx, exitPick: Pick, entryPick: Pick, why: String, cand: ExitCand? = null, score: Double = 0.0): Attempt {
+    private fun buildEchoOut(c: Ctx, exitPick: Pick, entryPick: Pick, why: String, code: PlanFailCode, cand: ExitCand? = null, score: Double = 0.0): Attempt {
         if (!c.settings.allowEchoOut) return Attempt.fail("echo-out is off")
         val out = c.out
         val inc = c.inc
@@ -1009,6 +1063,7 @@ class DjTransitionPlanner : TransitionPlanner {
             outgoing = DeckPlan(volume = ParamCurve(volKeys), lowCutHz = outLow),
             incoming = DeckPlan(volume = inVol),
             confidence = conf.coerceIn(0f, 1f), reason = reason, mixBpm = null, echoOut = spec,
+            meta = PlanMeta.of(PlanKind.ECHO_OUT, PlanSource.ECHO_OUT, failCode = code),
         )
         return Attempt.ok(plan)
     }
@@ -1023,6 +1078,8 @@ class DjTransitionPlanner : TransitionPlanner {
         val irregular: Boolean = false,
         /** 1: the outgoing window is to blame (try an earlier exit), 2: the incoming one (try a later entry), 0: neither. */
         val side: Int = 0,
+        /** [fail] as data. */
+        val code: PlanFailCode = PlanFailCode.OTHER,
     )
 
     /** Measures the LOCAL tempo of both overlap windows around a fixed exit and entry. */
@@ -1039,19 +1096,19 @@ class DjTransitionPlanner : TransitionPlanner {
         val iIn = inc.nearestBeatIndex(entryPick.timeMs)
         val localOut = out.local(iOut - 4, iOut + spanOut)
         val localIn = inc.local(iIn, iIn + spanIn + 4)
-        if (localOut == null) return Located(fail = "too few beats around the exit point to measure the local tempo", side = 1)
-        if (localIn == null) return Located(fail = "too few beats around the entry point to measure the local tempo", side = 2)
+        if (localOut == null) return Located(fail = "too few beats around the exit point to measure the local tempo", side = 1, code = PlanFailCode.GRID_UNTRUSTED)
+        if (localIn == null) return Located(fail = "too few beats around the entry point to measure the local tempo", side = 2, code = PlanFailCode.GRID_UNTRUSTED)
         if (localOut.noiseRms > IRREGULAR_RMS * localOut.medianIbi) {
-            return Located(fail = "outgoing beat grid is irregular around the mix (rms ${fmt1(localOut.noiseRms)} ms of a ${fmt1(localOut.medianIbi)} ms beat)", irregular = true, side = 1)
+            return Located(fail = "outgoing beat grid is irregular around the mix (rms ${fmt1(localOut.noiseRms)} ms of a ${fmt1(localOut.medianIbi)} ms beat)", irregular = true, side = 1, code = PlanFailCode.GRID_UNTRUSTED)
         }
         if (localIn.noiseRms > IRREGULAR_RMS * localIn.medianIbi) {
-            return Located(fail = "incoming beat grid is irregular around the mix (rms ${fmt1(localIn.noiseRms)} ms of a ${fmt1(localIn.medianIbi)} ms beat)", irregular = true, side = 2)
+            return Located(fail = "incoming beat grid is irregular around the mix (rms ${fmt1(localIn.noiseRms)} ms of a ${fmt1(localIn.medianIbi)} ms beat)", irregular = true, side = 2, code = PlanFailCode.GRID_UNTRUSTED)
         }
         val endOut = min(localOut.i0 + localOut.n - 1, iOut + spanOut)
         val endIn = min(localIn.i0 + localIn.n - 1, iIn + spanIn)
         val periodOut = localOut.meanPeriod(iOut, endOut)
         val periodIn = localIn.meanPeriod(iIn, endIn)
-        if (periodOut <= 0.0 || periodIn <= 0.0) return Located(fail = "beat grid runs backwards around the mix")
+        if (periodOut <= 0.0 || periodIn <= 0.0) return Located(fail = "beat grid runs backwards around the mix", code = PlanFailCode.GRID_UNTRUSTED)
         val t2 = chooseTempo(periodOut, periodIn, c.settings.maxTempoBend.toDouble())
         return Located(tempo = t2, exitPick = exitPick, entryPick = entryPick, localOut = localOut, localIn = localIn, iOut = iOut, iIn = iIn)
     }
@@ -1070,21 +1127,23 @@ class DjTransitionPlanner : TransitionPlanner {
         var maxExit = Long.MAX_VALUE
         var afterEntry = Long.MIN_VALUE
         var lastFail = "no usable exit/entry point"
+        var lastCode = PlanFailCode.OTHER
         val minAfterIn = c.minUnits * unitWall * tempo.rateIn + margin
         for (attempt in 0 until MAX_POINT_RETRIES) {
             val exitPick = pickExit(out, out.audibleEndMs, fullAfterOut, minAfterOut, before, outroStart, preferAfterOut, maxExit)
-                ?: return Located(fail = if (attempt == 0) "no exit point with enough room before the end of the outgoing track" + (if (c.earliest > 0) " (earliest allowed exit ${c.earliest} ms)" else "") else lastFail)
+                ?: return Located(fail = if (attempt == 0) "no exit point with enough room before the end of the outgoing track" + (if (c.earliest > 0) " (earliest allowed exit ${c.earliest} ms)" else "") else lastFail, code = if (attempt == 0) PlanFailCode.NO_ROOM else lastCode)
             val entryPick = pickEntry(inc, inc.firstAudibleMs, minAfterIn, afterEntry)
-                ?: return Located(fail = if (attempt == 0) "no entry point with enough audio in the incoming track" else lastFail)
+                ?: return Located(fail = if (attempt == 0) "no entry point with enough audio in the incoming track" else lastFail, code = if (attempt == 0) PlanFailCode.NO_ROOM else lastCode)
             val m = measurePair(c, tempo, desiredUnits, exitPick, entryPick)
             if (m.fail != null && m.side != 0) {
                 lastFail = m.fail
+                lastCode = m.code
                 if (m.side == 1) maxExit = exitPick.timeMs - 1 else afterEntry = entryPick.timeMs
                 continue
             }
             return m
         }
-        return Located(fail = lastFail, irregular = lastFail.contains("irregular"))
+        return Located(fail = lastFail, irregular = lastFail.contains("irregular"), code = lastCode)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1230,7 +1289,7 @@ class DjTransitionPlanner : TransitionPlanner {
     // fallbacks
 
     /** Equal-power crossfade at the end of the outgoing file. Needs no musical fact, only durations. */
-    private fun simplePlan(out: TrackContext?, inc: TrackContext?, fromId: String, toId: String, settings: DjSettings, reason0: String, earliest: Long = 0L): TransitionPlan {
+    private fun simplePlan(out: TrackContext?, inc: TrackContext?, fromId: String, toId: String, settings: DjSettings, reason0: String, earliest: Long = 0L, code: PlanFailCode = PlanFailCode.OTHER): TransitionPlan {
         val endOut = out?.audibleEndMs ?: 0L
         val entry = if (inc != null && inc.firstAudibleMs > 100L) inc.firstAudibleMs else 0L
         var fade = settings.fallbackCrossfadeMs
@@ -1251,6 +1310,7 @@ class DjTransitionPlanner : TransitionPlanner {
             outgoing = DeckPlan(volume = fadeCurve(fade, out = true)),
             incoming = DeckPlan(volume = fadeCurve(fade, out = false)),
             confidence = 1f, reason = "simple crossfade ($fade ms): $reason", mixBpm = null,
+            meta = PlanMeta.crossfade(code),
         )
     }
 
@@ -1268,6 +1328,7 @@ class DjTransitionPlanner : TransitionPlanner {
     private fun lastResort(fromId: String, toId: String, reason: String) = TransitionPlan(
         fromId = fromId, toId = toId, kind = PlanKind.SIMPLE_CROSSFADE, exitPointMs = 0L, entryPointMs = 0L, overlapMs = 0L,
         outgoing = DeckPlan(volume = ParamCurve.constant(0f)), incoming = DeckPlan(), confidence = 0f, reason = reason,
+        meta = PlanMeta.crossfade(PlanFailCode.PLANNER_ERROR),
     )
 
     private fun fmt(f: Float) = String.format(java.util.Locale.ROOT, "%.2f", f)

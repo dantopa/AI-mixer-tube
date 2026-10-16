@@ -25,6 +25,10 @@ internal fun describe(a: TrackAnalysis?): String =
 
 private fun rates(d: DeckPlan): String = "rate ${"%.3f".format(d.rate.keys.first().value)}->${"%.3f".format(d.rate.keys.last().value)} pitch ${d.pitchSemitones.keys.last().value}st vol->${"%.2f".format(d.volume.keys.last().value)}"
 
+/** "[REGULAR CLEAN]", "[CROSSFADE OTHER fail=NO_ROOM]", "[PERFECT BEST perfect]": the plan's structured meta in one token. */
+private fun meta(p: TransitionPlan): String =
+    p.meta?.let { m -> "[${m.source} ${m.quality}${m.failCode?.let { " fail=$it" }.orEmpty()}${if (m.perfect) " perfect" else ""}]" } ?: "[no meta]"
+
 /** Logs every planning call with its inputs and its result (tag `planner`). */
 class LoggingPlanner(private val delegate: TransitionPlanner) : TransitionPlanner {
     override fun plan(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings): TransitionPlan = logged(from, to, settings, null)
@@ -39,9 +43,10 @@ class LoggingPlanner(private val delegate: TransitionPlanner) : TransitionPlanne
             val p = if (constraints == null) delegate.plan(from, to, settings) else delegate.plan(from, to, settings, constraints)
             DjLog.i(
                 TAG,
-                "plan ${p.fromId}->${p.toId} = ${p.kind} conf=${"%.2f".format(p.confidence)} in ${(System.nanoTime() - t0) / 1_000_000} ms: exit=${p.exitPointMs} entry=${p.entryPointMs} " +
+                "plan ${p.fromId}->${p.toId} = ${p.kind} ${meta(p)} conf=${"%.2f".format(p.confidence)} in ${(System.nanoTime() - t0) / 1_000_000} ms: exit=${p.exitPointMs} entry=${p.entryPointMs} " +
                     "overlap=${p.overlapMs} preRoll=${p.preRollMs} mixBpm=${p.mixBpm?.let { "%.1f".format(it) }} echo=${p.echoOut?.let { "${it.delayMs.toInt()}ms fb=${it.feedback} tail=${it.tailMs}" }} | out ${rates(p.outgoing)} | in ${rates(p.incoming)} | reason: ${p.reason}",
             )
+            p.meta?.features?.let { DjLog.d(TAG, "plan features: $it") }
             return p
         } catch (e: Throwable) {
             DjLog.e(TAG, "plan FAILED after ${(System.nanoTime() - t0) / 1_000_000} ms", e)
