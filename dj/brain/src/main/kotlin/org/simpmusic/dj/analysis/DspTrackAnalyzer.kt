@@ -62,7 +62,7 @@ class DspTrackAnalyzer : TrackAnalyzer {
             sections = null, vocals = null,
             loudnessDb = energy.loudnessDb,
         )
-        if (silent || x.size < Grid.SR * 1.5) return base
+        if (silent || x.size < Grid.SR * 1.5) return FeatureLayers.produced(base, LAYERS)
 
         val on = tm.stage("onset-stft") { OnsetFeatures.compute(x) }
         val sp = tm.stage("spectral-stft") { SpectralFeatures.compute(x) }
@@ -124,13 +124,14 @@ class DspTrackAnalyzer : TrackAnalyzer {
             )
         }
         val sectionsC = sec?.let { Confident(it.sections, unit(it.confidence)) }
-        return base.copy(
+        val full = base.copy(
             bpm = bpm, beatTimesMs = beatsC, downbeatBeatIndices = downC, beatsPerBar = bpb,
             phraseStartsMs = phrases, key = key, sections = sectionsC, timbre = timbre,
             highBandEnergy = highBandGrid(on, eNorm.size),
             structureHopMs = STRUCTURE_HOP_MS,
             structureFrames = structureFrames(sp),
         )
+        return FeatureLayers.produced(full, LAYERS)
     }
 
     /** Mean high-band level ([OnsetFeatures.levelHigh], log) per 100 ms block, scaled 0..1 over the track, 3 decimals. */
@@ -251,6 +252,11 @@ class DspTrackAnalyzer : TrackAnalyzer {
 
     companion object {
         const val ID = "dsp-1"
+        /**
+         * What this pass computes, stamped on every result (a silent or too-short track included: its empty frames are the
+         * answer, not something to compute again). Its own DSP beats are not [Layer.GRID]: that is the neural tracker's.
+         */
+        val LAYERS: Set<Layer> = setOf(Layer.ENVELOPES, Layer.STRUCTURE)
         /** Hop of [TrackAnalysis.structureFrames]: half a second resolves a bar (>= 1.5 s) into 3+ frames. */
         const val STRUCTURE_HOP_MS = 500
         private const val SILENCE_DB = -75f

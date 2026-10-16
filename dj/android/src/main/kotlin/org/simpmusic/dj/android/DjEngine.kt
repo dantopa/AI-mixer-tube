@@ -722,16 +722,18 @@ class DjEngine(
             }
         var (from, to) = pair!!
         DjLog.i(TAG, "both analyses ready after ${since()} ms")
-        // A stored analysis can be ready while its upgrade (vocals, structure frames, bar evidence) is still running: planning
-        // now would plan without the voices, so no structure hand-off and no voice-over-voice check, and nothing re-plans
-        // when the upgrade lands. It takes a decode and the vocal model, ~10-20 s; wait for it, bounded.
-        if (scheduler.upgradePending(fromId) || scheduler.upgradePending(toId)) {
-            val pending = listOf(fromId, toId).filter { scheduler.upgradePending(it) }
-            DjLog.i(TAG, "waiting for the analysis upgrade of $pending before planning")
+        // A stored analysis can be ready while layers a mix needs (vocals, structure frames, bar evidence) are still being
+        // computed: planning now would plan without the voices, so no structure hand-off and no voice-over-voice check, and
+        // nothing re-plans when they land. It takes a decode and the vocal model, ~10-20 s; wait for them, bounded, and only
+        // while the scheduler is actually working on that track (a layer it cannot compute is not waited for).
+        suspend fun upgrading(id: String): Boolean = scheduler.upgradePending(id) && scheduler.missingLayers(id).isNotEmpty()
+        if (upgrading(fromId) || upgrading(toId)) {
+            val pending = listOf(fromId, toId).filter { upgrading(it) }.associateWith { id -> scheduler.missingLayers(id).map { it.key } }
+            DjLog.i(TAG, "waiting for the analysis layers $pending before planning")
             _debug.update { it.copy(lastOutcome = "analysing the voices first…") }
             val done =
                 withTimeoutOrNull(UPGRADE_WAIT_MS) {
-                    while (scheduler.upgradePending(fromId) || scheduler.upgradePending(toId)) delay(500)
+                    while (upgrading(fromId) || upgrading(toId)) delay(500)
                     true
                 }
             scheduler.get(fromId)?.let { from = it }

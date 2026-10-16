@@ -26,7 +26,10 @@ import org.simpmusic.dj.android.decode.CancelSignal
 import org.simpmusic.dj.android.decode.TrackDecoder
 import org.simpmusic.dj.android.log.DjLog
 import org.simpmusic.dj.android.store.AnalysisStore
+import org.simpmusic.dj.analysis.FeatureLayers
+import org.simpmusic.dj.analysis.Layer
 import org.simpmusic.dj.model.AnalysisPriority
+import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalysisRepository
 import org.simpmusic.dj.model.TrackAnalyzer
@@ -115,8 +118,9 @@ class DjAnalysisScheduler(
      */
     private val onJobStart: (AnalysisPriority) -> Unit = {},
     /**
-     * Vocal detection, used to ADD the vocals to a stored full analysis made before it existed (the full [analyzer] already
-     * fills them for new analyses): YAMNet alone, a few seconds, once per process for the playing and the next track.
+     * Vocal detection, used to compute the [Layer.VOCALS] layer alone when a stored full analysis lacks it (made before it
+     * existed, or with an older detector version), and after a full analysis whose own vocal pass gave nothing: YAMNet
+     * alone, a few seconds.
      */
     private val vocals: org.simpmusic.dj.ml.VocalProvider? = null,
 ) : TrackAnalysisRepository {
@@ -125,28 +129,50 @@ class DjAnalysisScheduler(
     /** Analyzer for work at [priority]: the quick one for the library warm-up when there is one. */
     private fun analyzerFor(priority: AnalysisPriority): TrackAnalyzer = if (priority == AnalysisPriority.BACKGROUND) quick ?: analyzer else analyzer
 
-    /** True when [videoId] already has what [priority] needs: BACKGROUND accepts a quick analysis, the others need the full one. */
+    /**
+     * True when [videoId] already has what [priority] needs: BACKGROUND accepts a quick analysis (any full one when there is no
+     * quick analyzer); NOW_PLAYING / NEXT_UP need the full analyzer's record with every [FeatureLayers.FOR_MIX] layer this
+     * device can compute (see [toCompute]).
+     */
     private fun fresh(videoId: String, priority: AnalysisPriority): Boolean {
         if (priority == AnalysisPriority.BACKGROUND && quick != null) return store.has(videoId)
-        if (!store.has(videoId, analyzer.id)) return false
-        return priority == AnalysisPriority.BACKGROUND || !needsBarEvidence(videoId)
+        if (priority == AnalysisPriority.BACKGROUND) return store.has(videoId, analyzer.id)
+        val stored = store.get(videoId, analyzer.id) ?: return false
+        return toCompute(videoId, stored).isEmpty()
     }
 
-    /** Tracks re-analysed (or tried) in this process because their stored analysis had no bar-phase evidence. */
-    private val upgraded = HashSet<String>()
+    /**
+     * The layers this scheduler can (re)compute. The neural grid and its downbeat logits need Beat This! in the full analyzer
+     * (a DSP-only device never re-analyses for them); the DSP layers come from the quick analyzer or the full one; the vocals
+     * need a [vocals] provider. A layer outside this set is never re-analysed for nor waited on.
+     */
+    private val producible: Set<Layer> =
+        buildSet {
+            add(Layer.ENVELOPES)
+            add(Layer.STRUCTURE)
+            if ("beat-this" in analyzer.id) {
+                add(Layer.GRID)
+                add(Layer.DOWNBEAT_LOGITS)
+            }
+            if (vocals != null) add(Layer.VOCALS)
+        }
 
     /**
-     * A full analysis stored before the tracker kept its per-beat downbeat logits (build ac) cannot tell which beat is the 1
-     * (see `BarPhase`), and one stored before the structure frames (build ae) gives `PhraseGrid` only loudness and bass to
-     * find the phrases with: the playing and the next track are analysed again, once per process each, so a "Perfect" mix
-     * becomes possible for them. The library keeps its old analyses (they still rank and beat-match).
+     * Per track, the layers a NOW_PLAYING / NEXT_UP job already computed or gave up on in this process but the stored record
+     * still lacks (no vocal model loaded, no neural grid found, an analyzer that does not produce a layer, a decode that
+     * kept failing): not tried again until the next process, so a missing provider never spins the worker.
      */
-    private fun needsBarEvidence(videoId: String): Boolean {
-        if (synchronized(upgraded) { videoId in upgraded }) return false
-        val a = store.get(videoId, analyzer.id) ?: return false
-        if (a.beatTimesMs == null) return false
-        // only the device's full analyzer (Beat This! over the DSP pass) produces both; any other would re-analyse for nothing
-        return "beat-this" in analyzer.id && (a.beatDownbeatLogits == null || a.structureFrames.isEmpty() || (vocals != null && (a.vocals == null || a.vocalProfile == null)))
+    private val attempted = HashMap<String, MutableSet<Layer>>()
+
+    private fun markAttempted(videoId: String, layers: Set<Layer>) {
+        if (layers.isEmpty()) return
+        synchronized(attempted) { attempted.getOrPut(videoId) { HashSet() } += layers }
+    }
+
+    /** What a NOW_PLAYING / NEXT_UP job still has to compute for the stored full analysis [stored] of [videoId]. */
+    private fun toCompute(videoId: String, stored: TrackAnalysis): Set<Layer> {
+        val tried = synchronized(attempted) { attempted[videoId]?.toSet() }.orEmpty()
+        return FeatureLayers.missing(stored, FeatureLayers.FOR_MIX).filterTo(LinkedHashSet<Layer>()) { it in producible && it !in tried }
     }
 
     private class Entry(val videoId: String, var priority: AnalysisPriority, val seq: Long, var notBeforeMs: Long = 0L, var failures: Int = 0)
@@ -350,11 +376,19 @@ class DjAnalysisScheduler(
     }
 
     /**
-     * True while a track that is already in the store is queued or being analysed again: the once-per-process patch that
-     * adds the vocals / structure frames, or the re-analysis that adds the bar evidence. [statusOf] says `Analysed` then,
-     * because the old record is still there, so a caller that needs the new fields must ask this instead.
+     * True while [videoId] is queued or being analysed, e.g. a stored track whose missing layers ([missingLayers]) are being
+     * computed. [statusOf] says `Analysed` then, because the old record is still there, so a caller that needs the new
+     * layers must ask this (and [missingLayers]) instead.
      */
     fun upgradePending(videoId: String): Boolean = synchronized(lock) { runningId == videoId || queue.containsKey(videoId) }
+
+    /**
+     * The [FeatureLayers.FOR_MIX] layers the stored full analysis of [videoId] lacks (or carries at an older version) and
+     * this device can compute; all of them when nothing is stored. A layer already tried in this process without success (no
+     * vocal model loaded, no grid found) stays listed: whether it is still coming is [upgradePending].
+     */
+    suspend fun missingLayers(videoId: String): Set<Layer> =
+        withContext(io) { FeatureLayers.missing(store.get(videoId, analyzer.id), FeatureLayers.FOR_MIX).filterTo(LinkedHashSet<Layer>()) { it in producible } }
 
     fun shutdown() {
         loop.cancel()
@@ -423,6 +457,7 @@ class DjAnalysisScheduler(
             onJobStart(entry.priority)
         } catch (_: Throwable) {
         }
+        var upgrading: Set<Layer> = emptySet() // the layers being added to a stored record, for the give-up below
         DjLog.i(TAG, "start $id ${entry.priority} attempt=${entry.failures + 1} network=${if (network) "allowed" else "forbidden"} | ${policy.describe()}")
         try {
             val useAnalyzer = analyzerFor(entry.priority)
@@ -431,22 +466,26 @@ class DjAnalysisScheduler(
                 outcomes.tryEmit(AnalysisOutcome.Done(id))
                 return
             }
-            // A full analysis that only lacks the structure frames (build ae) and/or the vocals (build ak) needs the DSP pass and/or
-            // the vocal model alone, not Beat This! again: a few seconds of CPU instead of ~25 s, once per track (less heat).
-            val patch = if (entry.priority != AnalysisPriority.BACKGROUND) {
-                store.get(id, analyzer.id)?.takeIf { it.beatDownbeatLogits != null && (it.structureFrames.isNotEmpty() || quick != null) }
-            } else {
-                null
-            }
-            if (entry.priority != AnalysisPriority.BACKGROUND && store.has(id, analyzer.id)) {
-                synchronized(upgraded) { upgraded += id }
-                val what = if (patch == null) {
-                    "bar-phase evidence, analysing it again"
-                } else {
-                    listOfNotNull("structure frames".takeIf { patch.structureFrames.isEmpty() }, "vocals".takeIf { (patch.vocals == null || patch.vocalProfile == null) && vocals != null })
-                        .joinToString(" and ") + ", adding only that"
-                }
-                DjLog.i(TAG, "$id: stored analysis predates the $what (once)")
+            // NOW_PLAYING / NEXT_UP over a stored full analysis: compute only the layers it lacks. The grid or its logits need
+            // the full analyzer (it produces everything); the DSP layers alone need the quick pass (~2 s instead of ~25 s of
+            // Beat This!, less heat); the vocals alone need the vocal model.
+            val stored = if (entry.priority != AnalysisPriority.BACKGROUND) store.get(id, analyzer.id) else null
+            val todo: Set<Layer> = stored?.let { toCompute(id, it) }.orEmpty()
+            val patch =
+                stored != null && Layer.GRID !in todo && Layer.DOWNBEAT_LOGITS !in todo &&
+                    (quick != null || (Layer.ENVELOPES !in todo && Layer.STRUCTURE !in todo))
+            if (stored != null) {
+                upgrading = todo
+                val how =
+                    if (!patch) {
+                        "full re-analysis"
+                    } else {
+                        listOfNotNull(
+                            "DSP pass".takeIf { Layer.ENVELOPES in todo || Layer.STRUCTURE in todo },
+                            "vocal model".takeIf { Layer.VOCALS in todo },
+                        ).joinToString(" + ") + " only"
+                    }
+                DjLog.i(TAG, "$id: stored analysis lacks ${todo.map { it.key }} (has ${FeatureLayers.describe(stored)}): $how")
             }
             val tDecode = clock()
             val pcm = decoder.decodeForAnalysis(id, network, cancel)
@@ -458,19 +497,20 @@ class DjAnalysisScheduler(
             }
             val tAnalyse = clock()
             val analysis =
-                if (patch != null) {
-                    var a: TrackAnalysis = patch
-                    if (a.structureFrames.isEmpty()) {
-                        val q = quick!!.analyze(id, pcm)
-                        a = a.copy(highBandEnergy = q.highBandEnergy, structureHopMs = q.structureHopMs, structureFrames = q.structureFrames)
-                    }
-                    if ((a.vocals == null || a.vocalProfile == null) && vocals != null) {
-                        a = (try { vocals.detect(pcm) } catch (e: Exception) { null })?.let { a.copy(vocals = it.ranges, vocalProfile = it.profile) } ?: a
+                if (patch) {
+                    patchLayers(id, stored!!, todo, pcm)
+                } else {
+                    var a = useAnalyzer.analyze(id, pcm)
+                    // the full analyzer's own vocal pass gave nothing (or it has none, e.g. DSP-only with the vocal model present)
+                    if (entry.priority != AnalysisPriority.BACKGROUND && Layer.VOCALS in producible && Layer.VOCALS in FeatureLayers.missing(a, setOf(Layer.VOCALS))) {
+                        a = withVocals(a, pcm)
                     }
                     a
-                } else {
-                    useAnalyzer.analyze(id, pcm)
                 }
+            if (entry.priority != AnalysisPriority.BACKGROUND) {
+                // whatever is still missing now will not appear by trying again in this process
+                markAttempted(id, FeatureLayers.missing(analysis, FeatureLayers.FOR_MIX).filterTo(HashSet<Layer>()) { it in producible })
+            }
             val tStore = clock()
             store.put(analysis)
             onStored(id)
@@ -514,6 +554,8 @@ class DjAnalysisScheduler(
                 _state.value = _state.value.copy(lastError = "$id: $message", recentErrors = (_state.value.recentErrors + "$id: $message").takeLast(3))
                 if (entry.failures >= MAX_FAILURES || !retryable && entry.failures >= 2) {
                     failedUntil[id] = clock() + failureMemoryMs
+                    // an upgrade of a stored track that cannot be done is not retried in this process (the old record stays usable)
+                    markAttempted(id, upgrading)
                     DjLog.e(TAG, "GIVING UP on $id after ${entry.failures} failures (${clock() - t0} ms this time)", e)
                     outcomes.tryEmit(AnalysisOutcome.Failed(id, message))
                 } else {
@@ -531,9 +573,50 @@ class DjAnalysisScheduler(
         }
     }
 
+    /**
+     * [stored] with the [todo] layers computed from [pcm] and nothing else: the DSP layers by the quick analyzer (merging only
+     * their fields), the vocals by the vocal model. Stamps what was computed; a provider that gives nothing leaves its layer
+     * absent.
+     */
+    private fun patchLayers(id: String, stored: TrackAnalysis, todo: Set<Layer>, pcm: PcmAudio): TrackAnalysis {
+        var a = stored
+        val done = LinkedHashSet<Layer>()
+        if (Layer.ENVELOPES in todo || Layer.STRUCTURE in todo) {
+            val q = quick!!.analyze(id, pcm)
+            if (Layer.ENVELOPES in todo) {
+                a =
+                    a.copy(
+                        energyHopMs = q.energyHopMs, energy = q.energy, lowBandEnergy = q.lowBandEnergy, highBandEnergy = q.highBandEnergy,
+                        loudnessDb = q.loudnessDb, timbre = q.timbre, key = q.key, sections = q.sections,
+                    )
+                done += Layer.ENVELOPES
+            }
+            if (Layer.STRUCTURE in todo) {
+                // a record made before the structure frames has no high band either (both came in build ae): add it with them
+                a = a.copy(structureHopMs = q.structureHopMs, structureFrames = q.structureFrames, highBandEnergy = a.highBandEnergy.ifEmpty { q.highBandEnergy })
+                done += Layer.STRUCTURE
+            }
+        }
+        val stamped = FeatureLayers.stamp(a, done)
+        return if (Layer.VOCALS in todo) withVocals(stamped, pcm) else stamped
+    }
+
+    /** [a] with the vocal model's ranges and profile and VOCALS stamped; [a] with its layers materialised when the model gives nothing. */
+    private fun withVocals(a: TrackAnalysis, pcm: PcmAudio): TrackAnalysis {
+        val d =
+            vocals?.let { v ->
+                try {
+                    v.detect(pcm)
+                } catch (e: Exception) {
+                    null
+                }
+            } ?: return FeatureLayers.stamp(a, emptySet())
+        return FeatureLayers.stamp(a.copy(vocals = d.ranges, vocalProfile = d.profile), setOf(Layer.VOCALS))
+    }
+
     private fun summary(a: TrackAnalysis): String =
         "bpm=${a.bpm?.let { "%.1f(c%.2f)".format(it.value, it.confidence) }} beats=${a.beatTimesMs?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} " +
-            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms vocals=${a.vocals?.value?.let { v -> "${v.size} ranges, ${v.sumOf { it.durationMs } / 1000} s" } ?: "none"} grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.AnalysisRefiner.cached(a).let { r -> org.simpmusic.dj.analysis.BarPhase.describe(r) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(r) }}" +
+            "downbeats=${a.downbeatBeatIndices?.let { "${it.value.size}(c%.2f)".format(it.confidence) }} key=${a.key?.let { "${it.value.camelot()}(c%.2f)".format(it.confidence) }} dur=${a.durationMs} ms layers=${FeatureLayers.describe(a)} vocals=${a.vocals?.value?.let { v -> "${v.size} ranges, ${v.sumOf { it.durationMs } / 1000} s" } ?: "none"} grid-repair: ${org.simpmusic.dj.analysis.GridRepair.repairWithReport(a).second.reason} ${org.simpmusic.dj.analysis.AnalysisRefiner.cached(a).let { r -> org.simpmusic.dj.analysis.BarPhase.describe(r) + "; " + org.simpmusic.dj.analysis.PhraseGrid.describe(r) }}" +
             (org.simpmusic.dj.analysis.SongMap.describe(a)?.let { " map: $it" } ?: "")
 
     private fun queueSummary(): String = queue.values.joinToString(prefix = "[", postfix = "]") { "${it.videoId}/${it.priority}" }

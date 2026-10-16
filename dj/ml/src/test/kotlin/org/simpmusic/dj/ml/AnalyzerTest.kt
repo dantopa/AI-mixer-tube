@@ -1,9 +1,12 @@
 package org.simpmusic.dj.ml
 
+import org.simpmusic.dj.analysis.FeatureLayers
+import org.simpmusic.dj.analysis.Layer
 import org.simpmusic.dj.model.Confident
 import org.simpmusic.dj.model.MusicalKey
 import org.simpmusic.dj.model.Mode
 import org.simpmusic.dj.model.PcmAudio
+import org.simpmusic.dj.model.TimeRange
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.TrackAnalyzer
 import kotlin.test.Test
@@ -145,5 +148,21 @@ class AnalyzerTest {
         val with = BeatThisAnalyzer(provider, FakeBase()).analyze("x", audio)
         assertEquals("fake-dsp+beat-this-onnx-1", with.analyzerId)
         assertNotNull(with.key)
+    }
+    @Test
+    fun compositeStampsOnlyTheLayersItReallyComputed() {
+        val grid = BeatGridBuilder.build(picks(126.0, 100, 4))!!
+        val ok = object : BeatProvider { override val id = "beat-this"; override fun grid(audio: PcmAudio) = grid }
+        val none = object : BeatProvider { override val id = "beat-this"; override fun grid(audio: PcmAudio): BeatGrid? = null }
+        val voices = object : VocalProvider {
+            override val id = "v"
+            override fun vocals(audio: PcmAudio) = Confident(listOf(TimeRange(0, 1_000)), 0.85f)
+        }
+        val withGrid = CompositeAnalyzer(FakeBase(), ok, vocals = voices).analyze("v", audio)
+        assertEquals(setOf(Layer.ENVELOPES, Layer.GRID, Layer.DOWNBEAT_LOGITS, Layer.VOCALS), FeatureLayers.present(withGrid).keys)
+        // no grid: the record carries a "beat-this" id, but no GRID stamp (the legacy inference would have claimed one)
+        val noGrid = CompositeAnalyzer(FakeBase(), none).analyze("v", audio)
+        assertEquals("fake-dsp+beat-this", noGrid.analyzerId)
+        assertEquals(setOf(Layer.GRID, Layer.DOWNBEAT_LOGITS, Layer.STRUCTURE, Layer.VOCALS), FeatureLayers.missing(noGrid, FeatureLayers.FOR_MIX))
     }
 }
