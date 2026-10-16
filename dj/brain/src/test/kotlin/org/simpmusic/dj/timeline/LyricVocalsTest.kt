@@ -102,6 +102,7 @@ class LyricVocalsTest {
         val d = LyricVocals.build(song, "lrclib", durationMs = 200_000, declaredDurationMs = 240_000)
         assertNull(d.vocals, "timed to 240 s, the track is 200 s")
         assertNull(LyricVocals.build(song.take(2), "lrclib", 200_000).vocals, "two lines are not lyrics")
+        assertNull(LyricVocals.build(song.map { it.copy(startMs = 0) }, "lrclib", 200_000).vocals, "unsynced text is not timing")
     }
 
     @Test

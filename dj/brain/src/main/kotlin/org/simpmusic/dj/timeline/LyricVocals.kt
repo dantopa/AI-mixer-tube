@@ -58,6 +58,12 @@ data class LyricVocals(
             offsetMs / 1000.0, confidence, if (note.isNotEmpty()) " ($note)" else "",
         )
 
+    /** Result of [build]: the vocals, or why the lyrics were rejected for this track. */
+    class Built(val vocals: LyricVocals?, val rejected: String?)
+
+    /** Result of [bestOffset]: the best constant offset and the correlation there and at 0. */
+    data class OffsetFit(val offsetMs: Long, val best: Double, val atZero: Double)
+
     companion object {
         /** Below this the ranges are not used (the detector, or unknown, decides). */
         const val MIN_CONFIDENCE = 0.5f
@@ -132,9 +138,6 @@ data class LyricVocals(
         /** Sung lines of [lines] (instrumental markers excluded). */
         fun sungLines(lines: List<LyricLine>): Int = lines.count { !isInstrumental(it.text) }
 
-        /** Result of [build]: the vocals, or why the lyrics were rejected for this track. */
-        class Built(val vocals: LyricVocals?, val rejected: String?)
-
         /**
          * The lyrics of a track turned into its vocals, validated against the track: rejected when they do not fit its
          * duration ([durationMs] of the audio, [declaredDurationMs] the provider's own, when it gives one); then the
@@ -151,6 +154,8 @@ data class LyricVocals(
         ): Built {
             val sung = lines.filter { !isInstrumental(it.text) && it.startMs >= 0 }
             if (sung.size < MIN_LINES) return Built(null, "only ${sung.size} sung lines")
+            // unsynced text labelled as synced (every line at 0) is not timing
+            if (sung.map { it.startMs }.distinct().size < MIN_LINES) return Built(null, "lines carry no timing")
             val dur = durationMs.takeIf { it > 0 } ?: analysis?.durationMs?.takeIf { it > 0 } ?: 0L
             val last = sung.maxOf { it.startMs }
             if (dur > 0 && last > dur + LATE_LAST_LINE_MS) {
@@ -192,9 +197,6 @@ data class LyricVocals(
             if (shifted.isEmpty()) return Built(null, "no sung range inside the track")
             return Built(LyricVocals(shifted, provider, wordLevel, offset, conf.coerceIn(0f, 1f), sung.size, note), null)
         }
-
-        /** The best constant offset of [ranges] against the detector's [profile]: correlation at the best and at 0. */
-        data class OffsetFit(val offsetMs: Long, val best: Double, val atZero: Double)
 
         /**
          * Searches -[MAX_OFFSET_MS]..+[MAX_OFFSET_MS] in [OFFSET_STEP_MS] steps for the shift that best agrees with the
