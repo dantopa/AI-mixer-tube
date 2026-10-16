@@ -14,8 +14,14 @@ data class MixMarks(val exitMs: Long? = null, val entryMs: Long? = null, val sol
         /** Start of a plan's reason when the owner's marks placed it. */
         const val TAG = "OWNER MARKS: "
 
-        /** Where the marks come from (the app installs its store here; tests set their own). */
-        @Volatile var provider: (String) -> MixMarks? = { null }
+        /**
+         * Where the marks come from: the installed `TrackAnnotations` ([org.simpmusic.dj.timeline.Annotations], where the app
+         * installs its store) until replaced; tests set their own.
+         */
+        @Volatile var provider: (String) -> MixMarks? = DEFAULT_PROVIDER
+
+        /** What [provider] reads unless replaced. */
+        val DEFAULT_PROVIDER: (String) -> MixMarks? get() = { org.simpmusic.dj.timeline.Annotations.installed.mixMarks(it) }
 
         fun of(videoId: String): MixMarks? = provider(videoId)
     }

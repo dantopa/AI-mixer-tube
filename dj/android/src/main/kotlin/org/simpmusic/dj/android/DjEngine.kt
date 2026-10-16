@@ -2,6 +2,8 @@ package org.simpmusic.dj.android
 
 import org.simpmusic.dj.analysis.AnalysisRefiner
 import org.simpmusic.dj.analysis.BarPhase
+import org.simpmusic.dj.timeline.TrackTimeline
+import org.simpmusic.dj.timeline.Timelines
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -338,11 +340,13 @@ class DjEngine(
     @Volatile private var currentRaw: TrackAnalysis? = null
     @Volatile private var currentRawAtMs = 0L
     @Volatile private var refreshingCurrent = false
-    private var refinedFor: Triple<TrackAnalysis, Long?, Long?>? = null
-    private var refined: TrackAnalysis? = null
+    private var timeline: TrackTimeline? = null
 
-    /** The playing track's grid as the planner sees it (repaired, bar phase decided, tapped 1 applied). Main thread. */
-    private fun currentRefined(): TrackAnalysis? {
+    /**
+     * The playing track's timeline: its grid as the planner sees it (repaired, bar phase decided, the owner's marks applied).
+     * Main thread; re-read only when the analysis or one of the owner's marks changed (the counter asks at 20 Hz).
+     */
+    private fun currentTimeline(): TrackTimeline? {
         val id = pairFrom ?: return null
         val raw = currentRaw
         val now = System.currentTimeMillis()
@@ -358,44 +362,34 @@ class DjEngine(
             }
         }
         if (raw == null || raw.videoId != id) return null
-        val key = Triple(raw, BarPhase.anchors(id), org.simpmusic.dj.analysis.PhraseGrid.anchors(id))
-        if (refinedFor?.first !== raw || refinedFor?.second != key.second || refinedFor?.third != key.third) {
-            refined = AnalysisRefiner.cached(raw)
-            refinedFor = key
+        val t = timeline
+        if (t != null && t.raw === raw && t.downbeatAnchorMs == BarPhase.anchors(id) &&
+            t.phraseAnchorMs == org.simpmusic.dj.analysis.PhraseGrid.anchors(id) && t.mixMarks == org.simpmusic.dj.planner.MixMarks.of(id)
+        ) {
+            return t
         }
-        return refined
+        return Timelines.of(raw).also { timeline = it }
     }
 
     override fun barBeatAt(positionMs: Long): BarBeat? {
-        val r = currentRefined() ?: return null
-        val beats = r.beatTimesMs?.value ?: return null
-        val downs = r.downbeatBeatIndices?.value ?: return null
-        val bi = lastAtOrBefore(beats, positionMs)
-        if (bi < 0 || downs.isEmpty()) return null
-        val k = downs.binarySearch(bi).let { if (it >= 0) it else -it - 2 }
-        if (k < 0) return null
-        val info = r.barPhase
-        val ph = r.phrases
+        val p = currentTimeline()?.barPosition(positionMs) ?: return null
         return BarBeat(
-            bi - downs[k],
-            r.beatsPerBar ?: 4,
-            sure = info?.trusted == true,
-            anchored = info?.source == "anchored",
-            barInBlock = ph?.barPositions?.getOrNull(k),
-            phraseSure = ph?.phrasesTrusted == true,
-            blockSure = ph?.blocksTrusted == true,
-            phraseMarked = ph?.source == "anchored",
+            p.beatInBar,
+            p.beatsPerBar,
+            sure = p.sure,
+            anchored = p.anchored,
+            barInBlock = p.barInBlock,
+            phraseSure = p.phraseSure,
+            blockSure = p.blockSure,
+            phraseMarked = p.phraseMarked,
         )
     }
 
     override fun markPhrase(positionMs: Long): Long? {
         val id = pairFrom ?: return null
         val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
-        val r = currentRefined()
-        val beats = r?.beatTimesMs?.value
-        val downs = r?.downbeatBeatIndices?.value
         // the nearest bar line (a phrase starts on a 1); without bars yet the raw time is kept and snapped later
-        val t = if (beats.isNullOrEmpty() || downs.isNullOrEmpty()) heard else downs.map { beats[it].toLong() }.minBy { kotlin.math.abs(it - heard) }
+        val t = currentTimeline()?.nearestBarLineMs(heard) ?: heard
         org.simpmusic.dj.android.perfect.UserPhrases.set(id, t, "marked at $heard ms")
         _debug.update { it.copy(lastOutcome = "phrase marked: the 16 starts here") }
         return t
@@ -410,11 +404,8 @@ class DjEngine(
     override fun markMix(mark: org.simpmusic.dj.android.perfect.MixMark, positionMs: Long): Long? {
         val id = pairFrom ?: return null
         val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
-        val r = currentRefined()
-        val beats = r?.beatTimesMs?.value
-        val downs = r?.downbeatBeatIndices?.value
         // a mix point sits on a bar line; without bars yet the raw time is kept (the planner snaps it again)
-        val t = if (beats.isNullOrEmpty() || downs.isNullOrEmpty()) heard else downs.map { beats[it].toLong() }.minBy { kotlin.math.abs(it - heard) }
+        val t = currentTimeline()?.nearestBarLineMs(heard) ?: heard
         org.simpmusic.dj.android.perfect.UserMixMarks.set(id, mark, t, "marked at $heard ms")
         _debug.update { it.copy(lastOutcome = "mix mark: ${mark.key} at %d:%02d".format(t / 60_000, t / 1000 % 60)) }
         // the exit of the PLAYING track changes the plan of the pair being prepared: plan it again (unless it is mixing)
@@ -450,20 +441,20 @@ class DjEngine(
 
     override fun tapTheOne(positionMs: Long): Long? {
         val id = pairFrom ?: return null
-        val r = currentRefined()
-        val beats = r?.beatTimesMs?.value
+        val tl = currentTimeline()
         val heard = (positionMs - org.simpmusic.dj.android.perfect.UserDownbeats.TAP_DELAY_MS).coerceAtLeast(0L)
-        if (beats.isNullOrEmpty()) {
+        val bi = tl?.nearestBeatIndex(heard)
+        if (tl == null || bi == null) {
             // no grid yet: keep the raw time, BarPhase snaps it when the analysis exists
             return org.simpmusic.dj.android.perfect.UserDownbeats.set(id, heard, "tap (no grid yet)")
         }
+        val beats = tl.beatsMs
         val now = System.currentTimeMillis()
         if (tapSessionTrack != id || now - lastTapAtMs > TAP_SESSION_GAP_MS) tapSession.clear()
         tapSessionTrack = id
         lastTapAtMs = now
-        val bi = nearest(beats, heard)
         tapSession += bi to heard
-        val bpb = r.beatsPerBar ?: 4
+        val bpb = tl.beatsPerBar ?: 4
         // the beat of the bar most taps agree on (ties: the latest tap's)
         val votes = tapSession.groupingBy { it.first % bpb }.eachCount()
         val best = votes.maxByOrNull { (ph, n) -> n * 1000 + if (ph == bi % bpb) 1 else 0 }!!.key
@@ -477,15 +468,7 @@ class DjEngine(
 
     override fun shiftTheOne(positionMs: Long): Long? {
         val id = pairFrom ?: return null
-        val r = currentRefined() ?: return null
-        val beats = r.beatTimesMs?.value ?: return null
-        val downs = r.downbeatBeatIndices?.value ?: return null
-        val bi = lastAtOrBefore(beats, positionMs)
-        if (bi < 0 || downs.isEmpty()) return null
-        val k = downs.binarySearch(bi).let { if (it >= 0) it else -it - 2 }.coerceAtLeast(0)
-        val next = downs[k] + 1
-        if (next >= beats.size) return null
-        val t = beats[next].toLong()
+        val t = currentTimeline()?.shiftedOneMs(positionMs) ?: return null
         org.simpmusic.dj.android.perfect.UserDownbeats.set(id, t, "shift +1 beat")
         _debug.update { it.copy(lastOutcome = "1 moved one beat later") }
         return t
@@ -496,29 +479,6 @@ class DjEngine(
         org.simpmusic.dj.android.perfect.UserDownbeats.clear(id)
         tapSession.clear()
         _debug.update { it.copy(lastOutcome = "1 back to automatic") }
-    }
-
-    private fun lastAtOrBefore(beats: List<Int>, t: Long): Int {
-        var lo = 0
-        var hi = beats.size - 1
-        var ans = -1
-        while (lo <= hi) {
-            val mid = (lo + hi) ushr 1
-            if (beats[mid] <= t) {
-                ans = mid
-                lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
-        }
-        return ans
-    }
-
-    private fun nearest(beats: List<Int>, t: Long): Int {
-        val i = lastAtOrBefore(beats, t)
-        if (i < 0) return 0
-        if (i + 1 < beats.size && beats[i + 1] - t < t - beats[i]) return i + 1
-        return i
     }
 
     override fun perfectMix(): MixNowResult {
@@ -922,8 +882,8 @@ class DjEngine(
                 reason = plan.reason,
                 mixBpm = plan.mixBpm,
                 // the tempo of the repaired grid the plan used, not the raw DSP field (which reads cumbia's tresillo as 134)
-                fromBpm = AnalysisRefiner.cached(from).bpm?.value,
-                toBpm = AnalysisRefiner.cached(to).bpm?.value,
+                fromBpm = Timelines.of(from).bpm?.value,
+                toBpm = Timelines.of(to).bpm?.value,
                 fromKey = from.key?.value?.camelot(),
                 toKey = to.key?.value?.camelot(),
                 confidence = plan.confidence,

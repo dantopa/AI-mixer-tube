@@ -3,6 +3,7 @@ package org.simpmusic.dj.analysis
 import org.simpmusic.dj.model.PhraseInfo
 import org.simpmusic.dj.model.TrackAnalysis
 import org.simpmusic.dj.model.Trust
+import org.simpmusic.dj.timeline.Annotations
 import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
@@ -81,8 +82,11 @@ object PhraseGrid {
     /** Bars on each side of a bar that its local margins are measured over (two blocks in all). */
     private const val LOCAL_BARS = 16
 
-    /** The owner's marked phrase start for a track (source ms); null when none. */
-    @Volatile var anchors: (videoId: String) -> Long? = { null }
+    /** The owner's marked phrase start for a track (source ms); null when none. Reads [Annotations.installed] until replaced. */
+    @Volatile var anchors: (videoId: String) -> Long? = DEFAULT_ANCHORS
+
+    /** What [anchors] reads unless replaced: the installed `TrackAnnotations`. */
+    val DEFAULT_ANCHORS: (String) -> Long? get() = { Annotations.installed.phraseAnchorMs(it) }
 
     @Volatile var enabled: Boolean = true
 
@@ -106,9 +110,9 @@ object PhraseGrid {
 
     /**
      * [a] (after [BarPhase.apply]) with its phrases found. Returned unchanged when it has no decided bars or the envelopes
-     * are missing.
+     * are missing. [anchorMs] is the owner's phrase mark.
      */
-    fun apply(a: TrackAnalysis): TrackAnalysis {
+    fun apply(a: TrackAnalysis, anchorMs: Long? = anchors(a.videoId)): TrackAnalysis {
         if (!enabled) return a
         // on the voted bars, or on the tracker's own downbeats when they are trusted (analyses without logits)
         if (a.barPhase == null && (a.downbeatBeatIndices?.confidence ?: 0f) < Trust.DOWNBEATS) return a
@@ -116,7 +120,7 @@ object PhraseGrid {
         val beats = a.beatTimesMs?.value ?: return a
         val downs = a.downbeatBeatIndices?.value?.filter { it in beats.indices } ?: return a
         val barStarts = downs.map { beats[it].toLong() }
-        val r = detect(barStarts, Envelopes.of(a), anchors(a.videoId)) ?: return a
+        val r = detect(barStarts, Envelopes.of(a), anchorMs) ?: return a
         // 8-bar lines (half a 16-bar phrase); a Perfect mix prefers the 16-bar block lines themselves (see the planner)
         val phraseStarts = barStarts.indices.filter { r.position[it] % LINE_BARS == 0 }.map { barStarts[it] }
         val blockStarts = barStarts.indices.filter { r.position[it] == 0 }.map { barStarts[it] }

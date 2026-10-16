@@ -2,6 +2,7 @@ package org.simpmusic.dj.analysis
 
 import org.simpmusic.dj.model.TimeRange
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.timeline.TrackTimeline
 
 /**
  * Voice over voice in an overlap, from `TrackAnalysis.vocals` (YAMNet, see `VocalDetector`). After the bass, two singers at
@@ -40,21 +41,14 @@ object VocalClash {
         }
     }
 
-    /** Vocal ranges of [a], sorted; null when the analysis has no vocal detection (made before build ak). */
     /**
-     * The detected vocal ranges, or null (= unknown) when the detector calls [UNTRUSTED_COVERAGE] or more of the track voice:
-     * on the owner's cumbias YAMNet hears the band as voice (detected coverage 65-98 %, median 89 %, across 33 tracks of
-     * the build-aq export), and acting on that cut nearly every overlap to one bar.
+     * The detected vocal ranges, sorted, or null (= unknown): no detection, or one that is not trusted. The rule lives in
+     * [TrackTimeline.trustedVocals], the one place that decides it.
      */
-    fun ranges(a: TrackAnalysis): List<TimeRange>? {
-        val r = a.vocals?.value?.sortedBy { it.startMs } ?: return null
-        val dur = a.durationMs.takeIf { it > 0 } ?: return r
-        val sung = r.sumOf { (minOf(it.endMs, dur) - maxOf(it.startMs, 0L)).coerceAtLeast(0L) }
-        return r.takeIf { sung < UNTRUSTED_COVERAGE * dur }
-    }
+    fun ranges(a: TrackAnalysis): List<TimeRange>? = TrackTimeline.trustedVocals(a)
 
     /** Detected voice over this share of a track means the detector cannot tell the voice from the band there. */
-    const val UNTRUSTED_COVERAGE = 0.90
+    const val UNTRUSTED_COVERAGE = TrackTimeline.UNTRUSTED_VOCAL_COVERAGE
 
     private fun inside(r: List<TimeRange>, t: Long): Boolean {
         var lo = 0

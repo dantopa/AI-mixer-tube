@@ -3,6 +3,7 @@ package org.simpmusic.dj.analysis
 import org.simpmusic.dj.model.BarPhaseInfo
 import org.simpmusic.dj.model.Confident
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.timeline.Annotations
 import kotlin.math.abs
 
 /**
@@ -69,8 +70,14 @@ object BarPhase {
     private const val TRUSTED_CONFIDENCE = 0.85f
     private const val UNTRUSTED_CONFIDENCE = 0.35f
 
-    /** The owner's tapped 1 for a track (source ms), set by the app; null when none. */
-    @Volatile var anchors: (videoId: String) -> Long? = { null }
+    /**
+     * The owner's tapped 1 for a track (source ms); null when none. Reads [Annotations.installed] (the app's one install
+     * point) until replaced; tests may still set the hook itself.
+     */
+    @Volatile var anchors: (videoId: String) -> Long? = DEFAULT_ANCHORS
+
+    /** What [anchors] reads unless replaced: the installed `TrackAnnotations`. */
+    val DEFAULT_ANCHORS: (String) -> Long? get() = { Annotations.installed.downbeatAnchorMs(it) }
 
     @Volatile var enabled: Boolean = true
 
@@ -161,9 +168,10 @@ object BarPhase {
 
     /**
      * [repaired] (the grid the planner uses) with its downbeats replaced by the voted lattice, using the evidence of [raw]
-     * (the stored analysis, whose logits follow ITS beats). Returned unchanged when there is no evidence.
+     * (the stored analysis, whose logits follow ITS beats), forced through the owner's tapped 1 at [anchorMs]. Returned
+     * unchanged when there is no evidence.
      */
-    fun apply(repaired: TrackAnalysis, raw: TrackAnalysis): TrackAnalysis {
+    fun apply(repaired: TrackAnalysis, raw: TrackAnalysis, anchorMs: Long? = anchors(repaired.videoId)): TrackAnalysis {
         if (!enabled) return repaired
         val beats = repaired.beatTimesMs?.value ?: return repaired
         val rawBeats = raw.beatTimesMs?.value
@@ -183,7 +191,6 @@ object BarPhase {
         }
         if (matched < beats.size * MIN_EVIDENCE_SHARE) return repaired.copy(beatDownbeatLogits = null)
         val bpb = repaired.beatsPerBar?.takeIf { it == 3 || it == 4 } ?: 4
-        val anchorMs = anchors(repaired.videoId)
         val anchorIndex = anchorMs?.let { t -> nearestWithin(beats, t, medianInterval(beats) / 2) }
         val d = decide(evidence, bpb, anchorIndex)
         val bars = d.downbeats.size
@@ -283,10 +290,16 @@ object AnalysisRefiner {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Triple<TrackAnalysis, Long?, Long?>, TrackAnalysis>?) = size > 256
         }
 
-    fun cached(raw: TrackAnalysis): TrackAnalysis {
-        val key = Triple(raw, BarPhase.anchors(raw.videoId), PhraseGrid.anchors(raw.videoId))
+    fun cached(raw: TrackAnalysis): TrackAnalysis = cached(raw, BarPhase.anchors(raw.videoId), PhraseGrid.anchors(raw.videoId))
+
+    /**
+     * Same, with the owner's tapped 1 ([downbeatAnchorMs]) and phrase mark ([phraseAnchorMs]) read once by the caller, so a
+     * caller that keys its own cache on them (`Timelines`) gets exactly the grid those values give.
+     */
+    fun cached(raw: TrackAnalysis, downbeatAnchorMs: Long?, phraseAnchorMs: Long?): TrackAnalysis {
+        val key = Triple(raw, downbeatAnchorMs, phraseAnchorMs)
         synchronized(cache) { cache[key]?.let { return it } }
-        val r = PhraseGrid.apply(BarPhase.apply(GridRepair.cached(raw), raw))
+        val r = PhraseGrid.apply(BarPhase.apply(GridRepair.cached(raw), raw, downbeatAnchorMs), phraseAnchorMs)
         synchronized(cache) { cache[key] = r }
         return r
     }

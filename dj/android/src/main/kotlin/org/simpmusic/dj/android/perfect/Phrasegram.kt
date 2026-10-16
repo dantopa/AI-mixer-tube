@@ -4,9 +4,9 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import org.simpmusic.dj.analysis.AnalysisRefiner
 import org.simpmusic.dj.analysis.PhraseGrid
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.timeline.Timelines
 import java.io.ByteArrayOutputStream
 import kotlin.math.ln
 import kotlin.math.max
@@ -23,7 +23,7 @@ object Phrasegram {
     private const val HEADER = 50
 
     fun png(raw: TrackAnalysis, title: String?): ByteArray? {
-        val r = AnalysisRefiner.cached(raw)
+        val r = Timelines.of(raw).refined
         val p = r.phrases ?: return null
         val beats = r.beatTimesMs?.value ?: return null
         val downs = r.downbeatBeatIndices?.value ?: return null
