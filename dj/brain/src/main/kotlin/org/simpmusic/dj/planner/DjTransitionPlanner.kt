@@ -1,6 +1,8 @@
 package org.simpmusic.dj.planner
 
 import org.simpmusic.dj.timeline.Timelines
+import org.simpmusic.dj.timeline.TrackTimeline
+import org.simpmusic.dj.model.TimeRange
 import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.Harmony
 import org.simpmusic.dj.analysis.VocalClash
@@ -54,21 +56,25 @@ class DjTransitionPlanner : TransitionPlanner {
         // bar first; regular grids pass through untouched (see GridRepair).
         // One truth per track: the planner reads the same resolved timeline as the bar counter, the mix view and the
         // recommender (repaired grid, voted 1, phrases, the owner's marks); `refined` is the cached refined analysis.
-        val from = fromRaw?.let { Timelines.of(it).refined }
-        val to = toRaw?.let { Timelines.of(it).refined }
+        val tFrom = fromRaw?.let { Timelines.of(it) }
+        val tTo = toRaw?.let { Timelines.of(it) }
+        val from = tFrom?.refined
+        val to = tTo?.refined
+        // where each track has a voice, as the timeline decides it: the synced lyrics, else a trusted detection, else unknown
+        val voc = PairVocals.of(tFrom, tTo)
         val s = sanitise(settings)
         val earliest = constraints.earliestExitMs.coerceIn(0L, TrackContext.MAX_DURATION_MS)
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
             when {
-                constraints.perfect -> planPerfect(from, to, s, earliest, latest)
+                constraints.perfect -> planPerfect(from, to, s, earliest, latest, voc)
                 constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
                     // The songs' own structure (StructureHandoff) comes first: a 1-on-1 elsewhere in the track would cut a
                     // sung section that the hand-off leaves whole. Perfect is next, the regular scored plan last.
                     // The owner's own marks come before anything the planner could find by itself.
-                    val regularFirst = planUnsafe(from, to, s, earliest, latest)
+                    val regularFirst = planUnsafe(from, to, s, earliest, latest, voc)
                     if (regularFirst.meta?.source.isOwner()) return regularFirst
-                    val p = planPerfect(from, to, s, earliest, latest, keepTiming = true)
+                    val p = planPerfect(from, to, s, earliest, latest, voc, keepTiming = true)
                     val perfectOk = p.kind == PlanKind.BEAT_MATCHED && p.meta?.perfect == true
                     if (perfectOk && p.meta?.source.isStructure()) {
                         p
@@ -81,7 +87,7 @@ class DjTransitionPlanner : TransitionPlanner {
                         }
                     }
                 }
-                else -> planUnsafe(from, to, s, earliest, latest)
+                else -> planUnsafe(from, to, s, earliest, latest, voc)
             }
         } catch (e: Exception) {
             try {
@@ -111,6 +117,20 @@ class DjTransitionPlanner : TransitionPlanner {
         }
     }
 
+    /**
+     * Where each track of the pair has a voice (null = unknown), from the tracks' timelines ([TrackTimeline.vocals]): the
+     * synced lyrics when present and trusted, else the detector's trusted ranges. [note] says when lyrics were used.
+     */
+    private class PairVocals(val out: List<TimeRange>?, val inc: List<TimeRange>?, val note: String?) {
+        companion object {
+            fun of(from: TrackTimeline?, to: TrackTimeline?): PairVocals {
+                fun side(t: TrackTimeline?, name: String) = t?.takeIf { it.vocalsFromLyrics }?.lyricVocals?.let { "$name from ${it.describe()}" }
+                val note = listOfNotNull(side(from, "outgoing"), side(to, "incoming")).takeIf { it.isNotEmpty() }?.joinToString(", ", prefix = "vocals: ")
+                return PairVocals(from?.vocals?.value, to?.vocals?.value, note)
+            }
+        }
+    }
+
     /** The pitch decision for a pair of keys (independent of where the mix happens). */
     private class KeyDecision(val shiftOut: Int, val shiftIn: Int, val clash: Boolean, val note: String, val confMin: Float)
 
@@ -119,6 +139,8 @@ class DjTransitionPlanner : TransitionPlanner {
         val from: TrackAnalysis, val to: TrackAnalysis, val out: TrackContext, val inc: TrackContext,
         val settings: DjSettings, val earliest: Long, val latest: Long, val barsMode: Boolean, val conf: Float, val notes: List<String>,
         val key: KeyDecision, val requestedUnits: Int, val minUnits: Int, val softFloor: Int,
+        /** Where each track has a voice (the timeline's: lyrics, else a trusted detection; null = unknown). */
+        val vocalsOut: List<TimeRange>?, val vocalsIn: List<TimeRange>?,
         val perfect: Boolean = false,
         /** The owner placed this mix by ear: the detector's vocals must not shorten it. */
         val ignoreVocals: Boolean = false,
@@ -132,7 +154,7 @@ class DjTransitionPlanner : TransitionPlanner {
          */
         fun owned(out: Boolean = true, inc: Boolean = true) = Ctx(
             from, to, this.out, this.inc, settings.copy(maxTempoBend = max(settings.maxTempoBend, OWNER_TEMPO_BEND)), earliest, latest,
-            barsMode, conf, notes, key, requestedUnits, minUnits, softFloor, perfect,
+            barsMode, conf, notes, key, requestedUnits, minUnits, softFloor, vocalsOut, vocalsIn, perfect,
             ignoreVocals = out && inc, ignoreOutVocals = out, ignoreInVocals = inc,
         )
 
@@ -140,9 +162,9 @@ class DjTransitionPlanner : TransitionPlanner {
         val hOut: Harmony.Profile? = Harmony.profile(from)
         val hIn: Harmony.Profile? = Harmony.profile(to)
 
-        /** Where each track has a voice (null for analyses without vocal detection). */
-        val vOut = if (ignoreOutVocals) null else VocalClash.ranges(from)
-        val vIn = if (ignoreInVocals) null else VocalClash.ranges(to)
+        /** Where each track has a voice (null = unknown, or ignored on the side the owner placed). */
+        val vOut = if (ignoreOutVocals) null else vocalsOut
+        val vIn = if (ignoreInVocals) null else vocalsIn
 
         val fromId: String get() = out.id
         val toId: String get() = inc.id
@@ -183,7 +205,7 @@ class DjTransitionPlanner : TransitionPlanner {
      * search then only considers exits and entries on trusted 1s. Anything short of that is refused, never downgraded
      * silently: the caller shows the owner why.
      */
-    private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, keepTiming: Boolean = false): TransitionPlan {
+    private fun planPerfect(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, voc: PairVocals, keepTiming: Boolean = false): TransitionPlan {
         val why = ArrayList<String>()
         // why the refusal, as data: a missing analysis first, then the inner plan's own failure, untrusted bars otherwise
         var code = if (from == null || to == null) PlanFailCode.NO_ANALYSIS else PlanFailCode.GRID_UNTRUSTED
@@ -201,7 +223,7 @@ class DjTransitionPlanner : TransitionPlanner {
             fun found(a: TrackAnalysis) = a.phrases?.takeIf { it.phrasesTrusted && it.phraseStartsMs.isNotEmpty() }?.let { a.copy(phraseStartsMs = it.phraseStartsMs) } ?: a
             // the button mixes as soon as it can; the default mode keeps the settings' minimum played share of the track
             val timing = if (keepTiming) settings.copy(mixPoint = MixPoint.ANYWHERE) else settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
-            val p = planUnsafe(found(from!!), found(to!!), timing, earliest, latest, perfect = true)
+            val p = planUnsafe(found(from!!), found(to!!), timing, earliest, latest, voc, perfect = true)
             if (p.kind == PlanKind.BEAT_MATCHED && p.meta?.perfect == true) return p
             why += p.reason
             code = p.meta?.failCode ?: PlanFailCode.NOTHING_IN_RANGE
@@ -210,7 +232,7 @@ class DjTransitionPlanner : TransitionPlanner {
         return base.copy(reason = PlanConstraints.PERFECT_REFUSED + why.joinToString("; "))
     }
 
-    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long = Long.MAX_VALUE, perfect: Boolean = false): TransitionPlan {
+    private fun planUnsafe(from: TrackAnalysis?, to: TrackAnalysis?, settings: DjSettings, earliest: Long, latest: Long, voc: PairVocals, perfect: Boolean = false): TransitionPlan {
         val fromId = from?.videoId.orEmpty()
         val toId = to?.videoId.orEmpty()
         if (from == null || to == null) {
@@ -243,13 +265,15 @@ class DjTransitionPlanner : TransitionPlanner {
         val barsMode = out.barsTrusted && inc.barsTrusted && out.beatsPerBar == inc.beatsPerBar
         if (!barsMode) notes += "downbeats untrusted: aligned on beats only (no bar alignment claimed), overlap capped"
         else conf = min(conf, min(out.downbeatConf, inc.downbeatConf))
+        voc.note?.let { notes += it }
 
         val key = keyDecision(from, to, settings)
         conf = min(conf, key.confMin)
         val requestedUnits = if (barsMode) settings.overlapBars else min(settings.overlapBars, BEAT_MODE_MAX_BARS) * out.beatsPerBar
         val c = Ctx(
             from, to, out, inc, settings, earliest, latest, barsMode, conf, notes, key, requestedUnits,
-            minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8, perfect = perfect,
+            minUnits = if (barsMode) 1 else 4, softFloor = if (barsMode) 2 else 8,
+            vocalsOut = voc.out, vocalsIn = voc.inc, perfect = perfect,
         )
         if (perfect) {
             if (!barsMode) return simplePlan(out, inc, fromId, toId, settings, "bars not trusted on both tracks", earliest, PlanFailCode.GRID_UNTRUSTED)

@@ -48,6 +48,8 @@ class TrackTimeline(
     val phraseAnchorMs: Long?,
     /** The owner's mix marks (always [Provenance.OWNER]); null when none. */
     val mixMarks: MixMarks?,
+    /** What the track's synced lyrics say about its voice (validated against the track); null when the app has none. */
+    val lyricVocals: LyricVocals? = null,
 ) {
     val videoId: String get() = raw.videoId
 
@@ -91,9 +93,16 @@ class TrackTimeline(
     val blocks: Sourced<PhraseLines>? =
         refined.phrases?.let { p -> lines(p.blockStartsMs, p.blocksTrusted, p.source == "anchored") }
 
-    /** Where a voice is, null = unknown (no detection, or one that is not trusted: see [trustedVocals]). */
+    /**
+     * Where a voice is: the synced lyrics when present and trusted ([Provenance.LYRICS]), else the detector when its
+     * detection is trusted ([trustedVocals], [Provenance.DETECTED]), else null = unknown.
+     */
     val vocals: Sourced<List<TimeRange>>? =
-        trustedVocals(refined)?.let { Sourced(it, Provenance.DETECTED, refined.vocals?.confidence ?: 0f) }
+        lyricVocals?.takeIf { it.trusted }?.let { Sourced(it.ranges, Provenance.LYRICS, it.confidence) }
+            ?: trustedVocals(refined)?.let { Sourced(it, Provenance.DETECTED, refined.vocals?.confidence ?: 0f) }
+
+    /** The lyrics replaced the detector (or an unknown) as the source of the vocals. */
+    val vocalsFromLyrics: Boolean get() = vocals?.provenance == Provenance.LYRICS
 
     /** Share of the track the detector called voice; null without a detection. */
     val vocalCoverage: Float? = coverage(refined)
@@ -160,12 +169,17 @@ class TrackTimeline(
             append(" | vocals ")
             append(
                 when {
-                    vocals != null -> "known, ${vocals.value.size} ranges"
+                    vocals != null && lyricVocals != null && vocalsFromLyrics -> "known from ${lyricVocals.describe()}, ${vocals.value.size} ranges"
+                    vocals != null -> "known (detected), ${vocals.value.size} ranges"
                     vocalCoverage != null -> "unknown (untrusted)"
                     else -> "unknown (not detected)"
                 },
             )
-            vocalCoverage?.let { append(", coverage %.0f%%".format(it * 100)) }
+            vocalCoverage?.let { append(", detector coverage %.0f%%".format(it * 100)) }
+            lyricVocals?.let { lv ->
+                append(", lyrics coverage %.0f%%".format(lv.coverage(raw.durationMs) * 100))
+                if (!lv.trusted) append(" (lyrics ignored: c%.2f)".format(lv.confidence))
+            }
             append(" | marks ")
             append(mixMarks?.let { m -> "exit ${clock(m.exitMs)} entry ${clock(m.entryMs)} solo ${clock(m.soloMs)}" } ?: "none")
         }
@@ -230,13 +244,14 @@ class TrackTimeline(
 
 /**
  * The cached [TrackTimeline] of a stored analysis. Keyed by the analysis AND the owner's annotations that change it (tapped
- * 1, phrase mark, mix marks, read through `BarPhase.anchors`, `PhraseGrid.anchors` and `MixMarks.of`), so a new mark gives
- * a new timeline. LRU of [CAPACITY].
+ * 1, phrase mark, mix marks, read through `BarPhase.anchors`, `PhraseGrid.anchors` and `MixMarks.of`) and the track's
+ * lyric vocals (`Annotations.installed.lyricVocals`), so a new mark or newly fetched lyrics give a new timeline. LRU of
+ * [CAPACITY].
  */
 object Timelines {
     const val CAPACITY = 256
 
-    private data class Key(val raw: TrackAnalysis, val downbeatAnchorMs: Long?, val phraseAnchorMs: Long?, val marks: MixMarks?)
+    private data class Key(val raw: TrackAnalysis, val downbeatAnchorMs: Long?, val phraseAnchorMs: Long?, val marks: MixMarks?, val lyrics: LyricVocals?)
 
     private val cache =
         object : LinkedHashMap<Key, TrackTimeline>(64, 0.75f, true) {
@@ -245,9 +260,9 @@ object Timelines {
 
     fun of(raw: TrackAnalysis): TrackTimeline {
         val id = raw.videoId
-        val key = Key(raw, BarPhase.anchors(id), PhraseGrid.anchors(id), MixMarks.of(id))
+        val key = Key(raw, BarPhase.anchors(id), PhraseGrid.anchors(id), MixMarks.of(id), Annotations.installed.lyricVocals(id))
         synchronized(cache) { cache[key]?.let { return it } }
-        val t = TrackTimeline(raw, AnalysisRefiner.cached(raw, key.downbeatAnchorMs, key.phraseAnchorMs), key.downbeatAnchorMs, key.phraseAnchorMs, key.marks)
+        val t = TrackTimeline(raw, AnalysisRefiner.cached(raw, key.downbeatAnchorMs, key.phraseAnchorMs), key.downbeatAnchorMs, key.phraseAnchorMs, key.marks, key.lyrics)
         synchronized(cache) { cache[key] = t }
         return t
     }
