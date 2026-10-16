@@ -1,9 +1,6 @@
 package org.simpmusic.dj.render
 
 import org.simpmusic.dj.model.DeckClock
-import org.simpmusic.dj.model.DeckPlan
-import org.simpmusic.dj.model.EchoOutSpec
-import org.simpmusic.dj.model.ParamCurve
 import org.simpmusic.dj.model.PcmAudio
 import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.settleMs
@@ -13,7 +10,6 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlin.math.tanh
@@ -36,7 +32,9 @@ import kotlin.math.tanh
  *    is added AFTER the fader, so the tail keeps ringing once the fader has closed and the rising high-pass thins
  *    only the dry signal; the deck's source stops at the end of the send/fader and the delay is fed silence.
  *
- * The mixer graph is the loop in [render]; a per-deck or master effect (echo, reverb, beds) is one more stage there.
+ * The per-deck chain lives in [DeckVoice] (shared with the real-time bus, `org.simpmusic.dj.bus.MixBusCore`, which
+ * therefore executes a plan with the same arithmetic); the mixer graph is the loop in [render]: a per-deck or master
+ * effect (echo, reverb, beds) is one more stage there.
  */
 object OfflineMixRenderer {
     enum class Solo { OUTGOING, INCOMING }
@@ -137,29 +135,42 @@ object OfflineMixRenderer {
         val mixL = FloatArray(total)
         val mixR = FloatArray(total)
 
-        val outRunner = if (options.solo != Solo.INCOMING) {
+        val outVoice = if (options.solo != Solo.INCOMING) {
             val silentAt = if (options.bypassMixer) null else plan.outgoing.volume.silentFromMs()
             fun frameOf(ms: Long?): Int = if (ms == null) total else min(total.toDouble(), max(0.0, n0 + ceil(ms * sr / 1000.0))).toInt()
             val echoSpec = if (options.bypassMixer) null else plan.echoOut
-            // with an echo the deck's fader may close long before the delay has rung out: the runner keeps going to the
+            // with an echo the deck's fader may close long before the delay has rung out: the deck keeps going to the
             // window end and only feeds the delay silence once the source is finished
             val activeEnd = if (echoSpec == null) frameOf(silentAt) else max(frameOf(silentAt), frameOf(echoSpec.send.silentFromMs()))
             val endFrame = if (echoSpec == null) activeEnd else total
-            Runner(
-                sr, outgoing, outClock, plan.outgoing, startFrame = 0, startWallMs = startWall, endFrame = endFrame,
-                outputStartWallMs = startWall, block = block, effect = options.outgoingEffect,
-                echoSpec = echoSpec, activeEndFrame = activeEnd,
-            )
+            DeckVoice(sr, block).also {
+                it.load(
+                    DeckVoice.Program(
+                        plan.outgoing, outClock, startFrame = 0L, startWallMs = startWall, endFrame = endFrame.toLong(),
+                        windowStartWallMs = startWall, echoSpec = echoSpec, activeEndFrame = activeEnd.toLong(),
+                        bypassMixer = options.bypassMixer, effect = options.outgoingEffect, sampleRate = sr,
+                    ),
+                    segmentSource(outgoing),
+                )
+            }
         } else null
-        val inRunner = if (options.solo != Solo.OUTGOING) {
-            Runner(sr, incoming, inClock, plan.incoming, startFrame = n0, startWallMs = 0.0, endFrame = total, outputStartWallMs = startWall, block = block, effect = options.incomingEffect)
+        val inVoice = if (options.solo != Solo.OUTGOING) {
+            DeckVoice(sr, block).also {
+                it.load(
+                    DeckVoice.Program(
+                        plan.incoming, inClock, startFrame = n0.toLong(), startWallMs = 0.0, endFrame = total.toLong(),
+                        windowStartWallMs = startWall, bypassMixer = options.bypassMixer, effect = options.incomingEffect, sampleRate = sr,
+                    ),
+                    segmentSource(incoming),
+                )
+            }
         } else null
 
         var g = 0
         while (g < total) {
             val n = min(block, total - g)
-            outRunner?.renderBlock(g, n, mixL, mixR, options.bypassMixer)
-            inRunner?.renderBlock(g, n, mixL, mixR, options.bypassMixer)
+            outVoice?.mixBlock(g.toLong(), n, mixL, mixR, 0L)
+            inVoice?.mixBlock(g.toLong(), n, mixL, mixR, 0L)
             g += n
         }
         options.masterEffect?.let { fx ->
@@ -196,127 +207,25 @@ object OfflineMixRenderer {
     const val DEFAULT_TAIL_MS = 500L
     private const val MAX_WINDOW_MS = 30 * 60_000.0
 
-    // ---------------------------------------------------------------------------------------------
-
-    private class Runner(
-        val sr: Int,
-        val segment: AudioSegment,
-        val clock: DeckClock,
-        val lanes: DeckPlan,
-        val startFrame: Int,
-        val startWallMs: Double,
-        val endFrame: Int,
-        val outputStartWallMs: Double,
-        block: Int,
-        val effect: BlockEffect? = null,
-        val echoSpec: EchoOutSpec? = null,
-        /** Frames at or after this one get no source audio (echo tail only). */
-        val activeEndFrame: Int = endFrame,
-    ) : DeckStretcher.Automation {
-        private val stretcher = DeckStretcher(2, sr)
-        private val segStart = (segment.sourceStartMs * sr / 1000.0).roundToLong()
-        private val tmp = arrayOf(FloatArray(block), FloatArray(block))
-        private val hp = SweepFilter(sr, highpass = true)
-        private val lp = SweepFilter(sr, highpass = false)
-        private val msPerFrame = 1000.0 / sr
-        private var started = false
-        private val gainKnots = FloatArray(block / GAIN_STEP + 2)
-        private val pcmL = segment.pcm.left
-        private val pcmR = segment.pcm.right
-        private val useHp = lanes.lowCutHz.keys.any { it.value > 20.5f }
-        private val useLp = lanes.highCutHz.keys.any { it.value < 19_500f }
-        private val echo: BeatEcho? = echoSpec?.let { BeatEcho(sr, it.delayMs.toDouble(), it.feedback.toDouble(), it.highpassHz.toDouble(), it.dampHz.toDouble(), it.pingPong) }
-        private val sendL = FloatArray(if (echoSpec != null) block else 0)
-        private val sendR = FloatArray(if (echoSpec != null) block else 0)
-        private val wetL = FloatArray(if (echoSpec != null) block else 0)
-        private val wetR = FloatArray(if (echoSpec != null) block else 0)
-        private val laneGain = FloatArray(if (echoSpec != null) block else 0)
-
-        private val source = DeckStretcher.Source { start, count, dst ->
-            val d0 = dst[0]
-            val d1 = dst[1]
-            for (i in 0 until count) {
-                val p = start + i - segStart
-                if (p < 0 || p >= pcmL.size) {
-                    d0[i] = 0f; d1[i] = 0f
-                } else {
-                    d0[i] = pcmL[p.toInt()]; d1[i] = pcmR[p.toInt()]
+    /** A deck source over an [AudioSegment]: source frame `f` is segment frame `f - round(sourceStartMs)`, silence outside. */
+    private fun segmentSource(segment: AudioSegment): DeckVoice.Source {
+        val sr = segment.pcm.sampleRate
+        val segStart = (segment.sourceStartMs * sr / 1000.0).roundToLong()
+        val pcmL = segment.pcm.left
+        val pcmR = segment.pcm.right
+        return object : DeckVoice.Source {
+            override fun read(startFrame: Long, count: Int, dst: Array<FloatArray>) {
+                val d0 = dst[0]
+                val d1 = dst[1]
+                for (i in 0 until count) {
+                    val p = startFrame + i - segStart
+                    if (p < 0 || p >= pcmL.size) {
+                        d0[i] = 0f; d1[i] = 0f
+                    } else {
+                        d0[i] = pcmL[p.toInt()]; d1[i] = pcmR[p.toInt()]
+                    }
                 }
             }
-        }
-
-        private fun wallOfDeckFrame(outFrame: Double) = startWallMs + outFrame * msPerFrame
-
-        override fun rate(outFrame: Double): Double = lanes.rate.valueAt(wallOfDeckFrame(outFrame)).toDouble()
-        override fun pitchRatio(outFrame: Double): Double = 2.0.pow(lanes.pitchSemitones.valueAt(wallOfDeckFrame(outFrame)) / 12.0)
-
-        fun renderBlock(g0: Int, count: Int, mixL: FloatArray, mixR: FloatArray, bypass: Boolean) {
-            if (g0 + count <= startFrame || g0 >= endFrame) return
-            val from = max(g0, startFrame)
-            val to = min(g0 + count, endFrame)
-            val n = to - from
-            if (!started) {
-                stretcher.start(clock.sourceAt(startWallMs) * sr / 1000.0, source, this)
-                started = true
-            }
-            val live = if (echo == null) n else (min(to, activeEndFrame) - from).coerceIn(0, n)
-            if (live > 0) stretcher.render(tmp, 0, live)
-            val l = tmp[0]
-            val r = tmp[1]
-            for (i in live until n) { l[i] = 0f; r[i] = 0f }
-            if (!bypass) {
-                val wall0 = outputStartWallMs + from * msPerFrame
-                if (echo != null && echoSpec != null) {
-                    // aux send: taken BEFORE the deck's own filters (like a send ahead of the channel EQ on a mixer), so the
-                    // repeats carry the full signal while the dry signal thins out under the rising high-pass
-                    fillLane(echoSpec.send, wall0, n)
-                    for (i in 0 until n) { sendL[i] = l[i] * laneGain[i]; sendR[i] = r[i] * laneGain[i] }
-                }
-                if (useHp) hp.process(l, r, 0, n) { i -> lanes.lowCutHz.valueAt(wall0 + i * msPerFrame).toDouble() }
-                if (useLp) lp.process(l, r, 0, n) { i -> lanes.highCutHz.valueAt(wall0 + i * msPerFrame).toDouble() }
-                effect?.process(l, r, 0, n)
-                if (echo != null && echoSpec != null) {
-                    echo.processWet(sendL, sendR, wetL, wetR, 0, n)
-                    fillLane(echoSpec.wet, wall0, n)
-                    for (i in 0 until n) { wetL[i] *= laneGain[i]; wetR[i] *= laneGain[i] }
-                }
-                // channel fader: lane sampled every GAIN_STEP frames, linear in between
-                val knots = (n + GAIN_STEP - 1) / GAIN_STEP
-                for (k in 0..knots) gainKnots[k] = lanes.volume.valueAt(wall0 + min(k * GAIN_STEP, n) * msPerFrame)
-                for (i in 0 until n) {
-                    val k = i / GAIN_STEP
-                    val f = (i - k * GAIN_STEP) / GAIN_STEP.toFloat()
-                    val gain = gainKnots[k] + (gainKnots[k + 1] - gainKnots[k]) * f
-                    l[i] *= gain
-                    r[i] *= gain
-                }
-                if (echo != null) {
-                    // the wet return bypasses the fader: the tail survives it going to 0
-                    for (i in 0 until n) { l[i] += wetL[i]; r[i] += wetR[i] }
-                }
-            }
-            for (i in 0 until n) {
-                mixL[from + i] += l[i]
-                mixR[from + i] += r[i]
-            }
-        }
-
-        /** Samples [curve] into [laneGain] for [n] frames starting at wall time [wall0], linear between knots every GAIN_STEP frames. */
-        private fun fillLane(curve: ParamCurve, wall0: Double, n: Int) {
-            var k = 0
-            var a = curve.valueAt(wall0)
-            while (k * GAIN_STEP < n) {
-                val end = min((k + 1) * GAIN_STEP, n)
-                val b = curve.valueAt(wall0 + end * msPerFrame)
-                val len = end - k * GAIN_STEP
-                for (j in 0 until len) laneGain[k * GAIN_STEP + j] = a + (b - a) * (j / len.toFloat())
-                a = b
-                k++
-            }
-        }
-
-        companion object {
-            const val GAIN_STEP = 16
         }
     }
 }
