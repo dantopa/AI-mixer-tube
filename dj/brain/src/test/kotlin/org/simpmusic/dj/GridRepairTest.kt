@@ -80,4 +80,27 @@ class GridRepairTest {
         println("broken cumbia -> clean: ${plan.kind} ${plan.reason}")
         assertEquals(PlanKind.BEAT_MATCHED, plan.kind, plan.reason)
     }
+
+    /**
+     * The owner's "El Pirata" (cumbia, ~85 bpm 4/4): Beat This! counted the tresillo's three strokes of each half bar as
+     * beats, a perfectly regular grid at 460 ms (135 bpm) with a 1 every 3 of them, so the bar counter showed 3/4. The
+     * repair used to leave a regular grid alone, and its lattice vote then picked 3 (64 bpm); now a bar made of doubled
+     * half-bar gaps is 4/4, and the refined analysis says so.
+     */
+    @Test
+    fun aTresilloLockedRegularGridWithThreeBeatBarsBecomesFourFour() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val a = json.decodeFromString(TrackAnalysis.serializer(), javaClass.getResource("/gridrepair/ybL05qqeVig.json")!!.readText())
+        assertEquals(3, a.beatsPerBar)
+        val (r, rep) = GridRepair.repairWithReport(a)
+        assertTrue(rep.repaired, rep.reason)
+        assertEquals(4, r.beatsPerBar)
+        val bpm = r.bpm!!.value
+        assertTrue(bpm in 82f..88f, "repaired tempo $bpm (${rep.reason})")
+        val refined = org.simpmusic.dj.analysis.AnalysisRefiner.cached(a)
+        assertEquals(4, refined.beatsPerBar)
+        val d = refined.downbeatBeatIndices!!.value
+        val gaps = (0 until d.size - 1).map { d[it + 1] - d[it] }
+        assertTrue(gaps.count { it == 4 } >= gaps.size * 9 / 10, "bars of 4: ${gaps.groupingBy { it }.eachCount()}")
+    }
 }

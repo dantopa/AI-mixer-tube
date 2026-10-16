@@ -63,12 +63,38 @@ class AndroidMixBus(val sampleRate: Int = SAMPLE_RATE) : MixBusCore.Listener {
 
     fun addDeck(): Int = core.addDeck(ringCapacityFrames = RING_SECONDS * sampleRate)
 
+    /**
+     * Removes a released player's deck. A deck a transition still holds (an incoming lost after it was heard, while the plan
+     * runs on) is removed by the bus thread once the transition is over: refusing it for good leaked its 12 s ring
+     * (~4.6 MB) for the rest of the process (the build-av log: "deck 5 kept: deck 5 is part of a transition").
+     */
     fun removeDeck(deckId: Int) {
         playing -= deckId
         try {
             core.removeDeck(deckId)
+        } catch (e: IllegalStateException) {
+            DjLog.d(TAG, "deck $deckId: removed when the transition holding it ends")
+            pendingRemoval += deckId
         } catch (e: Exception) {
             DjLog.w(TAG, "deck $deckId not removed: ${e.message}")
+        }
+    }
+
+    private val pendingRemoval = ConcurrentHashMap.newKeySet<Int>()
+
+    /** Bus thread: the decks whose removal waited for a transition to end. */
+    private fun removePendingDecks() {
+        if (pendingRemoval.isEmpty() || core.state != MixBusCore.State.IDLE) return
+        for (id in pendingRemoval.toList()) {
+            try {
+                core.removeDeck(id)
+                pendingRemoval -= id
+                DjLog.d(TAG, "deck $id removed")
+            } catch (e: IllegalStateException) {
+                return // armed again meanwhile: next time
+            } catch (e: Exception) {
+                pendingRemoval -= id
+            }
         }
     }
 
@@ -141,6 +167,7 @@ class AndroidMixBus(val sampleRate: Int = SAMPLE_RATE) : MixBusCore.Listener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         var idleSinceMs = -1L
         while (alive) {
+            removePendingDecks()
             if (!busy()) {
                 val now = SystemClock.elapsedRealtime()
                 if (idleSinceMs < 0) idleSinceMs = now

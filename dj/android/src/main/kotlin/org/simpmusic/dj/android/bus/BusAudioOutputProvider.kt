@@ -104,15 +104,12 @@ class BusAudioOutputProvider(private val bus: AndroidMixBus) : AudioOutputProvid
 
     override fun removeListener(listener: AudioOutputProvider.Listener) {}
 
-    /** The player is released: its deck goes (unless a transition still holds it; then on the next output). */
+    /** The player is released: its deck goes (when a transition still holds it, as soon as that transition ends). */
     override fun release() {
-        try {
-            bus.pause(deckId)
-            bus.core.removeDeck(deckId)
-            deckRemoved = true
-        } catch (e: Exception) {
-            DjLog.w("bus", "deck $deckId kept: ${e.message}")
-        }
+        // a deck a transition still holds is removed by the bus once it ends (AndroidMixBus.removeDeck)
+        bus.pause(deckId)
+        bus.removeDeck(deckId)
+        deckRemoved = true
     }
 
     companion object {

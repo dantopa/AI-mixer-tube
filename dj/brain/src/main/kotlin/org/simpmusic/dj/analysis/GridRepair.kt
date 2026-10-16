@@ -72,7 +72,10 @@ object GridRepair {
         val intervals = DoubleArray(beats.size - 1) { (beats[it + 1] - beats[it]).toDouble() }
         val med = intervals.sorted()[intervals.size / 2]
         val regular = intervals.count { abs(it / med - 1.0) <= REGULAR_TOL }.toDouble() / intervals.size
-        if (regular >= REGULAR_SHARE) return a to Report(false, "regular (%.0f%%)".format(regular * 100))
+        // A regular grid is left alone, unless its bar is three tracker beats: on cumbia that is the tracker counting the
+        // tresillo's three strokes of each HALF bar as beats, a perfectly regular grid at 3/2 of the tempo (the owner's
+        // "El Pirata": 460 ms beats = 135 bpm, a 1 every 3 of them, where the band plays 4/4 at ~87 bpm).
+        if (regular >= REGULAR_SHARE && !threeBeatBars(a)) return a to Report(false, "regular (%.0f%%)".format(regular * 100))
 
         val downIdx = a.downbeatBeatIndices?.value?.filter { it in beatsC.value.indices }?.distinct()?.sorted().orEmpty()
         val downTimes = downIdx.map { beatsC.value[it].toLong() }.distinct().sorted()
@@ -80,12 +83,15 @@ object GridRepair {
 
         // ---- bar period from the downbeat gaps, folded into one 4/4 bar range ----
         val folded = ArrayList<Double>()
+        val doubledGap = ArrayList<Boolean>()
         for (i in 0 until downTimes.size - 1) {
             var d = (downTimes[i + 1] - downTimes[i]).toDouble()
             if (d <= 0) continue
-            while (d < BAR_MIN_MS) d *= 2
+            var doubled = false
+            while (d < BAR_MIN_MS) { d *= 2; doubled = true }
             while (d > BAR_MAX_MS) d /= 2
             folded += d
+            doubledGap += doubled
         }
         if (folded.size < MIN_BARS - 1) return a to Report(false, "too few bar gaps")
         val bar = modeOf(folded) ?: return a to Report(false, "no bar peak")
@@ -93,9 +99,14 @@ object GridRepair {
         if (agree < BAR_AGREEMENT) return a to Report(false, "no stable bar (%.0f%% agree)".format(agree * 100))
         // Beats per bar: the tracker's own 3 is not trusted (on cumbia it comes from counting tresillo beats), so the
         // division of the bar the original beats actually sit on decides; 3 has to win clearly over 4.
+        // When the tracker's 1s come every half bar (the bar is their gap doubled), that gap must hold a whole number of
+        // beats: 2 in 4/4, an impossible 1.5 in 3/4, so it is 4. The lattice vote cannot see this: anchored on half-bar
+        // 1s, the tresillo's third stroke sits on a third of the bar ("El Pirata": 3 won 2 to 1 and came out at 64 bpm).
+        val agreeing = folded.indices.filter { abs(folded[it] / bar - 1.0) <= 0.04 }
+        val halfBarOnes = agreeing.count { doubledGap[it] } * 2 > agreeing.size
         val support4 = latticeSupport(beats, downTimes, bar / 4)
         val support3 = latticeSupport(beats, downTimes, bar / 3)
-        val perBar = if (support3 > support4 * 1.2) 3 else 4
+        val perBar = if (!halfBarOnes && support3 > support4 * 1.2) 3 else 4
         val period = bar / perBar
 
         // ---- onset evidence: original beats (1) and downbeats (2), gaussian-smoothed ----
@@ -173,8 +184,19 @@ object GridRepair {
                 beatTimesMs = Confident(grid.map { it.toInt() }, beatsC.confidence),
                 downbeatBeatIndices = Confident(newDown, downConf),
                 bpm = Confident(bpm.toFloat(), a.bpm?.confidence ?: beatsC.confidence),
+                // the bar the grid was rebuilt on: the tracker's own count must not survive a rebuilt grid
+                beatsPerBar = perBar,
             )
         return repaired to Report(true, "bar %.0f ms, beat %.0f ms (%.1f bpm), regular %.0f%% -> %.0f%%".format(bar, period, 60000 / period, regular * 100, newRegular * 100), bar, period, snapped, grid.size - snapped)
+    }
+
+    /** The tracker's bar is 3 of its beats: its own count says so, or most of its downbeat gaps are 3 beats long. */
+    private fun threeBeatBars(a: TrackAnalysis): Boolean {
+        if (a.beatsPerBar == 3) return true
+        val d = a.downbeatBeatIndices?.value?.distinct()?.sorted() ?: return false
+        if (d.size < MIN_BARS) return false
+        val gaps = (0 until d.size - 1).map { d[it + 1] - d[it] }
+        return gaps.count { it == 3 }.toDouble() / gaps.size >= 0.5
     }
 
     /** Share of [beats] within [SNAP_MS] of a lattice of [period] anchored on the downbeat at or before each beat. */

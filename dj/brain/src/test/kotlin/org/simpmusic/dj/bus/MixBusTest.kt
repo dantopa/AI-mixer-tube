@@ -495,6 +495,35 @@ class MixBusTest {
         assertEquals(0L, run.bus.deckConsumedFramesAt(run.inDeck, run.frames.toLong()))
     }
 
+    @Test
+    fun anIncomingLostBeforeItIsHeardCallsTheMixOffAndTheOutgoingPlaysOn() {
+        // the build-av device log: Media3's stuck-playing detector failed the cued incoming player during the pre-roll;
+        // the outgoing then followed the plan's fade into silence. It must go back to its own audio instead.
+        val p = beatMatchedPair()
+        assertTrue(p.plan.preRollMs < -1000, "needs a tempo pre-roll: ${p.plan.preRollMs}")
+        var actedAt = -1L
+        val run = runBus(p, extraAfterDoneSec = 3.0, hook = { bus, rec, wf, _, inc ->
+            if (actedAt < 0 && wf >= 4800) { actedAt = rec.started + wf; inc.stopped = true; bus.ring(1).flush() }
+        })
+        println("incoming lost in the pre-roll: ${run.rec.events}")
+        assertEquals(MixBusCore.AbortReason.INCOMING_INTERRUPTED, run.rec.abort)
+        assertEquals(false, run.rec.abortIncomingStarted)
+        assertEquals(-1L, run.rec.incomingAt, "the incoming must never start")
+        assertEquals(MixBusCore.State.IDLE, run.bus.state)
+        assertTrue(actedAt > 0)
+        // after the fade out and in: the outgoing source on the copy path, bit for bit, and still moving
+        val from = actedAt + 960 + 2L * MixBusCore.DECLICK_FRAMES + 960
+        val src = run.bus.deckSourceFrameAt(run.outDeck, from)
+        assertEquals(floor(src), src, "outgoing not back on the copy path")
+        val n = (run.frames - from - 1).toInt()
+        assertTrue(n > sr, "too little audio after the abort")
+        val d = diff(run.outL, run.outR, from.toInt(), p.a.left, p.a.right, src.toInt(), n)
+        assertEquals(0, d.mismatches, "outgoing not playing on after the incoming was lost (max ${d.maxAbs})")
+        assertTrue(run.bus.deckSourceFrameAt(run.outDeck, run.frames.toLong() - 1) > src + sr / 2)
+        // and the incoming deck is free again: it can be removed (no transition holds it)
+        run.bus.removeDeck(run.inDeck)
+    }
+
     // ---------------------------------------------------------------------------------------------
     // normal playback
 

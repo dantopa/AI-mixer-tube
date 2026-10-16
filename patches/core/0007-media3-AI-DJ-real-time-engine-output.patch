@@ -10,6 +10,8 @@ Subject: [PATCH] media3: AI DJ real-time engine (players write into the DJ's
   are off (Sonic does speed), and the player is registered with the DJ (bindBusPlayer)
 - the provider's stream tap goes first in the chain: Media3 gives the output renderer time (offset 1e12 us), and
   the tap reports each stream's start in song time (the processors' positionOffsetUs), so the deck is addressed in song time
+- players on the mixer get a 60 s stuck-playing timeout (Media3's default 10 s failed the incoming player while it
+  waited silent and unconsumed before its entry)
 - with no provider (engine off, DJ off, no hooks) nothing changes
 
 ---
@@ -56,8 +58,14 @@ diff --git a/media/media3/src/main/java/com/maxrave/media3/exoplayer/CrossfadeEx
                              ),
                          ).build()
              }
-@@ -613,6 +619,7 @@ internal class CrossfadeExoPlayerAdapter(
+@@ -611,8 +617,13 @@ internal class CrossfadeExoPlayerAdapter(
+                 .setSeekBackIncrementMs(5000)
+                 .setMediaSourceFactory(mediaSourceFactory)
                  .setRenderersFactory(perPlayerRenderers)
++                // Media3 1.11.1 fails a READY player whose position has not moved for 10 s (stuck-playing detection, on by
++                // default). On the DJ mixer the incoming player waits silent and unconsumed ~10 s before its entry, so the
++                // detector killed every live mix just before it started; give such players a minute.
++                .apply { if (djBus != null) setStuckPlayingDetectionTimeoutMs(60_000) }
                  .build()
          if (djSplicer != null) dj?.bindSplicer(player, djSplicer)
 +        if (djBus != null) dj?.bindBusPlayer(player, djBus)

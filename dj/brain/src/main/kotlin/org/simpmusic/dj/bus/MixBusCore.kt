@@ -423,15 +423,15 @@ class MixBusCore(
                 t.incomingStarted = true
                 inc.standby = false
                 listener.onIncomingStarted(t.id, outputFrame)
-            } else {
-                incomingLost(t)
+            } else if (incomingLost(t)) {
+                return
             }
         } else if (t.incomingStarted && !t.incomingDead) {
             val inc = t.inc
             if (inc.ring.generation != inc.source.generation || !inc.playing || inc.standby) incomingLost(t)
         } else if (!t.incomingStarted && !t.incomingDead) {
             t.inc.ring.release(t.entryFrame - RELEASE_KEEP_FRAMES)
-            if (t.inc.ring.generation != t.inc.source.generation) incomingLost(t)
+            if (t.inc.ring.generation != t.inc.source.generation && incomingLost(t)) return
         }
         // ---- outgoing done ----
         if (!t.outgoingDone && t.wf >= t.outEnd) {
@@ -449,13 +449,34 @@ class MixBusCore(
         }
     }
 
-    private fun incomingLost(t: Transition) {
+    /**
+     * The incoming deck went away (its player flushed, paused or was released). Returns true when the transition is over.
+     *
+     * Before the incoming was heard the whole transition is called off: the outgoing leaves the plan's lanes (a 20 ms fade)
+     * and resumes on the copy path where it was, exactly as after a pause, so the listener keeps hearing their track
+     * instead of the plan fading it out over an incoming that will never come (the build-av device log: Media3's
+     * stuck-playing detector killed the cued player 10 s in, and the outgoing then faded to silence). Once the incoming
+     * was heard, the queue has moved to it, and the plan runs on to its end with the incoming faded out.
+     */
+    private fun incomingLost(t: Transition): Boolean {
         t.incomingDead = true
         val inc = t.inc
         if (t.incomingStarted) inc.voice.fadeOut(DECLICK_FRAMES) else inc.voice.stop()
         inc.role = Role.NONE
         inc.resumeWithFade = true
+        if (!t.incomingStarted) {
+            val o = t.out
+            if (!t.outgoingDone && o.role == Role.OUTGOING) {
+                o.voice.fadeOut(DECLICK_FRAMES)
+                o.role = Role.NONE
+                o.resumeWithFade = true
+            }
+            endTransition(t)
+            listener.onTransitionAborted(t.id, AbortReason.INCOMING_INTERRUPTED, false)
+            return true
+        }
         listener.onTransitionAborted(t.id, AbortReason.INCOMING_INTERRUPTED, t.incomingStarted)
+        return false
     }
 
     private fun endTransition(t: Transition) {
