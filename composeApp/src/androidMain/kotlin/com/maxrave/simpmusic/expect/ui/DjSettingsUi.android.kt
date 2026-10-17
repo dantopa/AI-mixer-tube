@@ -81,6 +81,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_key_none
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_set
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model_choice
+import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_order
+import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_order_description
 import simpmusic.composeapp.generated.resources.ai_dj_forget_marks
 import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_confirm
 import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_count
@@ -316,6 +318,13 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             subtitle = stringResource(Res.string.ai_dj_claude_tools_description),
                             smallSubtitle = true,
                             switch = (claude.tools to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setTools(on) }),
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_claude_auto_order),
+                            subtitle = stringResource(Res.string.ai_dj_claude_auto_order_description),
+                            smallSubtitle = true,
+                            isEnable = claude.auto,
+                            switch = (claude.autoOrder to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setAutoOrder(on) }),
                         )
                         SettingItem(
                             title = modelTitle,

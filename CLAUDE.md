@@ -484,6 +484,18 @@ Service modules:
   - `MixBrief.build(entryLatestMs =)` caps `entry_bar` there (the owner's marked entry still wins). The brief says why: "the set is a chain: every song joins the one before AND the one after". The cap is dropped when it would leave under 10 s of entries (`AI_CHAIN_MIN_ENTRY_ROOM_MS`, a short track).
   - It applies to the current pair's question and to every pair solved ahead; `upcomingIds` now returns one more track, for the last pair's room.
   - Test: `MixBriefTest.anEntryThatWouldLeaveNoRoomForTheNextMixIsNotOffered`. Not run on a device.
+- **The owner's three-model session, auto order, a book that survives a reorder, a measured answer budget (2026-10-17, build bh)**: the owner's build-bg export, 143 mixes (80 AI, 31 Perfect/regular/owner-partial), 31 rated.
+  - **Measured per answer**: Haiku $0.0035 (18 s), Sonnet $0.050 (16 s), Opus $0.097 (20 s); "Order list" $0.008-0.026 (3-6 s, ~3k tokens in). The owner: Haiku makes gross errors, Sonnet and Opus are close.
+  - **Ratings**: liked AI mixes overlapped 11-23 s with the bass swap mid-overlap. Disliked ones were 4-bar (~5.5 s) overlaps or harmony excess > 0.1. The median AI overlap was 11.3 s. `MixBrief.SYSTEM` rule 7 now says so (prefer 8+ bars; a clash above ~0.08 is moved or kept short on drums and bass).
+  - **Loops**: tried 19 times in `try_mix`, never committed.
+  - **"Not enough left" still happened 9 times, all on the CURRENT pair**: right after an "Order list" (which cleared the ahead book), or on a pair the chain had not reached. The cause was the fixed 60 s tools budget.
+    - `answerBudgetMs` is the 90th percentile of the last 12 answers of that kind + 8 s, between 25 s and the old fixed value.
+    - When even that leaves no exit, the current pair is asked for ONE answer without tools (`oneAnswer`, 25 s).
+    - A booked answer that cannot be planned is re-asked once per pair (`aiRetried`). One pair had been re-asked 4 times in 15 s.
+  - **The ahead book survives "Order list"**: entries whose pair still follows in the new queue are kept (`retainAll`).
+  - **Transient queue contexts during a reorder** (each `moveToNext` changes the next track) are held back (`reordering`, `pendingContext`). Only the final one starts a pipeline, so no planning and no Claude question for pairs that exist for a moment.
+  - **Auto order** (`DjEngine.maybeAutoOrder`, `ClaudeSettings.autoOrder`, default ON, Settings -> AI DJ -> Claude, only with AI Auto). On a YouTube radio, after each track change, the next `AI_AHEAD_PAIRS` 3 tracks stay where they are (their mixes are solved ahead). When at least `AUTO_ORDER_MIN_NEW` 3 of the following `AUTO_ORDER_TRACKS` 8 were never ordered by Claude (`ClaudeOrder`, now an accumulating set of 60), those 8 are ordered after the last kept one; at most every `AUTO_ORDER_GAP_MS` 2 min. `orderAhead(keep =)` builds the brief from the last kept track; the order is applied with `moveToNext` over the whole desired list (kept tracks included, they land where they were).
+  - Not run on a device.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

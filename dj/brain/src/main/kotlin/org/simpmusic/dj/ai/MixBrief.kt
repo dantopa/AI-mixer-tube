@@ -130,7 +130,10 @@ object MixBrief {
         6. Do not cut a sung line in half; do not leave in the middle of a chorus.
         7. The overlap is at least 4 bars: a shorter one is not heard as a mix. Use the owner's usual length (given below)
            whenever both sides allow it; otherwise the longest that stays clean. When nothing clean exists, 4 bars on a
-           phrase line beat a long messy overlap.
+           phrase line beat a long messy overlap. The owner's ratings so far: the mixes they liked overlapped 11-23 s with
+           the bass swap in the middle of the overlap; a 4-bar (~5 s) mix sounds to them like a plain fade, so prefer 8
+           bars or more whenever the instrumentals allow it. The ones they disliked were short or clashed in key (a
+           harmony excess above ~0.08 in try_mix): move the points, or keep such a clash short and on drums and bass.
         8. When a track's bar lines are only a guess ("?") or its voice is unknown ("-"), keep the overlap at 4-8 bars: a
            long overlap whose 1s may not land together, or with voices nobody can see, sounds wrong (the engine caps it
            at 8 bars then).
