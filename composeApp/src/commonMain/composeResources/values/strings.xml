@@ -632,6 +632,7 @@
     <string name="dj_chip_last">DJ: last mix: %1$s</string>
     <string name="dj_mix_now">Mix now</string>
     <string name="dj_ai_mix">AI Mix: let Claude choose where to mix</string>
+    <string name="dj_ai_mix_short">AI Mix</string>
     <string name="dj_ai_no_key">AI Mix needs a Claude API key: Settings → AI DJ → Claude</string>
     <string name="dj_ai_busy">AI: still waiting for Claude</string>
     <string name="ai_dj_claude_key">Claude (AI Mix)</string>

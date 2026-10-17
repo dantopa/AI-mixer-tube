@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -15,6 +17,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,6 +81,7 @@ import simpmusic.composeapp.generated.resources.dj_mark_exit
 import simpmusic.composeapp.generated.resources.dj_mark_solo
 import simpmusic.composeapp.generated.resources.dj_ai_busy
 import simpmusic.composeapp.generated.resources.dj_ai_mix
+import simpmusic.composeapp.generated.resources.dj_ai_mix_short
 import simpmusic.composeapp.generated.resources.dj_ai_no_key
 import simpmusic.composeapp.generated.resources.dj_mix_now
 import simpmusic.composeapp.generated.resources.dj_mix_now_mixing
@@ -101,6 +105,17 @@ import simpmusic.composeapp.generated.resources.dj_chip_waiting
  * The 1-2-3-4 counter and the phrase pill are tools to correct the DJ, shown only when Settings -> AI DJ -> "Bar counter"
  * is on. A perfect mix (1 on 1, 16 on 16) is planned by itself whenever the pair qualifies: there is no button for it.
  */
+/**
+ * What the last tap answered ("mix now", "AI Mix", a tapped 1): shown in the status pill for a few seconds. The buttons sit
+ * on their own row, so the answer is hoisted here.
+ */
+@Stable
+private class DjChipFeedback {
+    var mixNow by mutableStateOf<MixNowResult?>(null)
+    var ai by mutableStateOf<AiMixResult?>(null)
+    var tapped by mutableStateOf(0)
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 actual fun DjStatusChip(modifier: Modifier, castRemote: Boolean) {
@@ -111,84 +126,87 @@ actual fun DjStatusChip(modifier: Modifier, castRemote: Boolean) {
     val showCounter by settings.showBarCounter.collectAsStateWithLifecycle(false)
     val scope = rememberCoroutineScope()
     val on = enabled.enabled
+    val feedback = remember { DjChipFeedback() }
+    LaunchedEffect(feedback.mixNow, feedback.tapped) {
+        if (feedback.mixNow != null || feedback.tapped > 0) {
+            delay(3500)
+            feedback.mixNow = null
+            feedback.tapped = 0
+        }
+    }
+    LaunchedEffect(feedback.ai) {
+        if (feedback.ai != null) {
+            delay(3500)
+            feedback.ai = null
+        }
+    }
 
+    // Three rows, one job each (the owner, 2026-10-17: "everything crammed together, nothing can be read"):
+    //  1. the DJ switch and what the DJ is doing, which gets the whole remaining width;
+    //  2. what the listener can ask for: mix now, AI Mix, and the rating after a mix;
+    //  3. the tools that correct the DJ (Settings -> AI DJ -> Bar counter): 1-2-3-4, », n/16, Out / In / Solo.
+    // Rows 2 and 3 wrap instead of running off the screen.
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Surface(
-            modifier = Modifier.toggleable(value = on, role = Role.Switch, onValueChange = { v -> scope.launch { settings.setEnabled(v) } }),
-            shape = CircleShape,
-            color = if (on) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                androidx.compose.foundation.Image(
-                    imageVector = SimpIcons.GraphicEq,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    colorFilter = ColorFilter.tint(if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f)),
-                )
-                Text(
-                    text = "DJ",
-                    style = typo().labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f),
-                )
-            }
-        }
-        if (on) DjStatusLine(showCounter)
-    }
-    // The owner's mix marks, with the other correction tools: "Out" where this track can start to leave, "In" where it
-    // starts when another one mixes into it, "Solo" from where it plays alone. Lit when set; long-press forgets.
-    if (on && showCounter) DjMixMarksRow()
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun DjMixMarksRow() {
-    val hooks = koinInject<DjHooks>()
-    val handler = koinInject<MediaPlayerHandler>()
-    val media by handler.simpleMediaState.collectAsStateWithLifecycle()
-    val dataStore = koinInject<DataStoreManager>()
-    val outputDelayMs by dataStore.lyricsOffsetMs.collectAsStateWithLifecycle(0)
-    val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
-    val heard = (positionMs - outputDelayMs).coerceAtLeast(0L)
-    // re-read after every tap (the marks live in the engine's store, not in Compose state)
-    val debug by hooks.debug.collectAsStateWithLifecycle()
-    var version by remember { mutableStateOf(0) }
-    val marks = remember(version, debug.fromId) { hooks.mixMarks() }
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        for ((mark, label, at) in listOf(
-            Triple(org.simpmusic.dj.android.perfect.MixMark.EXIT, stringResource(Res.string.dj_mark_exit), marks?.exitMs),
-            Triple(org.simpmusic.dj.android.perfect.MixMark.ENTRY, stringResource(Res.string.dj_mark_entry), marks?.entryMs),
-            Triple(org.simpmusic.dj.android.perfect.MixMark.SOLO, stringResource(Res.string.dj_mark_solo), marks?.soloMs),
-        )) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Surface(
-                modifier = Modifier.combinedClickable(
-                    onClick = { if (hooks.markMix(mark, heard) != null) version++ },
-                    onLongClick = { hooks.clearMix(mark); version++ },
-                ),
+                modifier = Modifier.toggleable(value = on, role = Role.Switch, onValueChange = { v -> scope.launch { settings.setEnabled(v) } }),
                 shape = CircleShape,
-                color = if (at != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+                color = if (on) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
             ) {
-                Text(
-                    text = if (at != null) "$label %d:%02d".format(at / 60_000, at / 1000 % 60) else label,
-                    style = typo().labelMedium,
-                    fontWeight = if (at != null) FontWeight.Bold else null,
-                    color = Color.White.copy(alpha = 0.9f),
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    androidx.compose.foundation.Image(
+                        imageVector = SimpIcons.GraphicEq,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        colorFilter = ColorFilter.tint(if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f)),
+                    )
+                    Text(
+                        text = "DJ",
+                        style = typo().labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (on) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.6f),
+                    )
+                }
             }
+            if (on) DjStatusLine(feedback)
         }
+        if (on) DjActionsRow(feedback)
+        if (on && showCounter) DjCorrectionRow(feedback)
     }
+}
+
+/** A pill of the chip's rows: dark and quiet, or lit in the accent colour. */
+@Composable
+private fun ChipPill(
+    modifier: Modifier = Modifier,
+    lit: Boolean = false,
+    content: @Composable () -> Unit,
+) {
+    Surface(
+        modifier = modifier,
+        shape = CircleShape,
+        color = if (lit) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) { content() }
+    }
+}
+
+@Composable
+private fun ChipLabel(text: String, bold: Boolean = false, color: Color = Color.White.copy(alpha = 0.9f)) {
+    Text(text = text, style = typo().labelMedium, fontWeight = if (bold) FontWeight.Bold else null, color = color, maxLines = 1)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter: Boolean) {
+private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(feedback: DjChipFeedback) {
     val hooks = koinInject<DjHooks>()
     val handler = koinInject<MediaPlayerHandler>()
     val debug by hooks.debug.collectAsStateWithLifecycle()
@@ -196,16 +214,6 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
     val mix by hooks.mixView.collectAsStateWithLifecycle()
     var showLog by remember { mutableStateOf(false) }
     var showMix by remember { mutableStateOf(false) }
-    // Answer to the last "mix now" tap, shown in the chip for a few seconds, and the "tap the 1" acknowledgement.
-    var mixNowAnswer by remember { mutableStateOf<MixNowResult?>(null) }
-    var tapped by remember { mutableStateOf(0) }
-    LaunchedEffect(mixNowAnswer, tapped) {
-        if (mixNowAnswer != null || tapped > 0) {
-            delay(3500)
-            mixNowAnswer = null
-            tapped = 0
-        }
-    }
 
     val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
     val mixing = debug.isMixing
@@ -217,7 +225,7 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
         }
     }
     val answer =
-        when (mixNowAnswer) {
+        when (feedback.mixNow) {
             MixNowResult.STARTED -> stringResource(Res.string.dj_mix_now_started)
             MixNowResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
             MixNowResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
@@ -225,13 +233,6 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
             MixNowResult.ALREADY_PERFECT, MixNowResult.DISABLED, null -> null
         }
     // "AI Mix": the tap's own answer for a few seconds, then what Claude is doing or said (for AI_STATUS_MS after it spoke)
-    var aiAnswer by remember { mutableStateOf<AiMixResult?>(null) }
-    LaunchedEffect(aiAnswer) {
-        if (aiAnswer != null) {
-            delay(3500)
-            aiAnswer = null
-        }
-    }
     val aiNow by produceState(System.currentTimeMillis(), debug.aiStatusAtEpochMs) {
         value = System.currentTimeMillis()
         val at = debug.aiStatusAtEpochMs ?: return@produceState
@@ -242,69 +243,46 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
         }
     }
     val aiText =
-        when (aiAnswer) {
+        when (feedback.ai) {
             AiMixResult.NO_KEY -> stringResource(Res.string.dj_ai_no_key)
             AiMixResult.BUSY -> stringResource(Res.string.dj_ai_busy)
             AiMixResult.NO_PAIR -> stringResource(Res.string.dj_mix_now_no_pair)
             AiMixResult.ALREADY_MIXING -> stringResource(Res.string.dj_mix_now_mixing)
             else -> null
         } ?: debug.aiStatus?.takeIf { debug.aiAsking || (debug.aiStatusAtEpochMs?.let { aiNow - it < AI_STATUS_MS } == true) }
-    val text = (if (tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: aiText ?: chipText(debug, positionMs, nowMs)
+    val text = (if (feedback.tapped > 0) (debug.lastOutcome ?: stringResource(Res.string.dj_tap_one_done)) else null) ?: answer ?: aiText ?: chipText(debug, positionMs, nowMs)
 
     Surface(
         // Tap: the picture of the mix (both tracks overlapping) when there is one, else the log. Long-press: always the log.
-        modifier = Modifier.weight(1f, fill = false).combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
+        // It takes the whole rest of the row, so the status is always readable.
+        modifier = Modifier.weight(1f).combinedClickable(onClick = { if (mix != null) showMix = true else showLog = true }, onLongClick = { showLog = true }),
         shape = CircleShape,
         // Unmistakable while a mix is actually playing: the accent colour instead of the quiet dark pill.
         color = if (mixing) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = text,
-                style = if (mixing) typo().labelMedium else typo().labelSmall,
-                fontWeight = if (mixing) FontWeight.Bold else null,
-                color = if (mixing) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.9f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Text(
+            text = text,
+            style = typo().labelMedium,
+            fontWeight = if (mixing) FontWeight.Bold else null,
+            color = if (mixing) MaterialTheme.colorScheme.onPrimary else Color.White.copy(alpha = 0.9f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+        )
     }
-    // "Mix now": the next good phrase start within ~20-45 s, instead of where the DJ would have chosen.
-    if (!mixing) {
-        Surface(
-            modifier = Modifier.clickable { mixNowAnswer = hooks.mixNow() },
-            shape = CircleShape,
-            color = Color.Black.copy(alpha = 0.45f),
-        ) {
-            androidx.compose.foundation.Image(
-                imageVector = SimpIcons.FastForward,
-                contentDescription = stringResource(Res.string.dj_mix_now),
-                modifier = Modifier.padding(5.dp).size(16.dp),
-                colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
-            )
-        }
-    }
-    // "AI Mix": Claude reads both tracks bar by bar (and their lyrics) and chooses the exit, the entry and the overlap.
-    // Only with a key in Settings -> AI DJ -> Claude.
+    if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
+    // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.
+    if (showMix) DjMixSheet(data = mix, onDismiss = { showMix = false })
+}
+
+/** Row 2: what the listener can ask for. Nothing is drawn when nothing applies (a mix playing, no rating due). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun DjActionsRow(feedback: DjChipFeedback) {
+    val hooks = koinInject<DjHooks>()
+    val debug by hooks.debug.collectAsStateWithLifecycle()
+    val mixing = debug.isMixing
     val claude by org.simpmusic.dj.android.ai.ClaudeSettings.state.collectAsStateWithLifecycle()
-    if (!mixing && claude.hasKey) {
-        val aiDescription = stringResource(Res.string.dj_ai_mix)
-        Surface(
-            modifier = Modifier.semantics { contentDescription = aiDescription }.clickable { aiAnswer = hooks.aiMix() },
-            shape = CircleShape,
-            color = if (debug.aiPlan || debug.aiAsking) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
-        ) {
-            Text(
-                text = "✨",
-                style = typo().labelMedium,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-            )
-        }
-    }
     // After a mix ends: thumbs up / down for RATE_PROMPT_MS (or until rated), written to the mix journal. The engine's
     // last mix is re-read whenever its state changes (a mix ending updates it).
     val lastMix = remember(debug) { hooks.lastMix() }
@@ -319,103 +297,134 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(showCounter
     val rateable = lastMix?.takeIf {
         !mixing && it.rating == null && it.id != ratedId && it.id != expiredId && System.currentTimeMillis() - it.endedAtEpochMs < RATE_PROMPT_MS
     }
-    if (rateable != null) {
-        for ((up, glyph, description) in listOf(
-            Triple(true, "👍", stringResource(Res.string.dj_rate_up)),
-            Triple(false, "👎", stringResource(Res.string.dj_rate_down)),
-        )) {
-            Surface(
-                modifier = Modifier.semantics { contentDescription = description }.clickable { if (hooks.rateLastMix(up)) ratedId = rateable.id },
-                shape = CircleShape,
-                color = Color.Black.copy(alpha = 0.45f),
-            ) {
-                Text(
-                    text = glyph,
-                    style = typo().labelMedium,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+    if (mixing && rateable == null) return
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (!mixing) {
+            // "Mix now": the next good phrase start within ~20-45 s, instead of where the DJ would have chosen.
+            ChipPill(modifier = Modifier.clickable { feedback.mixNow = hooks.mixNow() }) {
+                androidx.compose.foundation.Image(
+                    imageVector = SimpIcons.FastForward,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.9f)),
                 )
+                ChipLabel(stringResource(Res.string.dj_mix_now))
+            }
+            // "AI Mix": Claude reads both tracks bar by bar (and their lyrics) and chooses the exit, the entry and the overlap.
+            // Only with a key in Settings -> AI DJ -> Claude.
+            if (claude.hasKey) {
+                val aiDescription = stringResource(Res.string.dj_ai_mix)
+                ChipPill(
+                    modifier = Modifier.semantics { contentDescription = aiDescription }.clickable { feedback.ai = hooks.aiMix() },
+                    lit = debug.aiPlan || debug.aiAsking,
+                ) {
+                    ChipLabel("✨ " + stringResource(Res.string.dj_ai_mix_short))
+                }
+            }
+        }
+        if (rateable != null) {
+            for ((up, glyph, description) in listOf(
+                Triple(true, "👍", stringResource(Res.string.dj_rate_up)),
+                Triple(false, "👎", stringResource(Res.string.dj_rate_down)),
+            )) {
+                ChipPill(modifier = Modifier.semantics { contentDescription = description }.clickable { if (hooks.rateLastMix(up)) ratedId = rateable.id }) {
+                    ChipLabel(glyph)
+                }
             }
         }
     }
+}
+
+/**
+ * Row 3, the tools that correct the DJ: the 1-2-3-4 counter, "»", the bar of the 16-bar phrase, and the owner's mix
+ * marks ("Out" where this track can start to leave, "In" where it starts when another one mixes into it, "Solo" from
+ * where it plays alone; lit when set, long-press forgets).
+ */
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
+@Composable
+private fun DjCorrectionRow(feedback: DjChipFeedback) {
+    val hooks = koinInject<DjHooks>()
+    val handler = koinInject<MediaPlayerHandler>()
+    val media by handler.simpleMediaState.collectAsStateWithLifecycle()
+    val positionMs = (media as? SimpleMediaState.Progress)?.progress ?: 0L
     // The 1-2-3-4 counter follows the DJ's bars: if its "1" does not light up on the 1 you hear, tap "»" to move it one
     // beat later (no timing needed). Tapping the counter on the 1s you hear (a few times) sets it too; long-press forgets.
     // It follows what is HEARD: the 20 Hz position minus the lyrics timing offset the owner sets for Bluetooth; derived,
-    // so the chip recomposes only when the beat changes. Not carried forward at frame rate like the lyrics: that asks for
+    // so the row recomposes only when the beat changes. Not carried forward at frame rate like the lyrics: that asks for
     // a frame on every vsync while Now Playing is open, a cost the counter (a beat is 450-750 ms) does not need.
     val dataStore = koinInject<DataStoreManager>()
     val outputDelayMs by dataStore.lyricsOffsetMs.collectAsStateWithLifecycle(0)
     val position by rememberUpdatedState(positionMs)
     val heard by remember(hooks) { derivedStateOf { (position - outputDelayMs).coerceAtLeast(0L) } }
-    val barState = remember(hooks) { derivedStateOf { hooks.barBeatAt(heard) } }
-    // read (and so computed) only while the counter is shown
-    val bar = if (showCounter) barState.value else null
-    if (bar != null) {
-        Surface(
-            modifier = Modifier.combinedClickable(
-                onClick = { if (hooks.tapTheOne(heard) != null) tapped++ },
-                onLongClick = { hooks.clearTheOne(); tapped++ },
-            ),
-            shape = CircleShape,
-            color = Color.Black.copy(alpha = 0.45f),
-        ) {
-            Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                for (i in 0 until bar.beatsPerBar) {
-                    val on = i == bar.beatInBar
-                    Text(
-                        text = "${i + 1}",
-                        style = typo().labelMedium,
-                        fontWeight = if (on) FontWeight.Bold else null,
-                        color =
-                            when {
-                                on && i == 0 -> if (bar.anchored || bar.sure) MaterialTheme.colorScheme.primary else Color(0xFFFFB74D)
-                                on -> Color.White
-                                else -> Color.White.copy(alpha = 0.35f)
-                            },
-                    )
+    val bar by remember(hooks) { derivedStateOf { hooks.barBeatAt(heard) } }
+    // the marks are re-read after every tap (they live in the engine's store, not in Compose state)
+    val debug by hooks.debug.collectAsStateWithLifecycle()
+    var version by remember { mutableStateOf(0) }
+    val marks = remember(version, debug.fromId) { hooks.mixMarks() }
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        bar?.let { b ->
+            ChipPill(
+                modifier = Modifier.combinedClickable(
+                    onClick = { if (hooks.tapTheOne(heard) != null) feedback.tapped++ },
+                    onLongClick = { hooks.clearTheOne(); feedback.tapped++ },
+                ),
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for (i in 0 until b.beatsPerBar) {
+                        val on = i == b.beatInBar
+                        ChipLabel(
+                            text = "${i + 1}",
+                            bold = on,
+                            color =
+                                when {
+                                    on && i == 0 -> if (b.anchored || b.sure) MaterialTheme.colorScheme.primary else Color(0xFFFFB74D)
+                                    on -> Color.White
+                                    else -> Color.White.copy(alpha = 0.35f)
+                                },
+                        )
+                    }
+                }
+            }
+            ChipPill(modifier = Modifier.clickable { if (hooks.shiftTheOne(heard) != null) feedback.tapped++ }) {
+                ChipLabel("»", bold = true)
+            }
+            // Which bar of the 16-bar phrase it is in ("5/16": a chorus is 16 bars, and the next 1 is where it starts again).
+            // Lit on bar 1; amber while the phrase lines are a guess. Tap it when a phrase starts (a bar of slack is enough);
+            // long-press forgets the mark.
+            b.barInBlock?.let { inBlock ->
+                val barNo = inBlock + 1
+                val sure = b.blockSure || b.phraseMarked
+                ChipPill(
+                    modifier = Modifier.combinedClickable(
+                        onClick = { if (hooks.markPhrase(heard) != null) feedback.tapped++ },
+                        onLongClick = { hooks.clearPhrase(); feedback.tapped++ },
+                    ),
+                    lit = barNo == 1,
+                ) {
+                    ChipLabel("$barNo/16", bold = barNo == 1, color = if (sure) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D))
                 }
             }
         }
-        Surface(
-            modifier = Modifier.clickable { if (hooks.shiftTheOne(heard) != null) tapped++ },
-            shape = CircleShape,
-            color = Color.Black.copy(alpha = 0.45f),
-        ) {
-            Text(
-                text = "»",
-                style = typo().labelMedium,
-                fontWeight = FontWeight.Bold,
-                color = Color.White.copy(alpha = 0.9f),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-            )
-        }
-        // Which bar of the 16-bar phrase it is in ("5/16": a chorus is 16 bars, and the next 1 is where it starts again).
-        // Lit on bar 1; amber while the phrase lines are a guess. Tap it when a phrase starts (a bar of slack is enough);
-        // long-press forgets the mark.
-        val inBlock = bar.barInBlock
-        if (inBlock != null) {
-            val barNo = inBlock + 1
-            val sure = bar.blockSure || bar.phraseMarked
-            Surface(
+        for ((mark, label, at) in listOf(
+            Triple(org.simpmusic.dj.android.perfect.MixMark.EXIT, stringResource(Res.string.dj_mark_exit), marks?.exitMs),
+            Triple(org.simpmusic.dj.android.perfect.MixMark.ENTRY, stringResource(Res.string.dj_mark_entry), marks?.entryMs),
+            Triple(org.simpmusic.dj.android.perfect.MixMark.SOLO, stringResource(Res.string.dj_mark_solo), marks?.soloMs),
+        )) {
+            ChipPill(
                 modifier = Modifier.combinedClickable(
-                    onClick = { if (hooks.markPhrase(heard) != null) tapped++ },
-                    onLongClick = { hooks.clearPhrase(); tapped++ },
+                    onClick = { if (hooks.markMix(mark, heard) != null) version++ },
+                    onLongClick = { hooks.clearMix(mark); version++ },
                 ),
-                shape = CircleShape,
-                color = if (barNo == 1) MaterialTheme.colorScheme.primary.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.45f),
+                lit = at != null,
             ) {
-                Text(
-                    text = "$barNo/16",
-                    style = typo().labelMedium,
-                    fontWeight = if (barNo == 1) FontWeight.Bold else null,
-                    color = if (sure) Color.White.copy(alpha = 0.9f) else Color(0xFFFFB74D),
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                )
+                ChipLabel(if (at != null) "$label %d:%02d".format(at / 60_000, at / 1000 % 60) else label, bold = at != null)
             }
         }
     }
-    if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
-    // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.
-    if (showMix) DjMixSheet(data = mix, onDismiss = { showMix = false })
 }
 
 @Composable
