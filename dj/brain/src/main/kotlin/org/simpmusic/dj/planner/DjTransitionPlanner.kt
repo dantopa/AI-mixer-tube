@@ -677,15 +677,19 @@ class DjTransitionPlanner : TransitionPlanner {
         val exit = markPoint(out, p.exitMs) ?: return Attempt.fail("no beat near the AI's exit %.1f s".format(p.exitMs / 1000.0))
         val entry = markPoint(inc, p.entryMs) ?: return Attempt.fail("no beat near the AI's entry %.1f s".format(p.entryMs / 1000.0))
         if (exit < lower || exit > upper) return Attempt.fail("the AI's exit %.1f s is outside %.1f-%.1f s".format(exit / 1000.0, lower / 1000.0, upper / 1000.0))
-        val units = ownerUnits(c, p.overlapBars.coerceIn(1, OWNER_MAX_BARS))
+        val asked = p.overlapBars.coerceIn(1, OWNER_MAX_BARS)
+        val unsure = listOfNotNull("bars untrusted".takeIf { !c.barsMode }, "voice unknown".takeIf { c.vocalsOut == null || c.vocalsIn == null })
+        val bars = if (unsure.isEmpty()) asked else min(asked, AiMixPoints.UNSURE_MAX_BARS)
+        val capNote = if (bars < asked) " (${AiMixPoints.UNSURE_CAP}$asked -> $bars bars: ${unsure.joinToString(", ")})" else ""
+        val units = ownerUnits(c, bars)
         val t = chooseTempo(localPeriod(out, exit, ahead = true), localPeriod(inc, entry, ahead = true), max(c.settings.maxTempoBend, OWNER_TEMPO_BEND).toDouble())
             ?: return Attempt.fail("tempos at the AI's points are beyond the bend (%.1f vs %.1f bpm)".format(60000.0 / localPeriod(out, exit, true), 60000.0 / localPeriod(inc, entry, true)))
         val a = beatAttempt(c.owned(), Pick(exit, "downbeat", false), Pick(entry, "downbeat", false), t, units = units)
         val plan = a.plan ?: return Attempt.fail(a.fail ?: "?")
         return Attempt.ok(
             plan.copy(reason = plan.reason.replace(CLAMPED_NOTE, "")).withReason(
-                AiMixPoints.TAG + "exit %.1f s, entry %.1f s, %s (%s); ".format(
-                    exit / 1000.0, entry / 1000.0, if (c.barsMode) "$units bars" else "$units beats (bars untrusted)", p.why.take(AI_WHY_CHARS),
+                AiMixPoints.TAG + "exit %.1f s, entry %.1f s, %s%s (%s); ".format(
+                    exit / 1000.0, entry / 1000.0, if (c.barsMode) "$units bars" else "$units beats (bars untrusted)", capNote, p.why.take(AI_WHY_CHARS),
                 ),
             ).sourced(PlanSource.AI_MIX),
         )

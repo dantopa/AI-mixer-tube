@@ -100,6 +100,42 @@ class MixTools(
         }
     }
 
+    /**
+     * The overlap as the engine built it. Its units are beats when a pair's bars are not trusted (the plan counts beats
+     * then), so it is said in bars either way; when it came out shorter than [askedBars], what cut it ([MixFeatures.cutBy]).
+     */
+    private fun overlapLine(f: org.simpmusic.dj.model.MixFeatures?, askedBars: Int, overlapS: Double, capReason: String?): String {
+        val perBar = (from.beatsPerBar ?: 4).coerceAtLeast(1)
+        val bars =
+            when {
+                f == null -> askedBars
+                f.unitIsBar -> f.overlapUnits
+                else -> (f.overlapUnits + perBar / 2) / perBar
+            }
+        val sb = StringBuilder("overlap %d bars = %.1f s".format(java.util.Locale.ROOT, bars, overlapS))
+        if (f != null && !f.unitIsBar) sb.append(" (counted in beats: ${f.overlapUnits}; the bar lines of this pair are not trusted)")
+        if (bars < askedBars) {
+            sb.append(", shorter than the $askedBars bars asked: ").append(
+                when {
+                    capReason != null -> "capped at ${AiMixPoints.UNSURE_MAX_BARS} bars because $capReason (a long overlap is only safe when both tracks' 1s and voices are known)"
+                    else -> cutReason(f?.cutBy)
+                },
+            )
+        }
+        return sb.append('\n').toString()
+    }
+
+    private fun cutReason(cutBy: String?): String =
+                when (cutBy) {
+                    "room" -> "one of the tracks ends too soon after these points"
+                    "outro" -> "the outgoing's outro runs out there"
+                    "intro" -> "the incoming's intro ends there (an entry later in the incoming, or a longer intro, gives more)"
+                    "voice" -> "the second voice comes in"
+                    "harmony" -> "the two clash harmonically, so the overlap is kept short"
+                    "drift" -> "the local tempos drift apart over a longer overlap"
+                    else -> "the engine kept what stayed in time"
+                }
+
     private fun points(o: JsonObject, why: String): AiMixPoints {
         val exit = o.int("exit_bar")
         val entry = o.int("entry_bar")
@@ -123,7 +159,7 @@ class MixTools(
             val overlapS = p.overlapMs / 1000.0
             append("OK: beat-matched at %.1f bpm, ".format(java.util.Locale.ROOT, p.mixBpm ?: 0f))
             append("outgoing x%.3f incoming x%.3f (tempo bend %.1f%%), ".format(java.util.Locale.ROOT, f?.rateOut ?: 1f, f?.rateIn ?: 1f, 100 * maxOf(abs((f?.rateOut ?: 1f) - 1f), abs((f?.rateIn ?: 1f) - 1f))))
-            append("overlap %d bars = %.1f s\n".format(java.util.Locale.ROOT, f?.overlapUnits ?: pts.overlapBars, overlapS))
+            append(overlapLine(f, pts.overlapBars, overlapS, p.reason.substringAfter(AiMixPoints.UNSURE_CAP, "").substringAfter(": ", "").substringBefore(')').takeIf { it.isNotEmpty() }))
             append("exit at %s (%s), entry at %s (%s), phrase on phrase: %s\n".format(java.util.Locale.ROOT, clock(p.exitPointMs), f?.exitLevel ?: "?", clock(p.entryPointMs), f?.entryLevel ?: "?", if (f?.phraseOnPhrase == true) "yes" else "no"))
             val h = f?.harmonyExcess
             append("harmony of the overlap: ").append(
@@ -227,7 +263,10 @@ class MixTools(
 
             You have tools. Work like a DJ preparing the transition: read the tables and the fingerprint, zoom where you are
             unsure (where exactly the voice and the bass start), try two to four candidate mixes with try_mix and compare what
-            the engine measures, then call commit_mix once with the best. Prefer the candidate with no voice over voice, the
+            the engine measures, then call commit_mix once with the best. Spread the candidates over the songs: at least one
+            should not be at the last exit of the outgoing or at bar 0 of the incoming (a break in the middle, a later
+            section of the incoming). When try_mix says the overlap came out shorter than asked and why, move the points
+            (an entry past the incoming's intro, an exit with more song after it) if that gives a longer clean overlap. Prefer the candidate with no voice over voice, the
             bass on both sides, a consonant overlap and phrase on phrase, at the owner's usual length when it stays clean.
             Do not explain at length between calls; the commit's why is enough.
             """.trimIndent()

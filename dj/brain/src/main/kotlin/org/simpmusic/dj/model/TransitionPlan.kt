@@ -222,6 +222,16 @@ data class AiMixPoints(val exitMs: Long, val entryMs: Long, val overlapBars: Int
 
         /** Appended to a regular plan's reason when the AI's points could not be planned. */
         const val NOT_USED = " | AI mix not used: "
+
+        /** In the reason when the overlap was capped because the pair's bar lines or voices are not known. */
+        const val UNSURE_CAP = "capped to stay safe: "
+
+        /**
+         * The longest AI overlap when either track's bar lines are untrusted or its voice unknown: a long overlap whose 1s
+         * may not land together, or with voices nobody can see, sounds wrong (owner, build ba: a 16-bar, 49 s overlap
+         * "fue raro" with neither known).
+         */
+        const val UNSURE_MAX_BARS = 8
     }
 }
 

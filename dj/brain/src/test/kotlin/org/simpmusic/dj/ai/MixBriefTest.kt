@@ -107,4 +107,18 @@ class MixBriefTest {
         assertTrue(p.meta?.source != PlanSource.AI_MIX)
         assertTrue(p.reason.contains(AiMixPoints.NOT_USED.trim()), p.reason)
     }
+
+    /** Owner, build ba: a 16-bar (49 s) AI overlap between two tracks whose voices nobody knew "fue raro". */
+    @Test
+    fun aLongAiOverlapIsCappedWhenTheVoicesAreUnknown() {
+        val pts = AiMixPoints(exitMs = 93_600L, entryMs = 80_900L, overlapBars = 16, why = "long")
+        val known = DjTransitionPlanner().plan(out, inc, settings, PlanConstraints(earliestExitMs = 30_000L, aiPoints = pts))
+        val blind = DjTransitionPlanner().plan(out.copy(vocals = null), inc.copy(vocals = null), settings, PlanConstraints(earliestExitMs = 30_000L, aiPoints = pts))
+        assertEquals(PlanSource.AI_MIX, blind.meta?.source, blind.reason)
+        assertTrue(AiMixPoints.UNSURE_CAP in blind.reason, blind.reason)
+        assertTrue(AiMixPoints.UNSURE_CAP !in known.reason, known.reason)
+        val f = blind.meta!!.features!!
+        val bars = if (f.unitIsBar) f.overlapUnits else f.overlapUnits / (out.beatsPerBar ?: 4)
+        assertTrue(bars <= AiMixPoints.UNSURE_MAX_BARS, blind.reason)
+    }
 }

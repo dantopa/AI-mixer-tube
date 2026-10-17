@@ -82,13 +82,21 @@ object MixBrief {
            hint: on cumbia it often hears the accordion or the keyboards as a voice, so only clear contrasts (0-2 against
            7-9) mean something; synced lyrics are reliable.
         3. Phrase on phrase: start the mix on a phrase line ("P" or better "B") of both tracks when you can.
-        4. The best moment to leave is right after a chorus ends, when the band plays an instrumental and the song would
-           start over. The incoming's phrase 1 (its first sung line, or the start of its next section) should arrive
-           exactly when the outgoing's instrumental ends, so the incoming takes over at full volume.
-        5. Do not cut a sung line in half; do not leave in the middle of a chorus.
-        6. The overlap is at least 4 bars: a shorter one is not heard as a mix. Use the owner's usual length (given below)
+        4. The best moment to leave is right after a chorus ends, when the band plays an instrumental. The incoming's next
+           phrase 1 (its first sung line, or the start of its next section) should arrive exactly when the outgoing's
+           instrumental ends, so the incoming takes over at full volume.
+        5. The mix can be ANYWHERE that makes musical sense: not necessarily at the end of the outgoing, nor at the very
+           start of the incoming. The outgoing may leave in its middle (an instrumental break after a chorus, the second
+           time a chorus ends); the incoming may enter at its intro, at an instrumental break of its own, or at the start of
+           a later section, skipping what comes before. Pick the points that sound best, not the last exit and bar 0 by
+           habit. Keep most of the incoming: enter in its first half unless a later point is clearly better.
+        6. Do not cut a sung line in half; do not leave in the middle of a chorus.
+        7. The overlap is at least 4 bars: a shorter one is not heard as a mix. Use the owner's usual length (given below)
            whenever both sides allow it; otherwise the longest that stays clean. When nothing clean exists, 4 bars on a
            phrase line beat a long messy overlap.
+        8. When a track's bar lines are only a guess ("?") or its voice is unknown ("-"), keep the overlap at 4-8 bars: a
+           long overlap whose 1s may not land together, or with voices nobody can see, sounds wrong (the engine caps it
+           at 8 bars then).
 
         Use only bar numbers from the tables and stay inside the allowed ranges given. Answer with the JSON only.
         """.trimIndent()
