@@ -64,8 +64,16 @@ class DjLyricsSource(
     private val analysisUpdates: (String) -> Flow<TrackAnalysis?>,
     /** Background scope (IO dispatcher); nothing here runs on the main thread. */
     private val scope: CoroutineScope,
+    /**
+     * Title, artist and length of a track from the player's queue, for a radio track not in the library (no song row):
+     * without it only SimpMusic (by video id) could be asked, and most radio tracks came back without lyrics.
+     */
+    private val queuedMeta: (String) -> QueuedMeta? = { null },
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    /** What the queue knows of a track: enough to ask BetterLyrics and LRCLIB by name. */
+    class QueuedMeta(val title: String, val artist: String, val durationSeconds: Int?)
+
     /** Called (on [scope]) when a track's trusted lyric vocals changed: the engine re-plans the pair it concerns. */
     @Volatile var onChanged: ((String) -> Unit)? = null
 
@@ -128,7 +136,8 @@ class DjLyricsSource(
     /** Fetches the lines for [id] and writes them (or "no lyrics") to the cache; null when there are none. */
     private suspend fun fetch(id: String): LyricsFile? {
         val song = withTimeoutOrNull(FETCH_TIMEOUT_MS) { songs.getSongById(id).firstOrNull() }
-        val durationMs = (song?.durationSeconds ?: 0) * 1000L
+        val queued = if (song == null) queuedMeta(id) else null
+        val durationMs = ((song?.durationSeconds ?: queued?.durationSeconds) ?: 0) * 1000L
         var answered = 0
         var timedOut = 0
 
@@ -150,22 +159,22 @@ class DjLyricsSource(
         val got =
             fromCache
                 ?: attempt("simpmusic") { lyrics.getSimpMusicLyrics(id) }
-                ?: song?.let { s ->
-                    val artist = artistOf(s)
-                    val seconds = s.durationSeconds.takeIf { it > 0 }
-                    attempt("betterlyrics") { lyrics.getBetterLyrics(artist, s.title, seconds) }
-                        ?: attempt("lrclib") { lyrics.getLrclibLyricsData(artist, s.title, seconds) }
-                }
+                ?: (song?.let { Triple(artistOf(it), it.title, it.durationSeconds.takeIf { d -> d > 0 }) }
+                    ?: queued?.takeIf { it.title.isNotBlank() }?.let { Triple(it.artist, it.title, it.durationSeconds?.takeIf { d -> d > 0 }) })
+                    ?.let { (artist, title, seconds) ->
+                        attempt("betterlyrics") { lyrics.getBetterLyrics(artist, title, seconds) }
+                            ?: attempt("lrclib") { lyrics.getLrclibLyricsData(artist, title, seconds) }
+                    }
         if (got != null) {
             writeFile(got)
             return got
         }
         // "no lyrics" only when the providers answered (a timeout is the network, not an answer: retried next process)
         // and the song is in the library (a track whose row lands a moment after it starts must not be "no lyrics" for a week)
-        if (timedOut == 0 && answered > 0 && song != null) {
+        if (timedOut == 0 && answered > 1 && (song != null || queued != null)) {
             writeFile(LyricsFile(id, null, null, null, durationMs, clock(), retryAtEpochMs = clock() + NO_LYRICS_RETRY_MS))
         }
-        DjLog.i(TAG, "lyrics $id: none (${if (song == null) "song not in the library; only SimpMusic asked" else "$answered providers answered, $timedOut timed out"})")
+        DjLog.i(TAG, "lyrics $id: none (${if (song == null && queued == null) "not in the library nor the queue; only SimpMusic asked" else "$answered providers answered, $timedOut timed out"})")
         return null
     }
 

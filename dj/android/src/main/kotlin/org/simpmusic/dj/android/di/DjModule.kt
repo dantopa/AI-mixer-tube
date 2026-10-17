@@ -172,6 +172,15 @@ val djModule =
                 analysisOf = { id -> store.get(id) },
                 analysisUpdates = { id -> scheduler.observe(id) },
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+                queuedMeta = { id ->
+                    getOrNull<MediaPlayerHandler>()?.queueData?.value?.data?.listTracks?.firstOrNull { it.videoId == id }?.let { t ->
+                        DjLyricsSource.QueuedMeta(
+                            title = t.title,
+                            artist = t.artists?.firstOrNull()?.name?.takeIf { !it.contains("Various Artists") }.orEmpty(),
+                            durationSeconds = t.durationSeconds,
+                        )
+                    }
+                },
             )
         }
 

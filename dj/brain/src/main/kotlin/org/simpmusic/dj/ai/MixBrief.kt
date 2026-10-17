@@ -92,7 +92,9 @@ object MixBrief {
         Columns: bar = bar number; t = start of the bar (m:ss); loud, bass, high = loudness, low band and high band as 0-9 of
         that track's own range; voice = how much of the bar someone sings, 0-9 ("-" = unknown); line = "B" where a 16-bar block
         starts, "P" where an 8-bar phrase starts, "?" when those lines are only a guess. Lyrics, when given, are on the
-        track's own clock: a gap between lyric lines is an instrumental.
+        track's own clock, each line with the bar.beat it starts on (the tables' bar numbers), and every gap of 4 s or more
+        written out as "no singing" with its bars: that is the most exact map of where a voice ends and the next line
+        comes in, so use it to put the hand-off on the beat where one song's line would have come.
 
         Each track also has a fingerprint, one row per 8-bar phrase: its bars; part = a letter, the same letter where the
         music repeats (a chorus comes back as the same letter; "repeats" names the earlier phrase and how alike they are,
@@ -164,6 +166,19 @@ object MixBrief {
     private const val MAX_BARS = 220
     private const val MAX_LYRIC_LINES = 90
     private const val MAX_LYRIC_CHARS = 60
+
+    /** A gap between lyric lines at least this long is written out as "no singing". */
+    private const val LYRIC_GAP_MS = 4_000L
+
+    /** "34.2": bar 34 (the tables' numbering), beat 2 of it; "-" before the first bar. */
+    internal fun barBeat(bars: List<Long>, endMs: Long, perBar: Int, t: Long): String {
+        val i = bars.indexOfLast { it <= t }
+        if (i < 0) return "-"
+        val s = bars[i]
+        val e = bars.getOrNull(i + 1) ?: (s + (if (i > 0) s - bars[i - 1] else endMs - s)).coerceAtLeast(s + 1)
+        val beat = (((t - s).toDouble() / (e - s)) * perBar).toInt().coerceIn(0, perBar - 1) + 1
+        return "$i.$beat"
+    }
 
     /** Fingerprint: phrases are 8 bars; two phrases are the same part above this similarity; a key fit below this is unsure. */
     private const val PHRASE_BARS = 8
@@ -376,8 +391,23 @@ object MixBrief {
             append(fingerprint(track, bars))
             val lyrics = track.lyrics?.filter { it.text.isNotBlank() && it.text.trim() != "♫" }
             if (!lyrics.isNullOrEmpty()) {
-                append("lyrics:\n")
-                for (l in lyrics.take(MAX_LYRIC_LINES)) append(clock(l.startMs)).append(' ').append(l.text.trim().take(MAX_LYRIC_CHARS)).append('\n')
+                // Each line with the bar.beat it starts on (the tables' bar numbers), so the line that ends a section and
+                // the one that starts the next can be put on the exact beat; a long gap is written out as instrumental.
+                append("lyrics (time, bar.beat where the line starts, text):\n")
+                val per = (t.beatsPerBar ?: 4).coerceIn(2, 7)
+                val kept = lyrics.take(MAX_LYRIC_LINES)
+                // the sung ranges as the planner reads them (a line sings until the next, a long one ends by its words)
+                val sung = org.simpmusic.dj.timeline.LyricVocals.ranges(track.lyrics.orEmpty(), end)
+                for ((i, l) in kept.withIndex()) {
+                    append(clock(l.startMs)).append(' ').append(barBeat(bars, end, per, l.startMs)).append(' ')
+                    append(l.text.trim().take(MAX_LYRIC_CHARS)).append('\n')
+                    val next = kept.getOrNull(i + 1)?.startMs ?: continue
+                    val sungTo = sung.lastOrNull { it.startMs <= l.startMs }?.endMs?.coerceIn(l.startMs, next) ?: next
+                    if (next - sungTo >= LYRIC_GAP_MS) {
+                        append("  - no singing ").append(clock(sungTo)).append('-').append(clock(next))
+                        append(" (bars ").append(barBeat(bars, end, per, sungTo)).append(" to ").append(barBeat(bars, end, per, next)).append(")\n")
+                    }
+                }
             }
         }
     }
