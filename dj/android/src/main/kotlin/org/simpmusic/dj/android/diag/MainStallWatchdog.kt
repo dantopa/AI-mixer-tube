@@ -8,7 +8,7 @@ import org.simpmusic.dj.android.log.DjLog
 
 /** Which build of the DJ code this is, printed at boot so a pasted log says what it came from. Bump it with every shipped change. */
 object DjBuild {
-    const val ID = "2026-10-17-bc AI mix moves + DJ loops, owner taste memory, prompt caching"
+    const val ID = "2026-10-17-bd radio ordered by tempo (set path), look-ahead no longer restarted"
 }
 
 /**

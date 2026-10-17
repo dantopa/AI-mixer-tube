@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import org.simpmusic.dj.android.recommend.DjPlayerPort
 import org.simpmusic.dj.android.recommend.PlayerSnapshot
@@ -39,7 +40,10 @@ class HandlerPlayerPort(
                 combine(h.nowPlaying, h.queueData, h.controlState, h.castState, dataStore.watchVideoInsteadOfPlayingAudio) { _, _, _, _, watch ->
                     watchVideo = watch == DataStoreManager.TRUE
                 }
-                    .map { snapshotOf(h) },
+                    .map { snapshotOf(h) }
+                    // the handler's control state ticks on its own (a device log shows a new emission every ~5 s with
+                    // nothing changed): an equal snapshot must not restart whatever its collectors are doing
+                    .distinctUntilChanged(),
             )
         }
 

@@ -53,6 +53,8 @@ class QueueLookAhead(
     private val perTrackWaitMs: Long = 100_000L,
     private val budgetMs: Long = 180_000L,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** How many upcoming tracks to order; the module passes a smaller window when the phone is warm (each is a full analysis). */
+    private val windowSize: () -> Int = { WINDOW },
 ) {
     private var decidedFor: String? = null
     private var prevQueue: List<String> = emptyList()
@@ -60,10 +62,13 @@ class QueueLookAhead(
 
     fun start() {
         scope.launch {
-            settings.map { it.enabled && it.autoDj }.distinctUntilChanged().collectLatest { on ->
+            // AI DJ alone turns it on (not Auto DJ): ordering the radio's own tracks so they mix is the DJ's job
+            settings.map { it.enabled }.distinctUntilChanged().collectLatest { on ->
                 if (on) {
                     try {
-                        port.snapshots.collectLatest { handle(it) }
+                        // only what the decision depends on restarts it: a decision cancelled by an unrelated emission never
+                        // finished on the owner's device, and the 97 -> 125 bpm pair it should have avoided was played
+                        port.snapshots.distinctUntilChanged { a, b -> keyOf(a) == keyOf(b) }.collectLatest { handle(it) }
                     } finally {
                         setKeep(emptySet())
                     }
@@ -79,7 +84,7 @@ class QueueLookAhead(
             setKeep(emptySet())
             return
         }
-        val window = s.queueIds.drop(s.currentIndex + 1).take(WINDOW)
+        val window = s.queueIds.drop(s.currentIndex + 1).take(windowSize().coerceIn(2, org.simpmusic.dj.recommend.SetOrder.MAX_TRACKS))
         if (window.size < 2) return
         if (decidedFor == current) return
         if (window.first() in handPlaced) {
@@ -129,15 +134,43 @@ class QueueLookAhead(
             }
         val nextScore = scored.firstOrNull { it.first == nextId }?.second?.score ?: 0f
         val line = scored.joinToString { "${it.first}=${"%.2f".format(it.second.score)}" }
-        // A challenger must mix one tier better than the queued next (instrumental over instrumental > the outgoing's
-        // instrumental under the incoming's phrase 1 > a clean beat-matched crossfade > anything else) and clear the floor;
-        // within the best tier, the higher score wins. Never a reorder for a tie.
+        // The set, not just the next slot: the tempo path over the whole window. Greedy "best next" only pushed an
+        // off-tempo track one slot down and it came straight back (owner's radio: 97 -> 125 -> 97 -> 122).
+        val bend = settingsNow.maxTempoBend.toDouble().coerceAtLeast(0.02)
+        val curBpm = bpmOf(from)
+        val tracks = got.mapNotNull { (id, a) -> bpmOf(a)?.let { org.simpmusic.dj.recommend.SetOrder.Track(id, it) } }
+        val qualityOf = scored.associate { (id, r) -> id to (r.plan?.quality() ?: Quality.OTHER) }
+        // jumps of the best path that plays [id] next; a first step the planner cannot beat-match counts as one, tempo or not
+        fun jumpsIf(id: String): Int? {
+            if (curBpm == null || tracks.size != got.size) return null
+            val p = org.simpmusic.dj.recommend.SetOrder.best(curBpm, tracks, bend, first = id) ?: return null
+            val firstTempoJump = org.simpmusic.dj.recommend.SetOrder.isJump(curBpm, tracks.first { it.id == id }.bpm, bend)
+            return p.jumps - (if (firstTempoJump) 1 else 0) + (if (qualityOf[id] == Quality.OTHER) 1 else 0)
+        }
+        val nextJumps = jumpsIf(nextId)
+        curBpm?.let { c ->
+            org.simpmusic.dj.recommend.SetOrder.best(c, tracks, bend)?.let { p ->
+                log("look-ahead: tempo order ${p.ids.joinToString(" > ") { id -> "%.0f".format(tracks.first { it.id == id }.bpm) }} (${p.jumps} jumps; the radio's order ${org.simpmusic.dj.recommend.SetOrder.jumpsInOrder(c, tracks, bend)})")
+            }
+        }
+        // A challenger must beat-match the current track and clear the floor. It takes the slot when its path has fewer
+        // tempo jumps than the queued next's, or as many and a better tier (instrumental over instrumental > the outgoing's
+        // instrumental under the incoming's phrase 1 > a clean beat-matched crossfade > anything else); then the score.
+        // Never a reorder for a tie.
         val best =
             scored
                 .filter { it.first != nextId && it.second.score >= MIN_SCORE }
-                .mapNotNull { (id, r) -> r.plan?.quality()?.takeIf { it > nextQuality }?.let { Triple(id, r, it) } }
-                .maxWithOrNull(compareBy<Triple<String, org.simpmusic.dj.model.Recommendation, Quality>> { it.third }.thenBy { it.second.score })
-                ?.let { it.first to it.second }
+                .mapNotNull { (id, r) -> r.plan?.quality()?.takeIf { it > Quality.OTHER }?.let { Triple(id, r, it) } }
+                .map { t -> t to jumpsIf(t.first) }
+                .filter { (t, j) ->
+                    when {
+                        j != null && nextJumps != null && j < nextJumps -> true
+                        j != null && nextJumps != null && j > nextJumps -> false
+                        else -> t.third > nextQuality
+                    }
+                }
+                .minWithOrNull(compareBy<Pair<Triple<String, org.simpmusic.dj.model.Recommendation, Quality>, Int?>> { it.second ?: Int.MAX_VALUE }.thenByDescending { it.first.third }.thenByDescending { it.first.second.score })
+                ?.first?.let { it.first to it.second }
         if (best == null) {
             log("look-ahead: no upcoming track mixes better than $nextId ($nextWhy); keeping the order (scores $line)")
             return
@@ -190,6 +223,14 @@ class QueueLookAhead(
         }
     }
 
+    /** Tempo of the refined grid (what the planner beat-matches), else the analyzer's field. */
+    private fun bpmOf(a: TrackAnalysis): Double? =
+        (runCatching { org.simpmusic.dj.timeline.Timelines.of(a).bpm?.value }.getOrNull() ?: a.bpm?.value)?.toDouble()?.takeIf { it > 0 }
+
+    /** What a decision depends on: the current track, the guards, the upcoming tracks it may order. */
+    private fun keyOf(s: PlayerSnapshot) =
+        listOf(s.currentId, s.currentIndex, s.isRadio, s.blockedReason, s.queueIds.drop(s.currentIndex + 1).take(windowSize().coerceIn(2, org.simpmusic.dj.recommend.SetOrder.MAX_TRACKS)))
+
     private suspend fun analysisOf(id: String, priority: AnalysisPriority, waitMs: Long): TrackAnalysis? {
         analyses.get(id)?.let { return it }
         analyses.request(id, priority)
@@ -199,8 +240,12 @@ class QueueLookAhead(
     companion object {
         /** Tracks after the current one that are considered (the next one included). */
         // Each challenger is a full analysis (~30 s of CPU), but they are only analysed when the queued next would not
-        // beat-match, and then a 4th candidate is one more chance to find a track that does.
-        const val WINDOW = 4
+        // beat-match, stay in the store (a queued track is analysed once, whenever it is played), and six give the tempo
+        // path room to group an off-tempo track with its neighbours instead of bouncing (SetOrder).
+        const val WINDOW = 6
+
+        /** The window while the phone is warm (thermal MODERATE or worse). */
+        const val WARM_WINDOW = 4
         const val HISTORY = 30
 
         /** Floor a challenger must clear to take the next slot from a queued track that would not beat-match. */

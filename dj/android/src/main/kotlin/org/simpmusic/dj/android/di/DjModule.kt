@@ -257,6 +257,10 @@ val djModule =
                 planner = get(),
                 setKeep = { scheduler.setLookAhead(it) },
                 log = { DjLog.i("lookahead", it) },
+                windowSize = {
+                    val warm = (getOrNull<DeviceConditions>()?.thermalStatus ?: 0) >= 2
+                    if (warm) QueueLookAhead.WARM_WINDOW else QueueLookAhead.WINDOW
+                },
             )
         }
         single {

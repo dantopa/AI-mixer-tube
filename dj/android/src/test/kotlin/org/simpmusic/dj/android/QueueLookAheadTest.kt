@@ -125,6 +125,57 @@ class QueueLookAheadTest {
             assertTrue(player.calls.isEmpty())
         }
 
+    /**
+     * Device log (build ba): the player re-emitted the same state every ~5 s, each emission restarted the decision, and only
+     * the first candidate was ever requested, so the 97 -> 125 bpm pair it should have avoided was played.
+     */
+    @Test
+    fun anEqualSnapshotEmittedAgainDoesNotRestartTheDecision() =
+        runTest {
+            repo = FakeAnalysisRepo(analysis("cur", bpm = 97f), analysis("q1", bpm = 125f))
+            val snap = PlayerSnapshot(currentId = "cur", queueIds = listOf("cur", "q1", "q2", "q3"), currentIndex = 0, isRadio = true)
+            val flow = kotlinx.coroutines.flow.MutableSharedFlow<PlayerSnapshot>(replay = 1, extraBufferCapacity = 16)
+            val calls = ArrayList<String>()
+            val port =
+                object : org.simpmusic.dj.android.recommend.DjPlayerPort {
+                    override val snapshots: kotlinx.coroutines.flow.Flow<PlayerSnapshot> = flow
+                    override fun snapshot() = snap
+                    override suspend fun playNext(track: com.maxrave.domain.data.model.browse.album.Track) {}
+                    override suspend fun append(track: com.maxrave.domain.data.model.browse.album.Track) {}
+                    override suspend fun playNow(track: com.maxrave.domain.data.model.browse.album.Track) {}
+                    override suspend fun moveToNext(videoId: String): Boolean { calls += "move:$videoId"; return true }
+                }
+            val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Default)
+            val look =
+                QueueLookAhead(
+                    scope = scope, settings = settings, port = port, analyses = repo, planner = TempoGatePlanner(emptySet(), emptySet()),
+                    setKeep = {}, compute = Dispatchers.Unconfined, perTrackWaitMs = 5_000L, budgetMs = 20_000L,
+                )
+            look.start()
+            flow.emit(snap)
+            kotlinx.coroutines.withContext(Dispatchers.Default) {
+                repeat(6) { kotlinx.coroutines.delay(60); flow.emit(snap.copy()) }
+                kotlinx.coroutines.delay(100)
+            }
+            val q2Requests = synchronized(repo.requests) { repo.requests.count { it.first == "q2" } }
+            assertEquals("q2 requested once, the decision was not restarted", 1, q2Requests)
+            repo.arrive(analysis("q2", bpm = 126f))
+            repo.arrive(analysis("q3", bpm = 98f))
+            kotlinx.coroutines.withContext(Dispatchers.Default) { kotlinx.coroutines.delay(400) }
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            assertEquals(listOf("move:q3"), calls)
+        }
+
+    /** The owner's radio: 97 bpm cumbia with 125 / 122 / 108 bpm tracks mixed in; the 97 goes next, not the 125. */
+    @Test
+    fun aRadioThatMixesTemposIsOrderedByTempo() =
+        runTest {
+            val (look, player, snap) =
+                rig("ocv" to 125f, "ixo" to 96.9f, "4eu" to 122f, "1ez" to 107.9f, "a7f" to 102f, queue = listOf("ocv", "ixo", "4eu", "1ez", "a7f"), cur = 96.9f)
+            look.handle(snap)
+            assertEquals(listOf("move:ixo"), player.calls)
+        }
+
     @Test
     fun decidesOncePerTrack() =
         runTest {
