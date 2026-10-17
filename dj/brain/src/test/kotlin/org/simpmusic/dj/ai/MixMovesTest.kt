@@ -172,4 +172,21 @@ class MixMovesTest {
             org.simpmusic.dj.planner.MixMarks.provider = prev
         }
     }
+
+    /** Owner, build bc: "Carita Triste" lasts 1:14 and its marked entry at 0:57 was outside the allowed entries (0-14). */
+    @Test
+    fun aShortTracksMarkedEntryIsOffered() {
+        val carita = load("OZGBG-GUDSo")
+        val t = org.simpmusic.dj.timeline.Timelines.of(carita)
+        val prev = org.simpmusic.dj.planner.MixMarks.provider
+        try {
+            val plain = MixBrief.build(MixBrief.Track("a", org.simpmusic.dj.timeline.Timelines.of(out)), MixBrief.Track("b", t), 30_000L, 8, 0L)!!
+            assertTrue(plain.inBarsMs[plain.entryTo] >= carita.durationMs * 3 / 4 - 4_000, "a quarter of a short track is kept, not 30 s: entry up to ${plain.inBarsMs[plain.entryTo]} of ${carita.durationMs}")
+            org.simpmusic.dj.planner.MixMarks.provider = { id -> if (id == carita.videoId) org.simpmusic.dj.planner.MixMarks(entryMs = 57_280L) else null }
+            val marked = MixBrief.build(MixBrief.Track("a", org.simpmusic.dj.timeline.Timelines.of(out)), MixBrief.Track("b", t), 30_000L, 8, 0L)!!
+            assertTrue(marked.inBarsMs[marked.entryTo] >= 57_000L, "the marked entry is in range: ${marked.inBarsMs[marked.entryTo]}")
+        } finally {
+            org.simpmusic.dj.planner.MixMarks.provider = prev
+        }
+    }
 }

@@ -164,8 +164,11 @@ object MixBrief {
     /** An exit must leave this many bars of the outgoing for the overlap. */
     private const val EXIT_TAIL_BARS = 4
 
-    /** An entry must leave this much of the incoming after it. */
+    /** An entry must leave this much of the incoming after it (a quarter of a shorter track). */
     private const val ENTRY_TAIL_MS = 30_000L
+
+    /** The owner's marked entry is offered while this much of the track is left after it. */
+    private const val MARK_TAIL_MS = 8_000L
 
     /**
      * The brief for [out] -> [inc], or null when a track has no beat grid (nothing to count bars on). Exits are allowed from
@@ -178,7 +181,15 @@ object MixBrief {
         val exitTo = (outBars.size - 1 - EXIT_TAIL_BARS).coerceAtMost(MAX_BARS - 1)
         if (exitTo < exitFrom) return null
         val inDur = inc.timeline.refined.durationMs
-        val entryTo = inBars.indexOfLast { it <= inDur - ENTRY_TAIL_MS }.coerceAtLeast(0).coerceAtMost(MAX_BARS - 1)
+        // a short track keeps a quarter of itself after the entry, not 30 s: a 1:14 cumbia (owner, build bc) allowed entries
+        // only up to 0:44, and the owner's own entry mark at 0:57 was out of range
+        val tail = minOf(ENTRY_TAIL_MS, inDur / 4)
+        var entryTo = inBars.indexOfLast { it <= inDur - tail }.coerceAtLeast(0).coerceAtMost(MAX_BARS - 1)
+        // the owner's marked entry is always offered (while a few bars of the track are left after it)
+        runCatching { MixMarks.of(inc.timeline.refined.videoId)?.entryMs }.getOrNull()?.let { m ->
+            val bar = inBars.indices.minByOrNull { kotlin.math.abs(inBars[it] - m) }
+            if (bar != null && bar > entryTo && inBars[bar] <= inDur - MARK_TAIL_MS) entryTo = bar.coerceAtMost(MAX_BARS - 1)
+        }
         val user =
             buildString {
                 append("OUTGOING (playing now, at ${clock(positionMs)})\n")
