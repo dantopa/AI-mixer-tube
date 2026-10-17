@@ -66,6 +66,14 @@ object MixBrief {
         starts, "P" where an 8-bar phrase starts, "?" when those lines are only a guess. Lyrics, when given, are on the
         track's own clock: a gap between lyric lines is an instrumental.
 
+        Each track also has a fingerprint, one row per 8-bar phrase: its bars; part = a letter, the same letter where the
+        music repeats (a chorus comes back as the same letter; "repeats" names the earlier phrase and how alike they are,
+        0-1); local-key = the key that phrase's chords sound in ("Am", "C"; "?" = a weak fit); loud, bass and voice as 0-9.
+        Two keys mix well when they are the same, relative (Am / C), or a fifth apart (Am / Em, C / G); farther apart, keep
+        the overlap short or on drums and bass. The song map gives the sung and instrumental spans in seconds.
+        An image may come with the tables: both tracks drawn bar by bar (loudness, bass, highs, voice, and a 12-row chroma
+        strip, the notes being played), with the phrase lines and bar numbers; use it to see the shape of each song.
+
         The owner's rules, most important first:
         1. Overlap the outgoing's INSTRUMENTAL with the incoming's INSTRUMENTAL, with the bass present in BOTH (bass >= 4
            on both sides through the overlap). That is where a mix is felt.
@@ -89,6 +97,11 @@ object MixBrief {
     private const val MAX_BARS = 220
     private const val MAX_LYRIC_LINES = 90
     private const val MAX_LYRIC_CHARS = 60
+
+    /** Fingerprint: phrases are 8 bars; two phrases are the same part above this similarity; a key fit below this is unsure. */
+    private const val PHRASE_BARS = 8
+    private const val SAME_PART = 0.75
+    private const val WEAK_KEY = 0.6
 
     /** The shortest overlap an answer may ask for (shorter answers are lengthened). */
     const val MIN_OVERLAP_BARS = 4
@@ -194,6 +207,7 @@ object MixBrief {
                 if (line.isNotEmpty()) append(' ').append(line)
                 append('\n')
             }
+            append(fingerprint(track, bars))
             val lyrics = track.lyrics?.filter { it.text.isNotBlank() && it.text.trim() != "♫" }
             if (!lyrics.isNullOrEmpty()) {
                 append("lyrics:\n")
@@ -201,6 +215,145 @@ object MixBrief {
             }
         }
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // The fingerprint ("huella", the owner's word, 2026-10-17): the song as a DJ reads it, one row per 8-bar phrase.
+
+    /** One phrase of a track: its bars, which part it is (same letter = the same music), its local key and levels. */
+    internal class Phrase(val fromBar: Int, val toBar: Int, val part: Char, val key: String?, val repeatOf: Int?, val similarity: Double)
+
+    /** Bars of 8 from the first trusted phrase line (or bar 0), each labelled by similarity and keyed by its own chroma. */
+    internal fun phrases(t: TrackTimeline, bars: List<Long>): List<Phrase> {
+        if (bars.size < 4) return emptyList()
+        val lines = t.phrases?.value?.takeIf { it.trusted }?.startsMs
+        val first = lines?.firstOrNull()?.let { l -> bars.indexOfFirst { kotlin.math.abs(it - l) < 400 } }?.takeIf { it >= 0 } ?: 0
+        val starts = ArrayList<Int>()
+        if (first > 0) starts += 0
+        var b = first
+        while (b < bars.size) { starts += b; b += PHRASE_BARS }
+        val a = t.refined
+        val end = a.durationMs
+        val feats = starts.indices.map { i ->
+            val s = bars[starts[i]]
+            val e = starts.getOrNull(i + 1)?.let { bars[it] } ?: end
+            phraseVector(a, s, e)
+        }
+        val profile = org.simpmusic.dj.analysis.Harmony.profile(a)
+        val labels = CharArray(starts.size) { '?' }
+        val repeatOf = arrayOfNulls<Int>(starts.size)
+        val sims = DoubleArray(starts.size)
+        var next = 'A'
+        for (i in starts.indices) {
+            val v = feats[i] ?: continue
+            var best = -1
+            var bestSim = -1.0
+            for (j in 0 until i) {
+                val w = feats[j] ?: continue
+                val c = cosine(v, w)
+                if (c > bestSim) { bestSim = c; best = j }
+            }
+            if (best >= 0 && bestSim >= SAME_PART) {
+                labels[i] = labels[best]
+                repeatOf[i] = best + 1
+            } else {
+                labels[i] = next
+                if (next < 'Z') next++
+            }
+            sims[i] = bestSim.coerceAtLeast(0.0)
+        }
+        return starts.indices.map { i ->
+            val s = bars[starts[i]]
+            val e = starts.getOrNull(i + 1)?.let { bars[it] } ?: end
+            val chroma = profile?.window(s, e - s)
+            Phrase(starts[i], (starts.getOrNull(i + 1) ?: bars.size) - 1, labels[i], chroma?.let { localKey(it) }, repeatOf[i], sims[i])
+        }
+    }
+
+    private fun fingerprint(track: Track, bars: List<Long>): String {
+        val t = track.timeline
+        val a = t.refined
+        val hop = a.energyHopMs.coerceAtLeast(1)
+        val loud = Levels(a.energy, hop)
+        val bass = Levels(a.lowBandEnergy, hop)
+        val vocals = t.vocals?.value
+        val ps = phrases(t, bars)
+        if (ps.isEmpty()) return ""
+        return buildString {
+            append("fingerprint: key ")
+            append(a.key?.let { k -> "${k.value} conf %.2f%s".format(java.util.Locale.ROOT, k.confidence, if (k.confidence < org.simpmusic.dj.model.Trust.KEY) " (unsure)" else "") } ?: "unknown")
+            org.simpmusic.dj.analysis.SongMap.describe(a)?.let { append(" | song map (s): ").append(it) }
+            append('\n')
+            append("phrase bars t part local-key loud bass voice repeats\n")
+            ps.forEachIndexed { i, p ->
+                val s = bars[p.fromBar]
+                val e = bars.getOrNull(p.toBar + 1) ?: a.durationMs
+                append(i + 1).append(' ').append(p.fromBar).append('-').append(p.toBar).append(' ').append(clock(s)).append(' ')
+                append(p.part).append(' ').append(p.key ?: "-").append(' ')
+                append(loud.at(s, e)).append(' ').append(bass.at(s, e)).append(' ')
+                append(vocals?.let { level(sungShare(it, s, e)) } ?: "-").append(' ')
+                append(p.repeatOf?.let { "phrase $it (%.2f)".format(java.util.Locale.ROOT, p.similarity) } ?: "-")
+                append('\n')
+            }
+        }
+    }
+
+    /** Mean z-scored structure frame (chroma + timbre) over [s, e), or null without frames. */
+    private fun phraseVector(a: org.simpmusic.dj.model.TrackAnalysis, s: Long, e: Long): DoubleArray? {
+        val dim = org.simpmusic.dj.model.TrackAnalysis.STRUCTURE_DIM
+        val hop = a.structureHopMs
+        val f = a.structureFrames
+        if (hop <= 0 || f.size < dim * 8) return null
+        val n = f.size / dim
+        val mean = DoubleArray(dim)
+        val sd = DoubleArray(dim)
+        for (i in 0 until n) for (d in 0 until dim) mean[d] += f[i * dim + d]
+        for (d in 0 until dim) mean[d] /= n
+        for (i in 0 until n) for (d in 0 until dim) { val x = f[i * dim + d] - mean[d]; sd[d] += x * x }
+        for (d in 0 until dim) sd[d] = kotlin.math.sqrt(sd[d] / n).coerceAtLeast(1e-6)
+        val i0 = (s / hop).toInt().coerceIn(0, n)
+        val i1 = (e / hop).toInt().coerceIn(i0, n)
+        if (i1 - i0 < 2) return null
+        val v = DoubleArray(dim)
+        for (i in i0 until i1) for (d in 0 until dim) v[d] += (f[i * dim + d] - mean[d]) / sd[d]
+        for (d in 0 until dim) v[d] /= (i1 - i0)
+        return v
+    }
+
+    private fun cosine(a: DoubleArray, b: DoubleArray): Double {
+        var ab = 0.0; var aa = 0.0; var bb = 0.0
+        for (i in a.indices) { ab += a[i] * b[i]; aa += a[i] * a[i]; bb += b[i] * b[i] }
+        return if (aa <= 1e-12 || bb <= 1e-12) 0.0 else ab / kotlin.math.sqrt(aa * bb)
+    }
+
+    private val KK_MAJOR = doubleArrayOf(6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+    private val KK_MINOR = doubleArrayOf(6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+    private val NOTES = arrayOf("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+
+    /** The key a chroma window sounds in (Krumhansl-Kessler), "Am" / "C"; "?" appended when the fit is weak. */
+    internal fun localKey(chroma: DoubleArray): String {
+        var best = 0.0
+        var name = "?"
+        for (pc in 0 until 12) for ((profile, minor) in listOf(KK_MAJOR to false, KK_MINOR to true)) {
+            var mv = 0.0; var mp = 0.0
+            for (i in 0 until 12) { mv += chroma[i]; mp += profile[i] }
+            mv /= 12; mp /= 12
+            var num = 0.0; var dv = 0.0; var dp = 0.0
+            for (i in 0 until 12) {
+                val x = chroma[(i + pc) % 12] - mv
+                val y = profile[i] - mp
+                num += x * y; dv += x * x; dp += y * y
+            }
+            val r = if (dv <= 1e-18) 0.0 else num / kotlin.math.sqrt(dv * dp)
+            if (r > best) { best = r; name = NOTES[pc] + if (minor) "m" else "" }
+        }
+        return if (best < WEAK_KEY) "$name?" else name
+    }
+
+    /** A curve's 0-9 level over a span (for the tools): `levelsOf(curve, hop)(startMs, endMs)`. */
+    fun levelsOf(curve: List<Float>, hopMs: Int): (Long, Long) -> String = Levels(curve, hopMs.coerceAtLeast(1))::at
+
+    /** How much of a span is sung, 0-9. */
+    fun voiceLevel(r: List<org.simpmusic.dj.model.TimeRange>, s: Long, e: Long): String = level(sungShare(r, s, e))
 
     /** A curve as 0-9 levels of its own 5th-95th percentile range; "-" when the curve is missing. */
     private class Levels(private val v: List<Float>, private val hopMs: Int) {

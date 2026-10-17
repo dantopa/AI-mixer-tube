@@ -56,6 +56,26 @@ class MixBriefTest {
     }
 
     @Test
+    fun theBriefCarriesTheFingerprintOfBothTracks() {
+        val b = brief()
+        val fp = b.user.lines().filter { it.startsWith("fingerprint:") }
+        println(b.user.lines().dropWhile { !it.startsWith("fingerprint:") }.take(10).joinToString("\n"))
+        assertEquals(2, fp.size, "one fingerprint per track")
+        // phrases numbered from 1, with a part letter on every row
+        val rows = b.user.lines().dropWhile { !it.startsWith("phrase bars") }.drop(1).takeWhile { it.firstOrNull()?.isDigit() == true }
+        assertTrue(rows.size >= 4, "phrases: ${rows.size}")
+        assertTrue(rows.all { r -> r.split(' ')[3].let { it.first().isLetter() || it == "?" } }, rows.joinToString("\n"))
+    }
+
+    @Test
+    fun aShortAnswerIsLengthenedToFourBars() {
+        val b = brief()
+        val exitBar = b.outBarsMs.indexOfFirst { it >= 93_000L }
+        val pts = MixBrief.parse(b, """{"exit_bar": $exitBar, "entry_bar": 2, "overlap_bars": 1, "why": "x"}""").getOrThrow()
+        assertEquals(MixBrief.MIN_OVERLAP_BARS, pts.overlapBars)
+    }
+
+    @Test
     fun anAnswerOutsideTheAllowedRangeIsRefused() {
         val b = brief()
         val r = MixBrief.parse(b, """{"exit_bar": ${b.exitFrom - 1}, "entry_bar": 3, "overlap_bars": 8, "why": "x"}""")

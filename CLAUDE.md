@@ -415,6 +415,29 @@ Service modules:
     Rows 2 and 3 are `FlowRow`s and wrap. Tap feedback is hoisted into `DjChipFeedback`.
   - **The 0.8 s startup freeze** was named by the build-ay watchdog: `LibraryAnalysisCoordinator.refreshProgress` -> `AnalysisStore.has` decoded every stored analysis on the main thread to answer yes/no. `has()` now reads the file's first 512 characters (the serializer writes `videoId`, `schemaVersion`, `analyzerId` first) and decodes in full only when the head does not match. `SchedulerBackgroundPort.isAnalysed` runs on `Dispatchers.IO`.
   - Not run on a device beyond the owner's build-ay session.
+- **AI with tools and the fingerprint (2026-10-17, build ba)**: the owner's experiment. Their words: "give the Bagracho the tools so it works like a real DJ"; "let it see the fingerprint of both, plus the lyrics, the key".
+  - **Measured on build az** (owner's export, Opus 5.5, 12 answers): $0.03-0.045 per mix, 7-13 s, 5-7k input / 600-1000 output tokens. 4 answers could not be planned:
+    - 3 at tempos the engine cannot bend (97 -> 125, 102 -> 84 bpm);
+    - 1 on an irregular grid.
+  - **Fingerprint, text** (`MixBrief.phrases`, `fingerprint`): one row per 8-bar phrase, from the first trusted phrase line.
+    - The part letter is the same where the music repeats: cosine of z-scored chroma + timbre from `structureFrames`, `SAME_PART` 0.75, plus "repeats phrase N (sim)".
+    - The local key is Krumhansl-Kessler on that phrase's `Harmony.Profile` chroma ("?" under 0.6).
+    - Then loud / bass / voice, the track key with its confidence, and `SongMap.describe`.
+    - The prompt explains it, with the key-compatibility rule: same, relative, or a fifth apart.
+  - **Fingerprint, picture** (`:djAndroid` `ai/FingerprintImage`, android.graphics PNG, at most ~1560 x 760): one lane per track, one column per bar.
+    - Rows: loudness, bass and highs bars; voice (lyrics, else trusted detection) as opacity; a 12-row chroma strip.
+    - Phrase lines (thick = 16-bar block) and bar numbers every 4, the same numbers as the tables. The allowed exits are shaded on the outgoing.
+    - It rides as an image block in the first user message, in both modes.
+  - **Tools** (`dj/brain` `ai/MixTools`, strict schemas, tool_choice auto):
+    - `zoom` (a track, up to 16 bars, one row per beat, with the lyric line that starts there);
+    - `try_mix`: the REAL planner with `aiPoints`. It reports the tempo bend, the harmony excess of that overlap, voice over voice computed from the timelines' vocals (the AI path itself ignores the detector), the bass level on both sides, phrase on phrase, or why it is not possible;
+    - `commit_mix`, the end. `TOOL_RULES` asks for 2-4 tries before committing.
+    - `ClaudeMixClient.ask(brief, image, tools)` runs the manual loop: append `m.toParam()`, return every `tool_result` in one user message, at most `MixTools.MAX_TURNS` 8 turns, 90 s timeout per request.
+    - Setting: Settings -> AI DJ -> Claude -> "Claude works like a DJ (experiment)" (`ClaudeSettings.tools`, default ON). Off = the one-answer JSON mode.
+  - **Tempo gate**: Claude is not asked when the tracks' refined tempos are more than `AI_MAX_TEMPO_GAP` 12 % apart (half/double aware). The chip says the DJ mixes that one.
+  - **Answer budget**: exits are offered from playhead + 60 s (`AI_TOOLS_BUDGET_MS`) in tool mode, 25 s in one-answer mode.
+  - **Testing**: `MixToolsTest` scripts a zoom / try / commit conversation on case 1 (try_mix reports 1.2 % bend, consonant harmony, no voice over voice, bass 5/5). `MixBriefTest` covers the fingerprint rows and the 4-bar lengthening. No real request from the build server; not run on a device.
+  - "interrupted" in the journal (4 mixes on build az) is the adapter's `djAbortInternal`: a seek, a skip or a track load mid-mix. The log does not say which action caused it.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

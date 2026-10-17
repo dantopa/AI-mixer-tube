@@ -763,8 +763,22 @@ class DjEngine(
             return
         }
         val settings = settingsFlow.value
-        // the answer takes seconds, then the mix needs its usual lead: no exit before both have passed
-        val lead = AI_ANSWER_BUDGET_MS + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
+        // Tempos the engine cannot meet (it bends each deck at most OWNER_TEMPO_BEND): Claude cannot fix that, so it is not
+        // asked (the owner's first Opus session paid for 3 answers at 97 -> 125 and 102 -> 84 bpm, all thrown away).
+        val bpmOut = Timelines.of(from).bpm?.value
+        val bpmIn = Timelines.of(to).bpm?.value
+        if (bpmOut != null && bpmIn != null) {
+            val r = bpmIn / bpmOut
+            val gap = listOf(r, r * 2f, r / 2f).minOf { kotlin.math.abs(it - 1f) }
+            if (gap > AI_MAX_TEMPO_GAP) {
+                aiSay("AI: tempos too far apart (%.0f → %.0f bpm), the DJ mixes this one".format(bpmOut, bpmIn))
+                DjLog.i(TAG, "ai mix $fromId -> $toId not asked: tempo gap %.0f %% (%.1f -> %.1f bpm)".format(gap * 100, bpmOut, bpmIn))
+                return
+            }
+        }
+        val withTools = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.tools
+        // the answer takes seconds (more with tools: several turns), then the mix needs its usual lead
+        val lead = (if (withTools) AI_TOOLS_BUDGET_MS else AI_ANSWER_BUDGET_MS) + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
         val position = playbackPositionMs
         val titleFrom = runCatching { titleOf(fromId) }.getOrNull() ?: fromId
         val titleTo = runCatching { titleOf(toId) }.getOrNull() ?: toId
@@ -782,12 +796,26 @@ class DjEngine(
             aiSay("AI: not enough of this track left to mix")
             return
         }
-        val answer = withContext(kotlinx.coroutines.Dispatchers.IO) { claude.ask(brief) }.getOrElse {
-            DjLog.w(TAG, "ai mix: ${it.message}")
-            aiSay("AI: ${it.message}")
-            return
-        }
-        val pts = org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json).getOrElse {
+        val earliest = position + lead
+        val answer =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val tFrom = Timelines.of(from)
+                val tTo = Timelines.of(to)
+                // the fingerprint of both tracks as a picture, for Claude's eye
+                val image = org.simpmusic.dj.android.ai.FingerprintImage.png(brief, tFrom, tTo, titleFrom, titleTo)
+                val tools =
+                    if (withTools) {
+                        org.simpmusic.dj.ai.MixTools(brief, from, to, lyrics?.linesOnTrack(fromId), lyrics?.linesOnTrack(toId), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, planner)
+                    } else {
+                        null
+                    }
+                claude.ask(brief, image, tools)
+            }.getOrElse {
+                DjLog.w(TAG, "ai mix: ${it.message}")
+                aiSay("AI: ${it.message}")
+                return
+            }
+        val pts = (answer.committed?.let { Result.success(it) } ?: org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json)).getOrElse {
             DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
             aiSay("AI: unusable answer (${it.message})")
             return
@@ -797,7 +825,7 @@ class DjEngine(
             return
         }
         val cost = claude.costUsd(answer)
-        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
+        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
         aiKey = k
         aiPoints = pts
         mixNowKey = null
@@ -1264,6 +1292,12 @@ private const val MIX_NOW_SPAN_MS = 20_000L
 
 /** "AI Mix": how long Claude's answer may take; exits before playhead + this + the usual lead are not offered. */
 private const val AI_ANSWER_BUDGET_MS = 25_000L
+
+/** "AI Mix" with tools: several turns (zoom, try, commit) take longer. */
+private const val AI_TOOLS_BUDGET_MS = 60_000L
+
+/** Above this tempo gap (half/double aware) Claude is not asked: the engine bends each deck at most 10 %. */
+private const val AI_MAX_TEMPO_GAP = 0.12f
 
 /** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
 private const val PERFECT_SPAN_MS = 120_000L

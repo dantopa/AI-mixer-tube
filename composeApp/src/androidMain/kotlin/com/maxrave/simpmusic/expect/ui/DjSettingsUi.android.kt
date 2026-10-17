@@ -73,6 +73,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_advanced_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_auto
 import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
+import simpmusic.composeapp.generated.resources.ai_dj_claude_tools
+import simpmusic.composeapp.generated.resources.ai_dj_claude_tools_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_label
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_message
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_none
@@ -272,6 +274,12 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             subtitle = stringResource(Res.string.ai_dj_claude_auto_description),
                             smallSubtitle = true,
                             switch = (claude.auto to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(on) }),
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_claude_tools),
+                            subtitle = stringResource(Res.string.ai_dj_claude_tools_description),
+                            smallSubtitle = true,
+                            switch = (claude.tools to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setTools(on) }),
                         )
                         SettingItem(
                             title = modelTitle,

@@ -8,13 +8,25 @@ import com.anthropic.errors.AnthropicServiceException
 import com.anthropic.errors.PermissionDeniedException
 import com.anthropic.errors.RateLimitException
 import com.anthropic.errors.UnauthorizedException
+import com.anthropic.models.messages.Base64ImageSource
+import com.anthropic.models.messages.ContentBlockParam
 import com.anthropic.models.messages.JsonOutputFormat
+import com.anthropic.models.messages.MessageParam
+import com.anthropic.models.messages.Tool
+import com.anthropic.models.messages.ToolResultBlockParam
 import com.anthropic.models.messages.MessageCreateParams
 import com.anthropic.models.messages.OutputConfig
 import com.anthropic.models.messages.StopReason
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.simpmusic.dj.ai.MixBrief
+import org.simpmusic.dj.ai.MixTools
 import org.simpmusic.dj.android.log.DjLog
 import java.time.Duration
+import java.util.Base64
 
 /**
  * Asks Claude where to mix one pair, through the official Anthropic Java SDK (Messages API, structured output: the answer
@@ -23,7 +35,17 @@ import java.time.Duration
  */
 class ClaudeMixClient {
     /** Claude's answer as text (the JSON), with what it cost. */
-    class Answer(val json: String, val inputTokens: Long, val outputTokens: Long, val model: ClaudeModel, val elapsedMs: Long)
+    class Answer(
+        val json: String,
+        val inputTokens: Long,
+        val outputTokens: Long,
+        val model: ClaudeModel,
+        val elapsedMs: Long,
+        /** Tool mode: the committed points (already validated), how many turns and planner tries it took. */
+        val committed: org.simpmusic.dj.model.AiMixPoints? = null,
+        val turns: Int = 1,
+        val tries: Int = 0,
+    )
 
     @Volatile private var client: Pair<String, AnthropicClient>? = null
 
@@ -34,34 +56,77 @@ class ClaudeMixClient {
         return c
     }
 
-    fun ask(brief: MixBrief.Brief): Result<Answer> {
+    /**
+     * One mix decision. With [tools] Claude may zoom, try mixes on the planner and must commit (the tool loop below);
+     * without, it answers once with JSON ([MixBrief.SCHEMA]). [image] (the fingerprint PNG) rides in the first message.
+     */
+    fun ask(brief: MixBrief.Brief, image: ByteArray? = null, tools: MixTools? = null): Result<Answer> {
         val apiKey = ClaudeSettings.apiKey() ?: return Result.failure(IllegalStateException("no Claude API key (Settings -> AI DJ)"))
         val model = ClaudeSettings.state.value.model
-        val schema = JsonOutputFormat.Schema.builder().apply { MixBrief.SCHEMA.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
-        val params =
-            MessageCreateParams.builder()
-                .model(model.id)
-                .maxTokens(MAX_TOKENS)
-                .system(brief.system)
-                .addUserMessage(brief.user)
-                .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).build())
-                .build()
+        val first = ArrayList<ContentBlockParam>()
+        image?.let { first += ContentBlockParam.ofImage(Base64ImageSource.builder().data(Base64.getEncoder().encodeToString(it)).mediaType(Base64ImageSource.MediaType.IMAGE_PNG).build()) }
+        first += ContentBlockParam.ofText(brief.user)
+        val messages = arrayListOf(MessageParam.builder().role(MessageParam.Role.USER).contentOfBlockParams(first).build())
         val t0 = System.nanoTime()
-        DjLog.i(TAG, "asking ${model.id}: brief ${brief.user.length} chars, exit bars ${brief.exitFrom}..${brief.exitTo}")
+        DjLog.i(TAG, "asking ${model.id}: brief ${brief.user.length} chars, image ${image?.size ?: 0} bytes, ${if (tools != null) "with tools" else "one answer"}, exit bars ${brief.exitFrom}..${brief.exitTo}")
+        var inTok = 0L
+        var outTok = 0L
         return try {
-            val m = clientFor(apiKey).messages().create(params)
-            val elapsed = (System.nanoTime() - t0) / 1_000_000
-            val stop = m.stopReason().orElse(null)
-            when (stop) {
-                StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
-                StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
-                else -> {}
+            val client = clientFor(apiKey)
+            val turns = if (tools != null) MixTools.MAX_TURNS else 1
+            for (turn in 1..turns) {
+                val b =
+                    MessageCreateParams.builder()
+                        .model(model.id)
+                        .maxTokens(MAX_TOKENS)
+                        .system(if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system)
+                        .messages(messages)
+                if (tools != null) {
+                    MixTools.SPECS.forEach { b.addTool(toolOf(it)) }
+                } else {
+                    val schema = JsonOutputFormat.Schema.builder().apply { MixBrief.SCHEMA.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
+                    b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).build())
+                }
+                val m = client.messages().create(b.build())
+                inTok += m.usage().inputTokens()
+                outTok += m.usage().outputTokens()
+                when (m.stopReason().orElse(null)) {
+                    StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
+                    StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
+                    else -> {}
+                }
+                val elapsed = { (System.nanoTime() - t0) / 1_000_000 }
+                if (tools == null) {
+                    val text = m.content().mapNotNull { blk -> blk.text().orElse(null)?.text() }.joinToString("").trim()
+                    if (text.isEmpty()) return Result.failure(IllegalStateException("Claude gave no answer"))
+                    DjLog.i(TAG, "answer from ${model.id} in ${elapsed()} ms ($inTok in / $outTok out tokens): $text")
+                    return Result.success(Answer(text, inTok, outTok, model, elapsed()))
+                }
+                val uses = m.content().mapNotNull { blk -> blk.toolUse().orElse(null) }
+                if (uses.isEmpty()) {
+                    val said = m.content().mapNotNull { blk -> blk.text().orElse(null)?.text() }.joinToString(" ").take(200)
+                    return Result.failure(IllegalStateException("Claude stopped without committing a mix ($said)"))
+                }
+                messages += m.toParam()
+                val results = ArrayList<ContentBlockParam>()
+                for (u in uses) {
+                    val input = jsonOf(u._input().convert(Any::class.java)).toString()
+                    when (val o = tools.call(u.name(), input)) {
+                        is MixTools.Outcome.Committed -> {
+                            val p = o.points
+                            val json = """{"exit_ms":${p.exitMs},"entry_ms":${p.entryMs},"overlap_bars":${p.overlapBars},"why":${JsonPrimitive(p.why)}}"""
+                            DjLog.i(TAG, "commit from ${model.id} after $turn turns and ${tools.tries} tries in ${elapsed()} ms ($inTok in / $outTok out tokens): $input")
+                            return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries))
+                        }
+                        is MixTools.Outcome.Result -> {
+                            DjLog.i(TAG, "turn $turn: ${u.name()} $input -> ${o.text.lineSequence().firstOrNull()?.take(160)}")
+                            results += ContentBlockParam.ofToolResult(ToolResultBlockParam.builder().toolUseId(u.id()).content(o.text).isError(o.isError).build())
+                        }
+                    }
+                }
+                messages += MessageParam.builder().role(MessageParam.Role.USER).contentOfBlockParams(results).build()
             }
-            val text = m.content().mapNotNull { b -> b.text().orElse(null)?.text() }.joinToString("").trim()
-            if (text.isEmpty()) return Result.failure(IllegalStateException("Claude gave no answer"))
-            val u = m.usage()
-            DjLog.i(TAG, "answer from ${model.id} in $elapsed ms (${u.inputTokens()} in / ${u.outputTokens()} out tokens): $text")
-            Result.success(Answer(text, u.inputTokens(), u.outputTokens(), model, elapsed))
+            Result.failure(IllegalStateException("no commit after ${MixTools.MAX_TURNS} turns"))
         } catch (e: UnauthorizedException) {
             Result.failure(IllegalStateException("the API key was refused (401)"))
         } catch (e: PermissionDeniedException) {
@@ -77,6 +142,37 @@ class ClaudeMixClient {
         }
     }
 
+    private fun toolOf(spec: MixTools.Spec): Tool {
+        @Suppress("UNCHECKED_CAST")
+        val props = spec.schema["properties"] as Map<String, Any>
+        val propsBuilder = Tool.InputSchema.Properties.builder()
+        props.forEach { (k, v) -> propsBuilder.putAdditionalProperty(k, JsonValue.from(v)) }
+        @Suppress("UNCHECKED_CAST")
+        return Tool.builder()
+            .name(spec.name)
+            .description(spec.description)
+            .strict(true)
+            .inputSchema(
+                Tool.InputSchema.builder()
+                    .properties(propsBuilder.build())
+                    .required(spec.schema["required"] as List<String>)
+                    .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                    .build(),
+            )
+            .build()
+    }
+
+    /** A Jackson-converted value (maps, lists, numbers, strings) as kotlinx JSON, for [MixTools.call]. */
+    private fun jsonOf(v: Any?): JsonElement =
+        when (v) {
+            null -> JsonNull
+            is Map<*, *> -> JsonObject(v.entries.associate { (k, x) -> k.toString() to jsonOf(x) })
+            is List<*> -> JsonArray(v.map { jsonOf(it) })
+            is Number -> JsonPrimitive(v)
+            is Boolean -> JsonPrimitive(v)
+            else -> JsonPrimitive(v.toString())
+        }
+
     /** Cost of [a] in US dollars at the model's list price. */
     fun costUsd(a: Answer): Double {
         val (inPerM, outPerM) =
@@ -90,8 +186,8 @@ class ClaudeMixClient {
 
     private companion object {
         const val TAG = "ai"
-        /** The answer is a small JSON; the rest is room for the model's own (adaptive) thinking. */
+        /** The answer is a small JSON or a tool call; the rest is room for the model's own (adaptive) thinking. */
         const val MAX_TOKENS = 8_000L
-        const val TIMEOUT_S = 60L
+        const val TIMEOUT_S = 90L
     }
 }
