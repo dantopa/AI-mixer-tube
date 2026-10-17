@@ -50,7 +50,8 @@ object DjMixViewBuilder {
         val end = ceilDiv(max(settle + AFTER_SETTLE_MS, MIN_AFTER_T0_MS), step) * step
         val n = ((end - start) / step).toInt() + 1
 
-        val outSource = { t: Double -> tl.outgoingSourceAt(t) }
+        // a DJ loop: the picture shows what is heard, the looped bars again and again
+        val outSource = { t: Double -> tl.outgoingSourceAt(t).let { v -> plan.outLoop?.realMs(v) ?: v } }
         val inSource = { t: Double -> tl.incomingSourceAt(t) }
 
         val out = deck(

@@ -124,7 +124,9 @@ class WindowTimeline private constructor(
     /** Source range of the outgoing track the renderer needs, margin included. */
     fun outgoingDecodeRange(): LongRange {
         val from = outgoingSourceAtWindowStart - WindowTuning.DECODE_MARGIN_MS
-        val to = outgoingSourceAt(plan.overlapMs.toDouble()) + WindowTuning.DECODE_MARGIN_MS
+        val virtualTo = outgoingSourceAt(plan.overlapMs.toDouble())
+        // a DJ loop only ever reads its own bars (and the seam's few ms after them)
+        val to = (plan.outLoop?.let { minOf(virtualTo, it.endMs + 1_000.0) } ?: virtualTo) + WindowTuning.DECODE_MARGIN_MS
         return from.toLong().coerceAtLeast(0L)..to.toLong()
     }
 

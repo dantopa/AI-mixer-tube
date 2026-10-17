@@ -55,4 +55,20 @@ class MixToolsTest {
             assertEquals((s.schema["properties"] as Map<String, Any>).keys.toList(), s.schema["required"], s.name)
         }
     }
+
+    @Test
+    fun tryMixTakesTheMovesAndMeasuresALoop() {
+        val exitBar = brief.outBarsMs.indexOfFirst { it >= 93_000L }
+        val entryBar = brief.inBarsMs.indexOfFirst { it >= 80_500L }
+        val t = text(
+            tools.call(
+                MixTools.TRY,
+                """{"exit_bar":$exitBar,"entry_bar":$entryBar,"overlap_bars":8,"bass_swap_bar":4,"fade":"hold_then_drop","filter":"lowpass_out","echo_out":true,"loop_bars":2}""",
+            ),
+        )
+        println(t)
+        assertTrue(t.startsWith("OK"), t)
+        assertTrue(t.contains("the outgoing loops"), t)
+        assertTrue(t.contains("moves: ") && t.contains("echo out"), t)
+    }
 }

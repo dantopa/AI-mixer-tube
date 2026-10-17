@@ -2,12 +2,17 @@ package org.simpmusic.dj.ai
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.simpmusic.dj.model.AiMixPoints
+import org.simpmusic.dj.model.FadeMove
+import org.simpmusic.dj.model.FilterMove
+import org.simpmusic.dj.model.MixMoves
 import org.simpmusic.dj.model.TimeRange
+import org.simpmusic.dj.planner.MixMarks
 import org.simpmusic.dj.timeline.LyricLine
 import org.simpmusic.dj.timeline.TrackTimeline
 import kotlin.math.roundToInt
@@ -40,19 +45,42 @@ object MixBrief {
         val entryTo: Int,
     )
 
-    /** The JSON schema of the answer (structured output): bar numbers and an overlap, plus one sentence of why. */
-    val SCHEMA: Map<String, Any> =
+    private val FADES = mapOf("smooth" to FadeMove.SMOOTH, "hold_then_drop" to FadeMove.HOLD_THEN_DROP, "early_handover" to FadeMove.EARLY_HANDOVER)
+    private val FILTERS = mapOf("none" to FilterMove.NONE, "lowpass_out" to FilterMove.LOWPASS_OUT, "highpass_out" to FilterMove.HIGHPASS_OUT, "highpass_in" to FilterMove.HIGHPASS_IN)
+
+    /**
+     * The mixer moves Claude may make (see [MixMoves]), as JSON-schema properties shared by the one-answer schema and the
+     * tools. All required (strict schemas): "-1", "smooth", "none", false and 0 mean "the engine's own mix".
+     */
+    val MOVES_PROPS: Map<String, Any> =
         mapOf(
-            "type" to "object",
-            "properties" to mapOf(
-                "exit_bar" to mapOf("type" to "integer", "description" to "Bar of the OUTGOING table where the mix starts (the incoming comes in on its downbeat)."),
-                "entry_bar" to mapOf("type" to "integer", "description" to "Bar of the INCOMING table that plays at that moment."),
-                "overlap_bars" to mapOf("type" to "integer", "description" to "How many bars both tracks play together before only the incoming is left."),
-                "why" to mapOf("type" to "string", "description" to "One short sentence: what overlaps what, in musical terms."),
-            ),
-            "required" to listOf("exit_bar", "entry_bar", "overlap_bars", "why"),
-            "additionalProperties" to false,
+            "bass_swap_bar" to mapOf("type" to "integer", "description" to "Bar of the overlap (0 = its first bar) where the basslines swap: before it only the outgoing's bass plays, after it only the incoming's. -1 = the middle."),
+            "fade" to mapOf("type" to "string", "enum" to FADES.keys.toList(), "description" to "smooth = equal-power over the whole overlap; hold_then_drop = the outgoing stays full and drops over the last bars (the incoming is up by the middle); early_handover = the incoming is up within the first quarter and the outgoing is gone by three quarters."),
+            "filter" to mapOf("type" to "string", "enum" to FILTERS.keys.toList(), "description" to "none; lowpass_out = the outgoing sinks under a low-pass; highpass_out = the outgoing washes out from the bass up; highpass_in = the incoming enters thin and opens up by the bass swap."),
+            "echo_out" to mapOf("type" to "boolean", "description" to "Throw a beat-synced echo on the outgoing as its fader closes: its last beat rings out over the incoming."),
+            "loop_bars" to mapOf("type" to "integer", "description" to "0, 1, 2 or 4. Loop this many bars of the outgoing, starting at exit_bar, for the whole overlap (0 = no loop). A loop of an instrumental bar with the bass makes a clean bed under the incoming when the outgoing has no long instrumental; at most ~9 s (halved when longer)."),
         )
+
+    /** The moves of an answer or a tool call; missing fields are the engine's defaults. */
+    fun movesOf(o: JsonObject): MixMoves {
+        val bar = o["bass_swap_bar"]?.jsonPrimitive?.intOrNull?.takeIf { it >= 0 }
+        val fade = o["fade"]?.jsonPrimitive?.contentOrNull?.let { FADES[it] } ?: FadeMove.SMOOTH
+        val filter = o["filter"]?.jsonPrimitive?.contentOrNull?.let { FILTERS[it] } ?: FilterMove.NONE
+        val echo = o["echo_out"]?.jsonPrimitive?.booleanOrNull ?: false
+        // (the largest DJ loop length not above what was asked: 3 -> 2, 8 -> 4)
+        val loop = o["loop_bars"]?.jsonPrimitive?.intOrNull?.let { n -> MixMoves.LOOP_BARS.lastOrNull { it <= n } } ?: 0
+        return MixMoves(bassSwapBar = bar, fade = fade, filter = filter, echoOut = echo, loopBars = loop)
+    }
+
+    /** The JSON schema of the answer (structured output): bar numbers and an overlap, the moves, one sentence of why. */
+    val SCHEMA: Map<String, Any> by lazy {
+        val props = mapOf(
+            "exit_bar" to mapOf("type" to "integer", "description" to "Bar of the OUTGOING table where the mix starts (the incoming comes in on its downbeat)."),
+            "entry_bar" to mapOf("type" to "integer", "description" to "Bar of the INCOMING table that plays at that moment."),
+            "overlap_bars" to mapOf("type" to "integer", "description" to "How many bars both tracks play together before only the incoming is left."),
+        ) + MOVES_PROPS + mapOf("why" to mapOf("type" to "string", "description" to "One short sentence: what overlaps what, in musical terms."))
+        mapOf("type" to "object", "properties" to props, "required" to props.keys.toList(), "additionalProperties" to false)
+    }
 
     val SYSTEM: String =
         """
@@ -97,6 +125,25 @@ object MixBrief {
         8. When a track's bar lines are only a guess ("?") or its voice is unknown ("-"), keep the overlap at 4-8 bars: a
            long overlap whose 1s may not land together, or with voices nobody can see, sounds wrong (the engine caps it
            at 8 bars then).
+        9. The owner's marks and ratings, when given after the tables, are the owner's own ear: use the marked points, and
+           lean towards the kind of mix they liked (length, where in the songs, the moves) and away from what they did
+           not like.
+
+        You also have the DJ's hands on the mixer (leave them at "-1 / smooth / none / false / 0" when the plain mix is
+        right; use a move when it makes the transition sound better, not to show off):
+        - bass_swap_bar: the bar of the overlap where the basslines swap. Put it where the incoming's bass should take
+          over: on a phrase line, or right where the outgoing's bass or groove ends.
+        - fade: hold_then_drop keeps the outgoing's energy up to the last bars (a groove that should carry the floor until
+          the incoming's phrase 1); early_handover lets the incoming take over quickly (the outgoing is about to sing or
+          thin out).
+        - filter: lowpass_out sinks the outgoing behind the incoming (a busy or bright outgoing); highpass_out washes it
+          out (a big ending); highpass_in brings the incoming in thin (its intro would crowd the outgoing).
+        - echo_out: the outgoing's last beat repeats over the incoming, a classic ending; good when the outgoing would
+          otherwise stop on a voice or a hit.
+        - loop_bars: the outgoing repeats 1, 2 or 4 bars from exit_bar for the whole overlap. Use it when the outgoing has
+          no instrumental long enough: loop an instrumental bar WITH the bass (no voice in it) and lay the incoming over
+          it, a bridge between the two. Loop whole phrases' bars (2 or 4) when you can; the loop must start on a bar
+          whose groove repeats well.
 
         Use only bar numbers from the tables and stay inside the allowed ranges given. Answer with the JSON only.
         """.trimIndent()
@@ -124,7 +171,7 @@ object MixBrief {
      * The brief for [out] -> [inc], or null when a track has no beat grid (nothing to count bars on). Exits are allowed from
      * [earliestExitMs] (the playhead plus the time the answer and the cue take) to [EXIT_TAIL_BARS] before the end.
      */
-    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long): Brief? {
+    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long, taste: String? = null): Brief? {
         val outBars = bars(out.timeline) ?: return null
         val inBars = bars(inc.timeline) ?: return null
         val exitFrom = outBars.indexOfFirst { it >= earliestExitMs }.takeIf { it >= 0 } ?: return null
@@ -141,9 +188,80 @@ object MixBrief {
                 append("\nAllowed: exit_bar ").append(exitFrom).append("..").append(exitTo)
                 append(" (earlier bars have already played or come too soon), entry_bar 0..").append(entryTo)
                 append(", overlap_bars ").append(MIN_OVERLAP_BARS).append("..32. The owner's usual overlap is ").append(requestedBars).append(" bars.\n")
+                marks(out, outBars, inc, inBars)?.let { append('\n').append(it) }
+                taste?.takeIf { it.isNotBlank() }?.let { append('\n').append(it.trimEnd()).append('\n') }
             }
         return Brief(SYSTEM, user, outBars, inBars, exitFrom, exitTo, entryTo)
     }
+
+    /**
+     * The owner's own mix marks on these two tracks (marked by ear, see [MixMarks]): where the outgoing may start to
+     * leave, where the incoming starts when mixed into, from where it plays alone. Claude is told to honour them.
+     */
+    private fun marks(out: Track, outBars: List<Long>, inc: Track, inBars: List<Long>): String? {
+        fun bar(bars: List<Long>, t: Long) = bars.indices.minByOrNull { kotlin.math.abs(bars[it] - t) }
+        val mo = runCatching { MixMarks.of(out.timeline.refined.videoId) }.getOrNull()
+        val mi = runCatching { MixMarks.of(inc.timeline.refined.videoId) }.getOrNull()
+        val lines = listOfNotNull(
+            mo?.exitMs?.let { "the outgoing's exit at bar ${bar(outBars, it)} (${clock(it)})" },
+            mi?.entryMs?.let { "the incoming's entry at bar ${bar(inBars, it)} (${clock(it)})" },
+            mi?.soloMs?.let { "the incoming plays alone from bar ${bar(inBars, it)} (${clock(it)})" },
+        )
+        if (lines.isEmpty()) return null
+        return "THE OWNER MARKED, by ear: " + lines.joinToString("; ") + ". Use these points unless they are outside the allowed ranges.\n"
+    }
+
+    /** One mix the owner rated (👍 / 👎), as Claude reads it in [taste]. Null fields are left out. */
+    class RatedMix(
+        val liked: Boolean,
+        /** Who placed it: AI_MIX, REGULAR, PERFECT, STRUCTURE, OWNER... */
+        val source: String?,
+        val overlapS: Double?,
+        val exitFraction: Float?,
+        val entryFraction: Float?,
+        val phraseOnPhrase: Boolean?,
+        val bassSwap: Boolean?,
+        val voiceOverVoiceS: Double?,
+        val harmonyExcess: Float?,
+        val bpm: Float?,
+        /** The moves and the AI's why, when it was an AI mix (from the plan's reason). */
+        val moves: String? = null,
+        val why: String? = null,
+        val titles: String? = null,
+    )
+
+    /**
+     * The owner's taste as Claude reads it: their latest ratings, liked and disliked, as the numbers the planner kept
+     * (overlap, where in each song, phrase on phrase, voices, harmony, moves). Few-shot memory: no training, just
+     * examples in the prompt. Null when there are none.
+     */
+    fun taste(mixes: List<RatedMix>): String? {
+        if (mixes.isEmpty()) return null
+        return buildString {
+            append("THE OWNER'S RATINGS of recent mixes, newest first (learn what they like, avoid what they did not):\n")
+            for (m in mixes.take(MAX_TASTE)) {
+                append(if (m.liked) "LIKED" else "DISLIKED")
+                m.source?.let { append(' ').append(it) }
+                m.titles?.let { append(" (").append(it.take(70)).append(')') }
+                append(':')
+                val parts = listOfNotNull(
+                    m.overlapS?.let { "%.0f s overlap".format(java.util.Locale.ROOT, it) },
+                    m.bpm?.let { "%.0f bpm".format(java.util.Locale.ROOT, it) },
+                    m.exitFraction?.let { "exit at %d%% of the outgoing".format(java.util.Locale.ROOT, (it * 100).roundToInt()) },
+                    m.entryFraction?.let { "entry at %d%% of the incoming".format(java.util.Locale.ROOT, (it * 100).roundToInt()) },
+                    m.phraseOnPhrase?.let { if (it) "phrase on phrase" else "not phrase on phrase" },
+                    m.bassSwap?.let { if (it) "bass swap" else "no bass swap" },
+                    m.voiceOverVoiceS?.let { if (it < 0.5) "no voice over voice" else "%.1f s voice over voice".format(java.util.Locale.ROOT, it) },
+                    m.harmonyExcess?.let { if (it < 0.025f) "consonant" else if (it < 0.07f) "tense harmony" else "harmony clash" },
+                    m.moves?.let { "moves: $it" },
+                    m.why?.let { "why: \"${it.take(120)}\"" },
+                )
+                append(' ').append(parts.joinToString(", ")).append('\n')
+            }
+        }
+    }
+
+    private const val MAX_TASTE = 12
 
     /** Claude's JSON answer as points on both tracks' clocks, or why it cannot be used. */
     fun parse(brief: Brief, json: String): Result<AiMixPoints> =
@@ -159,8 +277,10 @@ object MixBrief {
             require(overlap >= 1) { "overlap_bars $overlap" }
             // at least MIN_OVERLAP_BARS (a model asked for 1-bar mixes on the owner's first session: ~3 s, not heard as a
             // mix), never more than the outgoing has bars left
-            val room = (brief.outBarsMs.size - 1 - exit).coerceAtLeast(1)
-            AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceIn(MIN_OVERLAP_BARS, 32).coerceAtMost(room), why.ifEmpty { "no reason given" })
+            val moves = movesOf(o)
+            // (a loop makes its own room)
+            val room = if (moves.loopBars > 0) 32 else (brief.outBarsMs.size - 1 - exit).coerceAtLeast(1)
+            AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceIn(MIN_OVERLAP_BARS, 32).coerceAtMost(room), why.ifEmpty { "no reason given" }, moves)
         }
 
     // ---------------------------------------------------------------------------------------------

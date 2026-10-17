@@ -3,6 +3,7 @@ package org.simpmusic.dj.planner
 import org.simpmusic.dj.timeline.Timelines
 import org.simpmusic.dj.timeline.TrackTimeline
 import org.simpmusic.dj.model.TimeRange
+import org.simpmusic.dj.model.SourceLoop
 import org.simpmusic.dj.model.AiMixPoints
 import org.simpmusic.dj.analysis.BarPhase
 import org.simpmusic.dj.analysis.Harmony
@@ -68,6 +69,8 @@ class DjTransitionPlanner : TransitionPlanner {
         val latest = constraints.latestExitMs.coerceAtLeast(earliest)
         return try {
             when {
+                constraints.aiPoints != null && constraints.aiPoints.moves.loopBars > 0 && from != null && to != null ->
+                    planLooped(from, to, s.copy(mixPoint = MixPoint.ANYWHERE), earliest, latest, voc, constraints.aiPoints)
                 constraints.aiPoints != null -> planUnsafe(from, to, s.copy(mixPoint = MixPoint.ANYWHERE), earliest, latest, voc, ai = constraints.aiPoints)
                 constraints.perfect -> planPerfect(from, to, s, earliest, latest, voc)
                 constraints.preferPerfect && s.mixPoint == MixPoint.ANYWHERE -> {
@@ -638,6 +641,45 @@ class DjTransitionPlanner : TransitionPlanner {
         return best.takeIf { abs(it - t) <= c.medianBeatMs / 2 + 1 }
     }
 
+    /**
+     * Claude's points with a DJ loop on the outgoing ([MixMoves.loopBars]): the loop starts on the exit beat and repeats
+     * for the whole overlap. The mix is planned on [LoopedAnalysis] (the outgoing as it will sound, looped), so the beat
+     * lock, the bass, the voices and the harmony measured are the loop's; the plan then carries [TransitionPlan.outLoop]
+     * for the renderer. A loop that does not fit (too long for the deck's 12 s buffer, past the end of the grid) is
+     * halved, then dropped; when the looped plan does not work the points are planned without a loop, and the reason says
+     * why.
+     */
+    private fun planLooped(from: TrackAnalysis, to: TrackAnalysis, s: DjSettings, earliest: Long, latest: Long, voc: PairVocals, ai: AiMixPoints): TransitionPlan {
+        val noLoop = ai.copy(moves = ai.moves.copy(loopBars = 0))
+        fun without(why: String): TransitionPlan {
+            val p = planUnsafe(from, to, s, earliest, latest, voc, ai = noLoop)
+            return p.copy(reason = p.reason + LOOP_NOT_USED + why)
+        }
+        val out = TrackContext(from)
+        val beats = from.beatTimesMs?.value ?: return without("no beat grid")
+        val exit = markPoint(out, ai.exitMs) ?: return without("no beat near the exit")
+        val i0 = beats.indices.minByOrNull { abs(beats[it] - exit) } ?: return without("no beat near the exit")
+        val bpb = out.beatsPerBar.coerceAtLeast(1)
+        var bars = ai.moves.loopBars
+        var loop: SourceLoop? = null
+        while (bars >= 1) {
+            val i1 = i0 + bars * bpb
+            if (i1 < beats.size && beats[i1] - beats[i0] in 1..MAX_LOOP_MS) { loop = SourceLoop(beats[i0].toLong(), beats[i1].toLong()); break }
+            bars /= 2
+        }
+        if (loop == null) return without("a ${ai.moves.loopBars}-bar loop from the exit does not fit (longer than ${MAX_LOOP_MS / 1000} s, or past the end of the grid)")
+        val repeats = ceil(LOOP_COVER_BARS.toDouble() / bars).toInt()
+        val looped = LoopedAnalysis.of(from, loop, voc.out, repeats)
+        val lv = PairVocals(looped.vocals, voc.inc, voc.note)
+        val p = planUnsafe(looped.analysis, to, s, earliest, latest, lv, ai = noLoop.copy(exitMs = loop.startMs))
+        if (p.meta?.source != PlanSource.AI_MIX || p.kind != PlanKind.BEAT_MATCHED) return without(p.reason.substringAfter(AiMixPoints.NOT_USED, "the looped mix could not be planned").take(160))
+        val note = "loop %d bar%s %.1f-%.1f s under the overlap%s; ".format(
+            java.util.Locale.ROOT, bars, if (bars == 1) "" else "s", loop.startMs / 1000.0, loop.endMs / 1000.0,
+            if (bars < ai.moves.loopBars) " (halved from ${ai.moves.loopBars} to fit)" else "",
+        )
+        return p.copy(outLoop = loop, reason = p.reason.replaceFirst(AiMixPoints.TAG, AiMixPoints.TAG + note))
+    }
+
     /** Overlap units for [bars] in this pair's mode (bars, or beats when the bars are not trusted on both tracks). */
     private fun ownerUnits(c: Ctx, bars: Int): Int = if (c.barsMode) bars else bars * c.out.beatsPerBar
 
@@ -685,7 +727,10 @@ class DjTransitionPlanner : TransitionPlanner {
         val t = chooseTempo(localPeriod(out, exit, ahead = true), localPeriod(inc, entry, ahead = true), max(c.settings.maxTempoBend, OWNER_TEMPO_BEND).toDouble())
             ?: return Attempt.fail("tempos at the AI's points are beyond the bend (%.1f vs %.1f bpm)".format(60000.0 / localPeriod(out, exit, true), 60000.0 / localPeriod(inc, entry, true)))
         val a = beatAttempt(c.owned(), Pick(exit, "downbeat", false), Pick(entry, "downbeat", false), t, units = units)
-        val plan = a.plan ?: return Attempt.fail(a.fail ?: "?")
+        val built = a.plan ?: return Attempt.fail(a.fail ?: "?")
+        // Claude's hands on the mixer: the same points and rates, reshaped lanes
+        val moved = MovesApplier.apply(built, p.moves, 60_000.0 / (built.mixBpm ?: return Attempt.fail("no mix tempo")).toDouble(), out.beatsPerBar)
+        val plan = moved.plan.let { m -> if (moved.notes.isEmpty()) m else m.copy(reason = m.reason + "; moves: " + moved.notes.joinToString("; ")) }
         return Attempt.ok(
             plan.copy(reason = plan.reason.replace(CLAMPED_NOTE, "")).withReason(
                 AiMixPoints.TAG + "exit %.1f s, entry %.1f s, %s%s (%s); ".format(
@@ -1448,6 +1493,15 @@ class DjTransitionPlanner : TransitionPlanner {
 
         /** How much of the AI's why goes into the plan's reason. */
         private const val AI_WHY_CHARS = 160
+
+        /** The longest DJ loop (ms): the loop and its seam must sit in the deck's 12 s ring at once. */
+        private const val MAX_LOOP_MS = 9_000
+
+        /** A loop is repeated to cover this many bars (the longest AI overlap plus the incoming's ramp back). */
+        private const val LOOP_COVER_BARS = 48
+
+        /** Appended to the reason when Claude asked for a loop that was not used. */
+        const val LOOP_NOT_USED = " | loop not used: "
 
         private val CLAMPED_NOTE = Regex(""" \(clamped from \d+(, the beat grid was irregular over a longer overlap)?\)""")
         private val DEBUG_STRUCTURE = System.getenv("DJ_DEBUG_STRUCTURE") != null

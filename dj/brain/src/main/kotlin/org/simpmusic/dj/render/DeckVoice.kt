@@ -4,6 +4,7 @@ import org.simpmusic.dj.model.DeckClock
 import org.simpmusic.dj.model.DeckPlan
 import org.simpmusic.dj.model.EchoOutSpec
 import org.simpmusic.dj.model.ParamCurve
+import org.simpmusic.dj.model.SourceLoop
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
@@ -71,6 +72,8 @@ class DeckVoice(val sampleRate: Int, val blockFrames: Int = OfflineMixRenderer.O
         val effect: OfflineMixRenderer.BlockEffect? = null,
         val handoffFrame: Long = Long.MAX_VALUE,
         sampleRate: Int,
+        /** The deck's source is looped ([LoopSource]): positions past the loop's end play the loop again. */
+        val loop: SourceLoop? = null,
     ) {
         internal val useHp = lanes.lowCutHz.keys.any { it.value > 20.5f }
         internal val useLp = lanes.highCutHz.keys.any { it.value < 19_500f }
@@ -354,8 +357,20 @@ class DeckVoice(val sampleRate: Int, val blockFrames: Int = OfflineMixRenderer.O
         }
     }
 
-    private fun currentSourceFrameRounded(): Long {
+    /**
+     * The REAL source frame of the next output frame: [currentSourceFrame], mapped back into a program's loop. What the
+     * deck's ring must still hold, and where the deck resumes after a program is called off.
+     */
+    fun currentRealSourceFrame(): Double {
         val s = currentSourceFrame()
+        val loop = program?.loop?.takeIf { mode == Mode.PROGRAM } ?: return s
+        if (s.isNaN()) return s
+        val v = floor(s).toLong()
+        return loop.realFrame(v, sampleRate) + (s - v)
+    }
+
+    private fun currentSourceFrameRounded(): Long {
+        val s = currentRealSourceFrame()
         return if (s.isNaN()) parkedFrame else floor(s + 0.5).toLong()
     }
 

@@ -9,6 +9,8 @@ import com.anthropic.errors.PermissionDeniedException
 import com.anthropic.errors.RateLimitException
 import com.anthropic.errors.UnauthorizedException
 import com.anthropic.models.messages.Base64ImageSource
+import com.anthropic.models.messages.CacheControlEphemeral
+import com.anthropic.models.messages.TextBlockParam
 import com.anthropic.models.messages.ContentBlockParam
 import com.anthropic.models.messages.JsonOutputFormat
 import com.anthropic.models.messages.MessageParam
@@ -45,6 +47,9 @@ class ClaudeMixClient {
         val committed: org.simpmusic.dj.model.AiMixPoints? = null,
         val turns: Int = 1,
         val tries: Int = 0,
+        /** Prompt-cache tokens: read back (10 % of the input price) and written (125 %); [inputTokens] are the uncached rest. */
+        val cacheReadTokens: Long = 0,
+        val cacheWriteTokens: Long = 0,
     )
 
     @Volatile private var client: Pair<String, AnthropicClient>? = null
@@ -71,6 +76,11 @@ class ClaudeMixClient {
         DjLog.i(TAG, "asking ${model.id}: brief ${brief.user.length} chars, image ${image?.size ?: 0} bytes, ${if (tools != null) "with tools" else "one answer"}, exit bars ${brief.exitFrom}..${brief.exitTo}")
         var inTok = 0L
         var outTok = 0L
+        var cacheRead = 0L
+        var cacheWrite = 0L
+        val ephemeral = CacheControlEphemeral.builder().build()
+        // the system prompt is the same for every pair: cached on its own, it is read back by the next pair's question
+        val system = TextBlockParam.builder().text(if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system).cacheControl(ephemeral).build()
         return try {
             val client = clientFor(apiKey)
             val turns = if (tools != null) MixTools.MAX_TURNS else 1
@@ -79,8 +89,11 @@ class ClaudeMixClient {
                     MessageCreateParams.builder()
                         .model(model.id)
                         .maxTokens(MAX_TOKENS)
-                        .system(if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system)
+                        .systemOfTextBlockParams(listOf(system))
                         .messages(messages)
+                // tool mode: every turn re-sends the brief, the picture and the turns before; automatic caching puts the
+                // breakpoint on the last block, so each turn reads all of that back from the cache
+                if (tools != null) b.cacheControl(ephemeral)
                 if (tools != null) {
                     MixTools.SPECS.forEach { b.addTool(toolOf(it)) }
                 } else {
@@ -90,6 +103,8 @@ class ClaudeMixClient {
                 val m = client.messages().create(b.build())
                 inTok += m.usage().inputTokens()
                 outTok += m.usage().outputTokens()
+                cacheRead += m.usage().cacheReadInputTokens().orElse(0L)
+                cacheWrite += m.usage().cacheCreationInputTokens().orElse(0L)
                 when (m.stopReason().orElse(null)) {
                     StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
                     StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
@@ -99,8 +114,8 @@ class ClaudeMixClient {
                 if (tools == null) {
                     val text = m.content().mapNotNull { blk -> blk.text().orElse(null)?.text() }.joinToString("").trim()
                     if (text.isEmpty()) return Result.failure(IllegalStateException("Claude gave no answer"))
-                    DjLog.i(TAG, "answer from ${model.id} in ${elapsed()} ms ($inTok in / $outTok out tokens): $text")
-                    return Result.success(Answer(text, inTok, outTok, model, elapsed()))
+                    DjLog.i(TAG, "answer from ${model.id} in ${elapsed()} ms ($inTok in / $outTok out / $cacheRead cache read / $cacheWrite cache write tokens): $text")
+                    return Result.success(Answer(text, inTok, outTok, model, elapsed(), cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite))
                 }
                 val uses = m.content().mapNotNull { blk -> blk.toolUse().orElse(null) }
                 if (uses.isEmpty()) {
@@ -115,8 +130,8 @@ class ClaudeMixClient {
                         is MixTools.Outcome.Committed -> {
                             val p = o.points
                             val json = """{"exit_ms":${p.exitMs},"entry_ms":${p.entryMs},"overlap_bars":${p.overlapBars},"why":${JsonPrimitive(p.why)}}"""
-                            DjLog.i(TAG, "commit from ${model.id} after $turn turns and ${tools.tries} tries in ${elapsed()} ms ($inTok in / $outTok out tokens): $input")
-                            return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries))
+                            DjLog.i(TAG, "commit from ${model.id} after $turn turns and ${tools.tries} tries in ${elapsed()} ms ($inTok in / $outTok out / $cacheRead cache read / $cacheWrite cache write tokens): $input")
+                            return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite))
                         }
                         is MixTools.Outcome.Result -> {
                             DjLog.i(TAG, "turn $turn: ${u.name()} $input -> ${o.text.lineSequence().firstOrNull()?.take(160)}")
@@ -181,7 +196,7 @@ class ClaudeMixClient {
                 ClaudeModel.SONNET -> 2.0 to 10.0
                 ClaudeModel.OPUS -> 4.0 to 20.0
             }
-        return (a.inputTokens * inPerM + a.outputTokens * outPerM) / 1_000_000.0
+        return (a.inputTokens * inPerM + a.cacheReadTokens * inPerM * 0.1 + a.cacheWriteTokens * inPerM * 1.25 + a.outputTokens * outPerM) / 1_000_000.0
     }
 
     private companion object {

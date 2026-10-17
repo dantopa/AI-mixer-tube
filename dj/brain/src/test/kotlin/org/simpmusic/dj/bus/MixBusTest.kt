@@ -9,6 +9,7 @@ import org.simpmusic.dj.model.Mode
 import org.simpmusic.dj.model.MusicalKey
 import org.simpmusic.dj.model.ParamCurve
 import org.simpmusic.dj.model.PlanKind
+import org.simpmusic.dj.model.SourceLoop
 import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.planner.DjTransitionPlanner
 import org.simpmusic.dj.render.AudioSegment
@@ -313,6 +314,16 @@ class MixBusTest {
         checkEquivalence("beat-matched 124->128", beatMatchedPair(), seed = 3)
         // the louder incoming deck gets a loudness gain that glides back to native inside the plan
         checkEquivalence("beat-matched, gain-matched", beatMatchedPair(loudIn = -10f), seed = 11)
+    }
+
+    /** A DJ loop on the outgoing (AI mix moves, build bc): the bus reads its ring through the same LoopSource. */
+    @Test
+    fun aLoopedOutgoingIsTheOfflineWindowSampleForSample() {
+        val p = beatMatchedPair()
+        val bar = 4 * 60_000.0 / 124
+        val loop = SourceLoop(p.plan.exitPointMs, p.plan.exitPointMs + bar.roundToLong())
+        assertTrue(p.plan.overlapMs > 2 * loop.lengthMs, "the overlap must repeat the loop")
+        checkEquivalence("looped outgoing (1 bar)", Pair2(p.a, p.b, p.plan.copy(outLoop = loop)), seed = 9)
     }
 
     @Test

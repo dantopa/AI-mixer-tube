@@ -1,6 +1,7 @@
 package org.simpmusic.dj.model
 
 import kotlinx.serialization.Serializable
+import kotlin.math.max
 
 /** How a parameter moves between two keyframes (applies to the segment that ENDS at the keyframe). */
 @Serializable
@@ -153,6 +154,12 @@ data class TransitionPlan(
     val echoOut: EchoOutSpec? = null,
     /** What the planner did, as data (strategy, quality, features, why not beat-matched). Null for plans made elsewhere. */
     val meta: PlanMeta? = null,
+    /**
+     * A DJ loop on the OUTGOING deck: once its source reaches [SourceLoop.endMs] it plays [SourceLoop.startMs] onwards
+     * again, until it is silent. The outgoing clock and lanes stay in "virtual" source time (as if the song went on);
+     * the deck's source maps that time back into the loop. Null = no loop.
+     */
+    val outLoop: SourceLoop? = null,
 ) {
     /** Earliest wall-clock time (relative to T0) at which any lane starts moving. Negative if there is a pre-roll ramp. */
     val preRollMs: Long
@@ -213,9 +220,98 @@ data class PlanConstraints(
     }
 }
 
+/**
+ * A loop on a deck's source (ms): from [endMs] on the deck plays [startMs] onwards again. [startMs] and [endMs] sit on
+ * beats of the track's grid, so the repeated audio keeps the beat.
+ */
+@Serializable
+data class SourceLoop(val startMs: Long, val endMs: Long) {
+    init {
+        require(endMs > startMs) { "a loop needs a positive length" }
+    }
+
+    val lengthMs: Long get() = endMs - startMs
+
+    /** First source frame of the loop at [sampleRate]. */
+    fun startFrame(sampleRate: Int): Long = Math.round(startMs * sampleRate / 1000.0)
+
+    /** Loop length in frames at [sampleRate] (at least 1). */
+    fun lengthFrames(sampleRate: Int): Long = max(1L, Math.round(endMs * sampleRate / 1000.0) - startFrame(sampleRate))
+
+    /** The real source frame a virtual frame [v] plays. */
+    fun realFrame(v: Long, sampleRate: Int): Long {
+        val s = startFrame(sampleRate)
+        val len = lengthFrames(sampleRate)
+        return if (v < s + len) v else s + Math.floorMod(v - s, len)
+    }
+
+    /** The real source position (ms) a virtual position [vMs] plays. */
+    fun realMs(vMs: Double): Double = if (vMs < endMs) vMs else startMs + (vMs - startMs).mod(lengthMs.toDouble())
+}
+
+/** How the two channel faders move over the overlap (see [MixMoves]). */
+@Serializable
+enum class FadeMove {
+    /** The engine's equal-power cross-fade over the whole overlap. */
+    SMOOTH,
+
+    /** The incoming comes up over the first half; the outgoing stays at full level and drops over the last bars. */
+    HOLD_THEN_DROP,
+
+    /** The incoming comes up over the first quarter and takes over; the outgoing fades out by three quarters. */
+    EARLY_HANDOVER,
+}
+
+/** A filter sweep over the overlap (see [MixMoves]). */
+@Serializable
+enum class FilterMove {
+    NONE,
+
+    /** The outgoing's highs sweep down (low-pass to ~700 Hz): it sinks into the background as the incoming takes over. */
+    LOWPASS_OUT,
+
+    /** The outgoing thins out from the bass up (high-pass to ~1.2 kHz): the classic wash-out. */
+    HIGHPASS_OUT,
+
+    /** The incoming enters thin (high-pass ~800 Hz) and opens up to full by the bass swap. */
+    HIGHPASS_IN,
+}
+
+/**
+ * A DJ's hands on the mixer during the overlap, as Claude chooses them ([AiMixPoints.moves]). The defaults are the
+ * engine's own mix: bass swap in the middle, an equal-power fade, no filter, no echo, no loop.
+ */
+@Serializable
+data class MixMoves(
+    /** Bar of the overlap (0 = its first bar) the basslines swap on; null = the middle. */
+    val bassSwapBar: Int? = null,
+    val fade: FadeMove = FadeMove.SMOOTH,
+    val filter: FilterMove = FilterMove.NONE,
+    /** A beat-synced echo thrown on the outgoing as its fader closes: its last beat rings out over the incoming. */
+    val echoOut: Boolean = false,
+    /** Loop this many bars of the outgoing from the exit for the whole overlap (0 = no loop): a bed under the incoming. */
+    val loopBars: Int = 0,
+) {
+    val isDefault: Boolean get() = this == MixMoves()
+
+    fun describe(): String =
+        listOfNotNull(
+            bassSwapBar?.let { "bass swap on bar $it" },
+            fade.takeIf { it != FadeMove.SMOOTH }?.name?.lowercase(),
+            filter.takeIf { it != FilterMove.NONE }?.name?.lowercase(),
+            "echo out".takeIf { echoOut },
+            "loop $loopBars bars".takeIf { loopBars > 0 },
+        ).joinToString(", ").ifEmpty { "engine defaults" }
+
+    companion object {
+        /** Loop lengths a DJ uses (bars). */
+        val LOOP_BARS = listOf(0, 1, 2, 4)
+    }
+}
+
 /** Where Claude would mix one pair (source times, ms), and its one-line why. See [PlanConstraints.aiPoints]. */
 @Serializable
-data class AiMixPoints(val exitMs: Long, val entryMs: Long, val overlapBars: Int, val why: String) {
+data class AiMixPoints(val exitMs: Long, val entryMs: Long, val overlapBars: Int, val why: String, val moves: MixMoves = MixMoves()) {
     companion object {
         /** Start of a plan's reason when Claude placed it. */
         const val TAG = "AI MIX: "

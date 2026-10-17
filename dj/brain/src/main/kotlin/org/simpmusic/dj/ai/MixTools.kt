@@ -142,8 +142,9 @@ class MixTools(
         val overlap = o.int("overlap_bars")
         require(exit in brief.exitFrom..brief.exitTo) { "exit_bar $exit is outside ${brief.exitFrom}..${brief.exitTo}" }
         require(entry in 0..brief.entryTo) { "entry_bar $entry is outside 0..${brief.entryTo}" }
-        val room = (brief.outBarsMs.size - 1 - exit).coerceAtLeast(1)
-        return AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceIn(MixBrief.MIN_OVERLAP_BARS, 32).coerceAtMost(room), why)
+        val moves = MixBrief.movesOf(o)
+        val room = if (moves.loopBars > 0) 32 else (brief.outBarsMs.size - 1 - exit).coerceAtLeast(1)
+        return AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceIn(MixBrief.MIN_OVERLAP_BARS, 32).coerceAtMost(room), why, moves)
     }
 
     private fun tryMix(o: JsonObject): String {
@@ -170,13 +171,20 @@ class MixTools(
                     else -> "tense (excess %.3f)".format(java.util.Locale.ROOT, h)
                 },
             ).append('\n')
-            append("voice over voice: ").append(voiceOverVoice(p.exitPointMs, p.entryPointMs, p.overlapMs)).append('\n')
-            // the bass of each track over its own part of the overlap, 0-9 of that track's range
+            val loop = p.outLoop
+            append("voice over voice: ").append(voiceOverVoice(p.exitPointMs, p.entryPointMs, p.overlapMs, loop)).append('\n')
+            // the bass of each track over its own part of the overlap, 0-9 of that track's range (a loop's: the loop itself)
             val outEnd = p.exitPointMs + p.overlapMs
             val inEnd = p.entryPointMs + p.overlapMs
-            append("bass through the overlap: outgoing ").append(MixBrief.levelsOf(outT.refined.lowBandEnergy, outT.refined.energyHopMs)(p.exitPointMs, outEnd))
+            append("bass through the overlap: outgoing ").append(MixBrief.levelsOf(outT.refined.lowBandEnergy, outT.refined.energyHopMs)(loop?.startMs ?: p.exitPointMs, loop?.endMs ?: outEnd))
             append(", incoming ").append(MixBrief.levelsOf(inT.refined.lowBandEnergy, inT.refined.energyHopMs)(p.entryPointMs, inEnd)).append('\n')
-            append("the incoming plays alone from its %s; the outgoing would have continued at %s\n".format(java.util.Locale.ROOT, clock(inEnd), clock(outEnd)))
+            if (loop != null) {
+                append("the outgoing loops %s-%s (%.1f s) under the whole overlap; the incoming plays alone from its %s\n".format(java.util.Locale.ROOT, clock(loop.startMs), clock(loop.endMs), loop.lengthMs / 1000.0, clock(inEnd)))
+            } else {
+                append("the incoming plays alone from its %s; the outgoing would have continued at %s\n".format(java.util.Locale.ROOT, clock(inEnd), clock(outEnd)))
+            }
+            p.reason.substringAfter("; moves: ", "").substringBefore(" | ").takeIf { it.isNotBlank() }?.let { append("moves: ").append(it).append('\n') }
+            p.reason.substringAfter(DjTransitionPlanner.LOOP_NOT_USED, "").takeIf { it.isNotBlank() }?.let { append("loop NOT used: ").append(it.take(200)).append('\n') }
         }
     }
 
@@ -184,7 +192,8 @@ class MixTools(
      * Seconds both tracks sing at once over the overlap, from each track's voice ranges (synced lyrics when present, else a
      * trusted detection). The plan's own figure is not used: the AI path ignores the detector, as the owner's marks do.
      */
-    private fun voiceOverVoice(exitMs: Long, entryMs: Long, overlapMs: Long): String {
+    private fun voiceOverVoice(exitMs: Long, entryMs: Long, overlapMs: Long, loop: org.simpmusic.dj.model.SourceLoop?): String {
+        fun outAt(t: Long): Long = loop?.realMs((exitMs + t).toDouble())?.toLong() ?: (exitMs + t)
         val vo = outT.vocals?.value
         val vi = inT.vocals?.value
         if (vo == null && vi == null) return "unknown (no trusted voice on either track)"
@@ -195,7 +204,7 @@ class MixTools(
         var both = 0L
         var t = 0L
         while (t < overlapMs) {
-            if (vo.any { exitMs + t in it.startMs until it.endMs } && vi.any { entryMs + t in it.startMs until it.endMs }) both += STEP_MS
+            if (vo.any { outAt(t) in it.startMs until it.endMs } && vi.any { entryMs + t in it.startMs until it.endMs }) both += STEP_MS
             t += STEP_MS
         }
         return if (both == 0L) "none" else "%.1f s".format(java.util.Locale.ROOT, both / 1000.0)
@@ -224,7 +233,7 @@ class MixTools(
                 "exit_bar" to mapOf("type" to "integer", "description" to "Bar of the OUTGOING table where the mix starts."),
                 "entry_bar" to mapOf("type" to "integer", "description" to "Bar of the INCOMING table that plays at that moment."),
                 "overlap_bars" to mapOf("type" to "integer", "description" to "Bars both tracks play together (at least ${MixBrief.MIN_OVERLAP_BARS})."),
-            )
+            ) + MixBrief.MOVES_PROPS
 
         private fun obj(props: Map<String, Any>) =
             mapOf("type" to "object", "properties" to props, "required" to props.keys.toList(), "additionalProperties" to false)
@@ -268,6 +277,9 @@ class MixTools(
             section of the incoming). When try_mix says the overlap came out shorter than asked and why, move the points
             (an entry past the incoming's intro, an exit with more song after it) if that gives a longer clean overlap. Prefer the candidate with no voice over voice, the
             bass on both sides, a consonant overlap and phrase on phrase, at the owner's usual length when it stays clean.
+            try_mix takes the moves too and says what they did (and when a loop could not be used, why): try a candidate with
+            the plain mix and one with the moves you think fit, and keep what the engine measures as cleaner. A loop changes
+            what the outgoing plays under the overlap, so try_mix measures the loop's own bass and voice.
             Do not explain at length between calls; the commit's why is enough.
             """.trimIndent()
 

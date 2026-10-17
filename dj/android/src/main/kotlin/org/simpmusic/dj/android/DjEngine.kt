@@ -790,6 +790,8 @@ class DjEngine(
                     earliestExitMs = position + lead,
                     requestedBars = settings.overlapBars,
                     positionMs = position,
+                    // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
+                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
                 )
             }
         if (brief == null) {
@@ -825,7 +827,7 @@ class DjEngine(
             return
         }
         val cost = claude.costUsd(answer)
-        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
+        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars, moves ${pts.moves.describe()} (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
         aiKey = k
         aiPoints = pts
         mixNowKey = null
@@ -834,7 +836,7 @@ class DjEngine(
         ready?.let { deleteWindow(it) }
         ready = null
         startPipeline(fromId, toId)
-        aiSay("AI: out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars · ${pts.why}")
+        aiSay("AI: out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars" + (if (pts.moves.isDefault) "" else " · ${pts.moves.describe()}") + " · ${pts.why}")
     }
 
     private fun clockOf(ms: Long) = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
@@ -1204,7 +1206,8 @@ class DjEngine(
 
     private fun checkBounds(timeline: WindowTimeline, from: TrackAnalysis, to: TrackAnalysis): String? {
         val plan = timeline.plan
-        val outEnd = timeline.outgoingSourceAt(plan.overlapMs.toDouble())
+        // (a DJ loop keeps the outgoing inside its looped bars however long the overlap is)
+        val outEnd = timeline.outgoingSourceAt(plan.overlapMs.toDouble()).let { v -> plan.outLoop?.let { maxOf(it.endMs.toDouble(), it.realMs(v)) } ?: v }
         if (outEnd > from.durationMs + 300) return "outgoing track ends before the overlap does"
         if (timeline.outgoingSourceAtWindowStart < 2000) return "window would start at the very beginning of the outgoing track"
         if (plan.entryPointMs >= to.durationMs) return "entry point beyond the incoming track"

@@ -5,6 +5,7 @@ import org.simpmusic.dj.model.TransitionPlan
 import org.simpmusic.dj.model.settleMs
 import org.simpmusic.dj.model.silentFromMs
 import org.simpmusic.dj.render.DeckVoice
+import org.simpmusic.dj.render.LoopSource
 import org.simpmusic.dj.render.OfflineMixRenderer
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -204,8 +205,10 @@ class MixBusCore(
         val handoffFrame = ((handoffMs - startWall) * sr / 1000.0).roundToLong()
         val outProgram = DeckVoice.Program(
             plan.outgoing, outClock, startFrame = 0L, startWallMs = startWall, endFrame = outEnd,
-            windowStartWallMs = startWall, echoSpec = echo, activeEndFrame = activeEnd, sampleRate = sr,
+            windowStartWallMs = startWall, echoSpec = echo, activeEndFrame = activeEnd, sampleRate = sr, loop = plan.outLoop,
         )
+        // a DJ loop on the outgoing: its voice reads the ring through the loop (built here, off the audio thread)
+        val outSource: DeckVoice.Source = plan.outLoop?.let { LoopSource(out.source, it, sr) } ?: out.source
         val inProgram = DeckVoice.Program(
             plan.incoming, inClock, startFrame = n0.toLong(), startWallMs = 0.0, endFrame = Long.MAX_VALUE,
             windowStartWallMs = startWall, handoffFrame = handoffFrame, sampleRate = sr,
@@ -216,17 +219,18 @@ class MixBusCore(
         val inHandoffAt = Math.floorDiv(max(handoffFrame, n0 + 1L) + b - 1, b) * b
         return synchronized(controlLock) {
             check(pending == null && publicState == State.IDLE) { "a transition is already ${publicState.name.lowercase()}" }
-            publish(plan, out, inc, n0.toLong(), switchFrame, entryFrame, outProgram, inProgram, outEnd, max(outEnd, inHandoffAt))
+            publish(plan, out, inc, n0.toLong(), switchFrame, entryFrame, outProgram, inProgram, outEnd, max(outEnd, inHandoffAt), outSource)
         }
     }
 
     private fun publish(
         plan: TransitionPlan, out: Deck, inc: Deck, n0: Long, switchFrame: Long, entryFrame: Long,
-        outProgram: DeckVoice.Program, inProgram: DeckVoice.Program, outEnd: Long, doneFrame: Long,
+        outProgram: DeckVoice.Program, inProgram: DeckVoice.Program, outEnd: Long, doneFrame: Long, outSource: DeckVoice.Source,
     ): Int {
         val t = Transition(
             id = nextPlanId++, plan = plan, out = out, inc = inc, n0 = n0, switchFrame = switchFrame,
             entryFrame = entryFrame, outProgram = outProgram, inProgram = inProgram, outEnd = outEnd, doneFrame = doneFrame,
+            outSource = outSource,
         )
         inc.standby = true
         cancelRequested = false
@@ -379,7 +383,8 @@ class MixBusCore(
                 t.wf = 0L
                 t.out.role = Role.OUTGOING
                 inc.role = Role.INCOMING
-                t.out.voice.startProgram(t.outProgram, t.out.source, 0L)
+                t.out.voice.startProgram(t.outProgram, t.outSource, 0L)
+                t.plan.outLoop?.let { t.out.holdFrom = it.startFrame(sampleRate) }
                 inc.seenGeneration = view.generation
                 inc.origin = view.origin
                 inc.source.generation = view.generation
@@ -396,7 +401,7 @@ class MixBusCore(
                 o.ring.generation != o.source.generation -> AbortReason.OUTGOING_FLUSHED
                 !o.playing || o.standby -> AbortReason.OUTGOING_PAUSED
                 t.wf < t.outProgram.activeEndFrame && o.ring.snapshot(o.view) && o.view.endOfStream &&
-                    o.voice.currentSourceFrame() >= o.view.end -> AbortReason.OUTGOING_ENDED
+                    o.voice.currentRealSourceFrame() >= o.view.end -> AbortReason.OUTGOING_ENDED
                 else -> null
             }
             if (reason != null) {
@@ -436,6 +441,7 @@ class MixBusCore(
         // ---- outgoing done ----
         if (!t.outgoingDone && t.wf >= t.outEnd) {
             t.outgoingDone = true
+            t.out.holdFrom = Long.MAX_VALUE
             t.out.voice.stop()
             t.out.standby = true
             t.out.role = Role.NONE
@@ -480,6 +486,7 @@ class MixBusCore(
     }
 
     private fun endTransition(t: Transition) {
+        t.out.holdFrom = Long.MAX_VALUE
         // no lock: [arm] refuses while a transition is armed or running, so nothing can be pending here
         if (current === t) current = null
         t.state = State.IDLE
@@ -510,7 +517,7 @@ class MixBusCore(
         if (v.programFinished) v.stop()
         if (v.mode != DeckVoice.Mode.IDLE && !v.isFadingOut && d.origin != DeckRing.UNSET &&
             d.ring.snapshot(d.view) && d.view.endOfStream && d.view.generation == d.source.generation &&
-            v.currentSourceFrame() >= d.view.end
+            v.currentRealSourceFrame() >= d.view.end
         ) {
             v.stop()
             if (!d.drained) {
@@ -592,6 +599,8 @@ class MixBusCore(
         val outEnd: Long,
         /** Window frame at which the transition is over (outgoing released, incoming on the copy path). */
         val doneFrame: Long,
+        /** What the outgoing voice reads during the plan: its ring, through the plan's loop when it has one. */
+        val outSource: DeckVoice.Source,
     ) {
         @Volatile var state = State.IDLE
         /** Current window frame (bus thread). */
@@ -619,11 +628,17 @@ class MixBusCore(
         var resumeWithFade = false
         var role = Role.NONE
 
+        /**
+         * Frames from here on are kept whatever the voice reads: an outgoing deck playing a DJ loop goes back to the loop's
+         * start at every seam, so nothing after it may be freed until the transition is over.
+         */
+        var holdFrom = Long.MAX_VALUE
+
         /** After a span: free what the voice no longer needs (the vocoder reads up to 1.5 k frames back). */
         fun afterSpan() {
             val low = source.lowestRead
             if (low != Long.MAX_VALUE) {
-                ring.release(low - RELEASE_KEEP_FRAMES, source.generation)
+                ring.release(min(low, holdFrom) - RELEASE_KEEP_FRAMES, source.generation)
                 source.lowestRead = Long.MAX_VALUE
             }
         }

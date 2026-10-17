@@ -148,9 +148,9 @@ object OfflineMixRenderer {
                     DeckVoice.Program(
                         plan.outgoing, outClock, startFrame = 0L, startWallMs = startWall, endFrame = endFrame.toLong(),
                         windowStartWallMs = startWall, echoSpec = echoSpec, activeEndFrame = activeEnd.toLong(),
-                        bypassMixer = options.bypassMixer, effect = options.outgoingEffect, sampleRate = sr,
+                        bypassMixer = options.bypassMixer, effect = options.outgoingEffect, sampleRate = sr, loop = plan.outLoop,
                     ),
-                    segmentSource(outgoing),
+                    segmentSource(outgoing).let { src -> plan.outLoop?.let { LoopSource(src, it, sr) } ?: src },
                 )
             }
         } else null
