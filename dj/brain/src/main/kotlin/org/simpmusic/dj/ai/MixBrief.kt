@@ -183,7 +183,7 @@ object MixBrief {
      * The brief for [out] -> [inc], or null when a track has no beat grid (nothing to count bars on). Exits are allowed from
      * [earliestExitMs] (the playhead plus the time the answer and the cue take) to [EXIT_TAIL_BARS] before the end.
      */
-    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long, taste: String? = null, ahead: Boolean = false): Brief? {
+    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long, taste: String? = null, ahead: Boolean = false, entryLatestMs: Long? = null): Brief? {
         val outBars = bars(out.timeline) ?: return null
         val inBars = bars(inc.timeline) ?: return null
         val exitFrom = outBars.indexOfFirst { it >= earliestExitMs }.takeIf { it >= 0 } ?: return null
@@ -199,6 +199,11 @@ object MixBrief {
             val bar = inBars.indices.minByOrNull { kotlin.math.abs(inBars[it] - m) }
             if (bar != null && bar > entryTo && inBars[bar] <= inDur - MARK_TAIL_MS) entryTo = bar.coerceAtMost(MAX_BARS - 1)
         }
+        // The incoming must still mix into the track AFTER it: entering late in a track (the owner: "it mixed in near the
+        // end and the next mix had no time") leaves no room for its own exit. The engine gives the latest entry that keeps
+        // the incoming's best exit into its next track playable; the owner's marked entry still wins.
+        val chainLimit = entryLatestMs?.let { lim -> inBars.indexOfLast { it <= lim } }?.takeIf { it >= 0 }
+        if (chainLimit != null && chainLimit < entryTo) entryTo = chainLimit
         val user =
             buildString {
                 // ahead: this pair is solved before it plays (the DJ works a few mixes ahead); the outgoing is not playing yet
@@ -213,6 +218,11 @@ object MixBrief {
                 append("\nAllowed: exit_bar ").append(exitFrom).append("..").append(exitTo)
                 append(" (earlier bars have already played or come too soon), entry_bar 0..").append(entryTo)
                 append(", overlap_bars ").append(MIN_OVERLAP_BARS).append("..32. The owner's usual overlap is ").append(requestedBars).append(" bars.\n")
+                if (chainLimit != null && chainLimit == entryTo) {
+                    append("The incoming must still mix well into the track after it, at its best point with that one, after playing on its own")
+                    append(" a while: so the entry goes no later than bar ").append(entryTo).append(" (").append(clock(inBars[entryTo])).append(").")
+                    append(" The set is a chain: every song joins the one before AND the one after.\n")
+                }
                 marks(out, outBars, inc, inBars)?.let { append('\n').append(it) }
                 taste?.takeIf { it.isNotBlank() }?.let { append('\n').append(it.trimEnd()).append('\n') }
             }

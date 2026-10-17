@@ -42,6 +42,25 @@ class MixBriefTest {
         )!!
 
     @Test
+    fun anEntryThatWouldLeaveNoRoomForTheNextMixIsNotOffered() {
+        // the chain: entering the incoming late would leave it no room to mix into the track after it
+        val free = brief()
+        val b =
+            MixBrief.build(
+                MixBrief.Track("Lo Dejaría Todo", Timelines.of(out)),
+                MixBrief.Track("A Prueba de Balas", Timelines.of(inc)),
+                earliestExitMs = 30_000L,
+                requestedBars = 8,
+                positionMs = 10_000L,
+                entryLatestMs = 40_000L,
+            )!!
+        assertTrue(b.entryTo < free.entryTo, "limited ${b.entryTo} vs free ${free.entryTo}")
+        assertTrue(b.inBarsMs[b.entryTo] <= 40_000L && b.inBarsMs[b.entryTo + 1] > 40_000L)
+        assertTrue(b.user.contains("every song joins the one before AND the one after"), b.user.takeLast(600))
+        assertTrue(MixBrief.parse(b, """{"exit_bar":${b.exitFrom},"entry_bar":${b.entryTo + 1},"overlap_bars":4,"bass_swap_bar":-1,"fade":"smooth","filter":"none","echo_out":false,"loop_bars":0,"why":"x"}""").isFailure)
+    }
+
+    @Test
     fun aPairSolvedAheadSaysTheOutgoingIsNotPlayingYet() {
         // AI Auto solves the next pairs while an earlier track plays: the outgoing is heard from where the mix before hands
         // it over, and its exits start 30 s after that, whatever the playhead

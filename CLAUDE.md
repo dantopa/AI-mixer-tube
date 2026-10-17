@@ -479,6 +479,11 @@ Service modules:
     - "Export analyses" now carries only the analyses and pictures of tracks mixed (journal) or analysed since the previous export (`dj_export` prefs; the first export covers the last 24 h).
     - "Clear" empties the log on disk too (`RotatingLogFile.clear`) and resets the export point.
   - Tests: `MixBriefTest.aPairSolvedAheadSaysTheOutgoingIsNotPlayingYet`, `SetBriefTest`. Not run on a device; no real request from the build server.
+- **The AI chains its mixes (2026-10-17, build bg)**: the owner: some tracks were entered so late that the next mix had no time; "the AI should pick points that also mix with the next one, three tracks ahead, whatever their length".
+  - Before asking Claude about A -> B, `DjEngine.entryLatestFor` plans B -> C (the track after B, analysed at NEXT_UP) with the DJ's regular / perfect rules, to see where B would leave into C. The latest entry into B is that exit − `AI_AHEAD_SOLO_MS` 30 s − the owner's usual overlap.
+  - `MixBrief.build(entryLatestMs =)` caps `entry_bar` there (the owner's marked entry still wins). The brief says why: "the set is a chain: every song joins the one before AND the one after". The cap is dropped when it would leave under 10 s of entries (`AI_CHAIN_MIN_ENTRY_ROOM_MS`, a short track).
+  - It applies to the current pair's question and to every pair solved ahead; `upcomingIds` now returns one more track, for the last pair's room.
+  - Test: `MixBriefTest.anEntryThatWouldLeaveNoRoomForTheNextMixIsNotOffered`. Not run on a device.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

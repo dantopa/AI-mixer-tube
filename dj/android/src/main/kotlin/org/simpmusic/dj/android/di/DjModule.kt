@@ -200,7 +200,7 @@ val djModule =
                         if (snap.currentIndex < 0 || snap.shuffle || snap.blockedReason?.let { it != "repeat all" } == true) {
                             emptyList()
                         } else {
-                            snap.queueIds.drop(snap.currentIndex + 1).take(AI_AHEAD_PAIRS)
+                            snap.queueIds.drop(snap.currentIndex + 1).take(AI_AHEAD_PAIRS + 1) // + the track after the last pair (its exit room)
                         }
                     },
                 )

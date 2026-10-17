@@ -941,7 +941,8 @@ class DjEngine(
         // the answer takes seconds (more with tools: several turns), then the mix needs its usual lead
         val lead = (if (withTools) AI_TOOLS_BUDGET_MS else AI_ANSWER_BUDGET_MS) + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
         val position = playbackPositionMs
-        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = position + lead, heardFromMs = position, ahead = false, say = { aiSay(it) }) ?: return
+        val after = runCatching { upcomingIds() }.getOrDefault(emptyList()).takeIf { it.firstOrNull() == toId }?.getOrNull(1)
+        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = position + lead, heardFromMs = position, ahead = false, afterId = after, say = { aiSay(it) }) ?: return
         if (pairKey != k || k == consumedKey || _debug.value.isMixing) {
             aiSay("AI: the pair changed meanwhile")
             return
@@ -970,6 +971,8 @@ class DjEngine(
         earliestExitMs: Long,
         heardFromMs: Long,
         ahead: Boolean,
+        /** The track after [toId] in the queue: the entry must leave [toId] room to mix into it. */
+        afterId: String? = null,
         say: (String) -> Unit,
     ): org.simpmusic.dj.model.AiMixPoints? {
         val settings = settingsFlow.value
@@ -989,6 +992,7 @@ class DjEngine(
         val withTools = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.tools
         val titleFrom = runCatching { titleOf(fromId) }.getOrNull() ?: fromId
         val titleTo = runCatching { titleOf(toId) }.getOrNull() ?: toId
+        val entryLatest = runCatching { entryLatestFor(toId, to, afterId) }.getOrNull()
         val brief =
             withContext(kotlinx.coroutines.Dispatchers.IO) {
                 org.simpmusic.dj.ai.MixBrief.build(
@@ -1000,6 +1004,7 @@ class DjEngine(
                     // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
                     taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
                     ahead = ahead,
+                    entryLatestMs = entryLatest,
                 )
             }
         if (brief == null) {
@@ -1054,7 +1059,7 @@ class DjEngine(
         val upcoming = runCatching { upcomingIds() }.getOrDefault(emptyList())
         if (upcoming.firstOrNull() != next) return // the queue moved, or it cannot be read: the next context change retries
         val chain = listOf(current) + upcoming.take(AI_AHEAD_PAIRS)
-        scheduler.setAiAhead(chain.drop(2).toSet())
+        scheduler.setAiAhead(upcoming.drop(1).toSet())
         // the first upcoming pair not asked yet, whose outgoing's hand-over is known (the pair before it is planned)
         for (i in 1 until chain.size - 1) {
             val a = chain[i]
@@ -1067,7 +1072,7 @@ class DjEngine(
             aiAheadJob =
                 scope.launch {
                     try {
-                        aiAskAhead(k, a, b, heard)
+                        aiAskAhead(k, a, b, heard, chain.getOrNull(i + 2) ?: runCatching { upcomingIds() }.getOrDefault(emptyList()).getOrNull(i + 1))
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                         throw e
                     } catch (e: Throwable) {
@@ -1080,7 +1085,24 @@ class DjEngine(
         }
     }
 
-    private suspend fun aiAskAhead(k: String, fromId: String, toId: String, heardFromMs: Long) {
+    /**
+     * The latest entry into [to] that still leaves it room to mix into [afterId] the way the DJ would (its regular / perfect
+     * exit into that track, after [AI_AHEAD_SOLO_MS] alone and the owner's usual overlap). Null when [afterId] is unknown or
+     * not analysed, or when the limit would leave almost no choice (a short track: Claude then chooses freely).
+     */
+    private suspend fun entryLatestFor(toId: String, to: TrackAnalysis, afterId: String?): Long? {
+        afterId ?: return null
+        val after = scheduler.get(afterId) ?: return null
+        val settings = settingsFlow.value
+        val next = withContext(heavyDispatcher) { planner.plan(to, after, settings, PlanConstraints(earliestExitMs = 0L, preferPerfect = true)) }
+        val bpm = Timelines.of(to).bpm?.value?.takeIf { it > 0f } ?: return null
+        val overlapMs = (settings.overlapBars * 4 * 60_000f / bpm).toLong()
+        val limit = next.exitPointMs - AI_AHEAD_SOLO_MS - overlapMs
+        DjLog.i(TAG, "ai chain: $toId leaves into $afterId near ${next.exitPointMs} ms (${next.kind}), so it is entered no later than $limit ms")
+        return limit.takeIf { it >= AI_CHAIN_MIN_ENTRY_ROOM_MS }
+    }
+
+    private suspend fun aiAskAhead(k: String, fromId: String, toId: String, heardFromMs: Long, afterId: String?) {
         lyrics?.request(fromId)
         lyrics?.request(toId)
         // the upcoming tracks are analysed at NEXT_UP priority, one at a time (kept through cancelStale, see setAiAhead)
@@ -1098,7 +1120,9 @@ class DjEngine(
         val (from, to) = pair
         val earliest = heardFromMs + AI_AHEAD_SOLO_MS
         DjLog.i(TAG, "ai ahead: asking for $fromId -> $toId (outgoing heard from $heardFromMs ms, exits from $earliest ms)")
-        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = earliest, heardFromMs = heardFromMs, ahead = true, say = { DjLog.i(TAG, "ai ahead $fromId -> $toId: $it") })
+        // the track after toId may not be analysed yet; it is asked for, and the limit applies when it is there
+        afterId?.let { lyrics?.request(it); scheduler.request(it, AnalysisPriority.NEXT_UP) }
+        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = earliest, heardFromMs = heardFromMs, ahead = true, afterId = afterId, say = { DjLog.i(TAG, "ai ahead $fromId -> $toId: $it") })
         if (pts == null) {
             // no answer (tempos too far apart, no room, an error): the DJ's own plan says where the next pair starts from
             val regular = withContext(heavyDispatcher) { planner.plan(from, to, settingsFlow.value, PlanConstraints(earliestExitMs = earliest, preferPerfect = true)) }
@@ -1634,6 +1658,9 @@ private const val AI_AHEAD_ANALYSIS_WAIT_MS = 6 * 60_000L
 
 /** How many pairs the ahead book and its bookkeeping remember (old ones fall off: the queue moved on). */
 private const val AI_AHEAD_MEMORY = 12
+
+/** Below this, the chain limit on an entry is dropped (a short track: almost no entry would be left to choose from). */
+private const val AI_CHAIN_MIN_ENTRY_ROOM_MS = 10_000L
 
 /** "Order with AI" orders this many upcoming tracks. */
 private const val AI_ORDER_TRACKS = 10
