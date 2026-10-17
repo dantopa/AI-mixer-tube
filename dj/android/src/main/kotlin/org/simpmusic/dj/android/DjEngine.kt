@@ -293,6 +293,21 @@ interface DjHooks {
     /** The owner's mix marks of the playing track, null when it has none. */
     fun mixMarks(): org.simpmusic.dj.planner.MixMarks? = null
 
+    /** True when the playing track carries any mark of the owner (Out / In / Solo, the 1, a phrase). */
+    fun hasTrackMarks(): Boolean = false
+
+    /**
+     * Forget every mark of the playing track (Out / In / Solo, the 1, the phrase): the DJ (and Claude) find the points
+     * from the analysis again, and the pair being prepared is planned again. True when there was something to forget.
+     */
+    fun forgetTrackMarks(): Boolean = false
+
+    /** How many tracks carry any mark of the owner, for Settings. */
+    fun markedTrackCount(): Int = 0
+
+    /** Forget every mark of every track (the 👍 / 👎 ratings stay); returns how many tracks had one. */
+    fun forgetAllMarks(): Int = 0
+
     /** Playback position of the current track (ms), for countdowns. */
     val positionMs: Long get() = 0L
 
@@ -529,6 +544,49 @@ class DjEngine(
     }
 
     override fun mixMarks(): org.simpmusic.dj.planner.MixMarks? = pairFrom?.let { org.simpmusic.dj.android.perfect.UserMixMarks.get(it) }
+
+    override fun hasTrackMarks(): Boolean {
+        val id = pairFrom ?: return false
+        return org.simpmusic.dj.android.perfect.UserMixMarks.get(id) != null ||
+            org.simpmusic.dj.android.perfect.UserDownbeats.get(id) != null ||
+            org.simpmusic.dj.android.perfect.UserPhrases.get(id) != null
+    }
+
+    override fun forgetTrackMarks(): Boolean {
+        val id = pairFrom ?: return false
+        val mix = org.simpmusic.dj.android.perfect.UserMixMarks.clearTrack(id)
+        val one = org.simpmusic.dj.android.perfect.UserDownbeats.get(id) != null
+        val phrase = org.simpmusic.dj.android.perfect.UserPhrases.get(id) != null
+        if (one) org.simpmusic.dj.android.perfect.UserDownbeats.clear(id)
+        if (phrase) org.simpmusic.dj.android.perfect.UserPhrases.clear(id)
+        tapSession.clear()
+        if (!mix && !one && !phrase) return false
+        _debug.update { it.copy(lastOutcome = "marks forgotten: the DJ finds the points") }
+        // the plan of the pair being prepared read those marks (the exit, the 1 and the phrases of the playing track)
+        replanForMarks("marks of $id forgotten")
+        return true
+    }
+
+    override fun markedTrackCount(): Int =
+        (
+            org.simpmusic.dj.android.perfect.UserMixMarks.all().keys +
+                org.simpmusic.dj.android.perfect.UserDownbeats.all().keys +
+                org.simpmusic.dj.android.perfect.UserPhrases.all().keys
+            ).size
+
+    override fun forgetAllMarks(): Int {
+        val n = markedTrackCount()
+        org.simpmusic.dj.android.perfect.UserMixMarks.clearAll()
+        org.simpmusic.dj.android.perfect.UserDownbeats.clearAll()
+        org.simpmusic.dj.android.perfect.UserPhrases.clearAll()
+        tapSession.clear()
+        DjLog.i(TAG, "all the owner's marks forgotten ($n tracks)")
+        if (n > 0) {
+            _debug.update { it.copy(lastOutcome = "all marks forgotten: the DJ finds the points") }
+            replanForMarks("all marks forgotten")
+        }
+        return n
+    }
 
     private fun replanForMarks(why: String = "mix marks changed") {
         val from = pairFrom ?: return

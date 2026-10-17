@@ -40,6 +40,23 @@ object UserMixMarks {
         DjLog.i("perfect", "mix mark ${mark.key} of $videoId cleared")
     }
 
+    /** Forgets the three marks of [videoId]; true when it had any. */
+    fun clearTrack(videoId: String): Boolean {
+        val p = prefs ?: return false
+        val had = MixMark.entries.any { p.contains("$videoId|${it.key}") }
+        if (had) p.edit().apply { MixMark.entries.forEach { remove("$videoId|${it.key}") } }.apply()
+        if (had) DjLog.i("perfect", "mix marks of $videoId cleared")
+        return had
+    }
+
+    /** Forgets every mix mark of every track; returns how many tracks had one. */
+    fun clearAll(): Int {
+        val n = all().size
+        prefs?.edit()?.clear()?.apply()
+        DjLog.i("perfect", "all mix marks cleared ($n tracks)")
+        return n
+    }
+
     /** videoId -> its marks, for the export. */
     fun all(): Map<String, MixMarks> =
         (prefs?.all?.keys ?: emptySet()).mapNotNull { it.substringBefore('|', "").takeIf { id -> id.isNotEmpty() } }.toSet()

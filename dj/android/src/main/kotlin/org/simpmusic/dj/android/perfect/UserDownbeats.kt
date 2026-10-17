@@ -37,6 +37,14 @@ object UserDownbeats {
         return timeMs
     }
 
+    /** Forgets every track's mark; returns how many tracks had one. */
+    fun clearAll(): Int {
+        val n = all().size
+        prefs?.edit()?.clear()?.apply()
+        DjLog.i("perfect", "all tapped 1s cleared ($n tracks)")
+        return n
+    }
+
     fun clear(videoId: String) {
         prefs?.edit()?.remove(videoId)?.apply()
         DjLog.i("perfect", "the 1 of $videoId cleared (back to the vote)")

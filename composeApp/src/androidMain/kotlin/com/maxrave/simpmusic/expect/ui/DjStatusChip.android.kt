@@ -79,6 +79,7 @@ import simpmusic.composeapp.generated.resources.dj_chip_mixing
 import simpmusic.composeapp.generated.resources.dj_mark_entry
 import simpmusic.composeapp.generated.resources.dj_mark_exit
 import simpmusic.composeapp.generated.resources.dj_mark_solo
+import simpmusic.composeapp.generated.resources.dj_forget_track_marks
 import simpmusic.composeapp.generated.resources.dj_ai_auto
 import simpmusic.composeapp.generated.resources.dj_ai_auto_description
 import simpmusic.composeapp.generated.resources.dj_ai_auto_on
@@ -383,6 +384,7 @@ private fun DjCorrectionRow(feedback: DjChipFeedback) {
     val debug by hooks.debug.collectAsStateWithLifecycle()
     var version by remember { mutableStateOf(0) }
     val marks = remember(version, debug.fromId) { hooks.mixMarks() }
+    val anyMark = remember(version, feedback.tapped, debug.fromId) { hooks.hasTrackMarks() }
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -444,6 +446,20 @@ private fun DjCorrectionRow(feedback: DjChipFeedback) {
                 lit = at != null,
             ) {
                 ChipLabel(if (at != null) "$label %d:%02d".format(at / 60_000, at / 1000 % 60) else label, bold = at != null)
+            }
+        }
+        // A wrong mark binds the DJ (and Claude) to it: this forgets every mark of the playing track in one tap, and the
+        // points are found from the analysis again. Shown only while there is something to forget.
+        if (anyMark) {
+            ChipPill(
+                modifier = Modifier.clickable {
+                    if (hooks.forgetTrackMarks()) {
+                        version++
+                        feedback.tapped++
+                    }
+                },
+            ) {
+                ChipLabel(stringResource(Res.string.dj_forget_track_marks))
             }
         }
     }

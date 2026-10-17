@@ -652,6 +652,12 @@
     <string name="dj_mark_exit">Out</string>
     <string name="dj_mark_entry">In</string>
     <string name="dj_mark_solo">Solo</string>
+    <string name="dj_forget_track_marks">✕ marks</string>
+    <string name="ai_dj_forget_marks">Your marks</string>
+    <string name="ai_dj_forget_marks_count">%1$d tracks carry your marks (Out / In / Solo, the 1, phrases). The DJ and Claude follow them. Tap to forget them all.</string>
+    <string name="ai_dj_forget_marks_none">No marks. Mark Out / In / Solo, the 1 or a phrase from the bar counter on Now Playing.</string>
+    <string name="ai_dj_forget_marks_message">Forget your marks on %1$d tracks? The DJ and Claude will find the mix points, the 1 and the phrases from the analysis again. Your 👍 / 👎 ratings are kept.</string>
+    <string name="ai_dj_forget_marks_confirm">Forget</string>
     <string name="dj_rate_up">That mix sounded good</string>
     <string name="dj_rate_down">That mix sounded bad</string>
     <string name="ai_dj_realtime_engine">Real-time engine</string>

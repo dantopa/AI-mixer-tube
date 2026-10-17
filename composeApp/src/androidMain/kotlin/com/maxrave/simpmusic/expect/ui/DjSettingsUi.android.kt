@@ -81,6 +81,11 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_key_none
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_set
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model_choice
+import simpmusic.composeapp.generated.resources.ai_dj_forget_marks
+import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_confirm
+import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_count
+import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_message
+import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_none
 import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter
 import simpmusic.composeapp.generated.resources.ai_dj_show_bar_counter_description
 import simpmusic.composeapp.generated.resources.ai_dj_allow_key_shift_description
@@ -243,6 +248,37 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                     subtitle = stringResource(Res.string.ai_dj_show_bar_counter_description),
                     smallSubtitle = true,
                     switch = (showBarCounter to { on -> scope.launch { repo.setShowBarCounter(on) }; Unit }),
+                )
+                // The owner's marks (Out / In / Solo, the 1, phrases) bind the DJ and Claude: wrong ones are forgotten here
+                // for every track at once (the bar counter's ✕ forgets those of the playing track).
+                var marksVersion by remember { mutableStateOf(0) }
+                val markedTracks = remember(marksVersion, debug.fromId) { hooks.markedTrackCount() }
+                val forgetTitle = stringResource(Res.string.ai_dj_forget_marks)
+                val forgetMessage = stringResource(Res.string.ai_dj_forget_marks_message, markedTracks)
+                val forgetConfirm = stringResource(Res.string.ai_dj_forget_marks_confirm)
+                SettingItem(
+                    title = forgetTitle,
+                    subtitle =
+                        if (markedTracks > 0) {
+                            stringResource(Res.string.ai_dj_forget_marks_count, markedTracks)
+                        } else {
+                            stringResource(Res.string.ai_dj_forget_marks_none)
+                        },
+                    smallSubtitle = true,
+                    isEnable = markedTracks > 0,
+                    onClick = {
+                        viewModel.setAlertData(
+                            SettingAlertState(
+                                title = forgetTitle,
+                                message = forgetMessage,
+                                confirm = forgetConfirm to { _ ->
+                                    hooks.forgetAllMarks()
+                                    marksVersion++
+                                },
+                                dismiss = dismiss,
+                            ),
+                        )
+                    },
                 )
                 // "AI Mix": the owner's Claude key (stored on the phone only) and the model to ask
                 val claude by org.simpmusic.dj.android.ai.ClaudeSettings.state.collectAsStateWithLifecycle()
