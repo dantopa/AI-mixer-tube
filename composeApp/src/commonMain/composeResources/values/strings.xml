@@ -633,6 +633,11 @@
     <string name="dj_mix_now">Mix now</string>
     <string name="dj_ai_mix">AI Mix: let Claude choose where to mix</string>
     <string name="dj_ai_mix_short">AI Mix</string>
+    <string name="dj_ai_auto">Auto</string>
+    <string name="dj_ai_auto_on">AI Auto</string>
+    <string name="dj_ai_auto_description">Claude chooses every mix by itself</string>
+    <string name="ai_dj_claude_auto">Claude chooses every mix</string>
+    <string name="ai_dj_claude_auto_description">Asks Claude once per transition, as soon as both tracks are analysed (also from Now Playing: Auto). The DJ's own mix stays ready if Claude fails or is late. Each answer costs tokens: under a cent per hour with Haiku, about a dollar per hour with Opus (estimate).</string>
     <string name="dj_ai_no_key">AI Mix needs a Claude API key: Settings → AI DJ → Claude</string>
     <string name="dj_ai_busy">AI: still waiting for Claude</string>
     <string name="ai_dj_claude_key">Claude (AI Mix)</string>

@@ -38,7 +38,8 @@ class SchedulerBackgroundPort(
 ) : BackgroundAnalysisPort {
     override val available: Boolean get() = scheduler.state.value.analyzerAvailable
 
-    override suspend fun isAnalysed(videoId: String): Boolean = store.has(videoId) // a quick (DSP-only) analysis is enough to classify a library track
+    // a quick (DSP-only) analysis is enough to classify a library track; a file read, so never on the caller's (main) thread
+    override suspend fun isAnalysed(videoId: String): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { store.has(videoId) }
 
     override suspend fun analyse(videoId: String): AnalysisOutcome = scheduler.analyseInBackground(videoId)
 

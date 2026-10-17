@@ -403,6 +403,18 @@ Service modules:
     - **Key and model** (Settings -> AI DJ -> Claude): `ai/ClaudeSettings`. The key is a file in `noBackupFilesDir` (no backup or device transfer on any version), never logged or exported; the UI shows only its last four characters. Models: Haiku 5.5 (default, the owner's choice), Sonnet 5.5, Opus 5.5, with list prices. The lyrics translation (core `aiService`, Gemini / OpenAI) is unchanged: Claude there would need a core patch and a KMP client.
   - **Testing:** `MixBriefTest` on the owner's case 1 analyses (the brief, refused answers, Claude's points planned exactly: exit 93.6 s, entry 80.9 s, 4 bars, `AI_MIX`; points that cannot be used fall back with the reason). No real request was made from the build server (no key), and nothing was run on a device.
   - **Stall watchdog:** the main-thread stack now also names the first frames of our own code below the 14 printed, because the build-ax export showed a 1.4 s stall in JSON parsing that never reached its caller.
+- **AI Auto, the 4-bar AI minimum, a readable chip, and no store reads on the main thread (2026-10-17, build az)**: the owner's first AI session (export of 2026-10-16 19:12-19:35, build ay) had 15 live mixes, all finished, none aborted. 6 of them were Claude's.
+  - **Haiku vs Opus.** Haiku 5.5 answered in 10-14 s with ~2 200 output tokens and chose 1-bar overlaps (~3 s), trusting the detector's voice column. Opus 5.5 answered in 6-15 s with 400-1 000 output tokens and chose 3-8 bars, and the one AI mix the owner rated 👍 was Opus's.
+  - **Prompt changes** (`MixBrief.SYSTEM`): the detector's voice is a hint on cumbia, where it hears accordion or keyboards as voice; synced lyrics are reliable. The overlap is at least 4 bars, and the owner's usual length applies whenever both sides allow it.
+  - **Enforced minimum:** `MixBrief.parse` lengthens a shorter answer to `MIN_OVERLAP_BARS` 4.
+  - **"Claude chooses every mix"** (`ClaudeSettings.auto`, off by default): `DjEngine.maybeAutoAsk` asks once per pair, as soon as both analyses are ready (`aiAutoKey`). The regular plan is made meanwhile, so a mix is always prepared, and the answer re-plans the pair. The Now Playing actions row shows "✨ AI Mix" plus "Auto"; with Auto on it shows one lit "✨ AI Auto" pill, and tapping it turns Auto off. The same switch is in Settings -> AI DJ -> Claude.
+  - **The chip in three rows** (`DjStatusChip.android.kt`). The owner: "everything crammed, nothing can be read".
+    1. The DJ switch and the status, which takes the whole remaining width (it had been squeezed to "...").
+    2. Actions: Mix now, AI Mix / Auto, and the rating, with labels.
+    3. Correction tools: 1-2-3-4, », n/16, Out / In / Solo (bar counter on only).
+    Rows 2 and 3 are `FlowRow`s and wrap. Tap feedback is hoisted into `DjChipFeedback`.
+  - **The 0.8 s startup freeze** was named by the build-ay watchdog: `LibraryAnalysisCoordinator.refreshProgress` -> `AnalysisStore.has` decoded every stored analysis on the main thread to answer yes/no. `has()` now reads the file's first 512 characters (the serializer writes `videoId`, `schemaVersion`, `analyzerId` first) and decodes in full only when the head does not match. `SchedulerBackgroundPort.isAnalysed` runs on `Dispatchers.IO`.
+  - Not run on a device beyond the owner's build-ay session.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
@@ -1186,6 +1198,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-10-16
+**Last updated**: 2026-10-17
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors

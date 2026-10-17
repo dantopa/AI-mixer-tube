@@ -22,10 +22,12 @@ enum class ClaudeModel(val id: String, val label: String, val price: String) {
  * plain preference (`dj_claude`), Haiku by default (the owner's choice: a mix decision needs a few thousand tokens).
  */
 object ClaudeSettings {
-    data class State(val hasKey: Boolean = false, val keyHint: String? = null, val model: ClaudeModel = ClaudeModel.HAIKU)
+    /** [auto]: Claude chooses every mix by itself (once per pair), not only when ✨ is tapped. */
+    data class State(val hasKey: Boolean = false, val keyHint: String? = null, val model: ClaudeModel = ClaudeModel.HAIKU, val auto: Boolean = false)
 
     private const val PREFS = "dj_claude"
     private const val PREF_MODEL = "model"
+    private const val PREF_AUTO = "auto"
     private const val KEY_FILE = "dj_claude_key"
 
     @Volatile private var prefs: SharedPreferences? = null
@@ -70,12 +72,19 @@ object ClaudeSettings {
         DjLog.i(TAG, "claude: model ${model.id}")
     }
 
+    /** "Claude chooses every mix": off by default (each answer costs tokens), switched from Now Playing or Settings. */
+    fun setAuto(on: Boolean) {
+        prefs?.edit()?.putBoolean(PREF_AUTO, on)?.apply()
+        publish()
+        DjLog.i(TAG, "claude: auto ${if (on) "on" else "off"}")
+    }
+
     internal fun apiKey(): String? = key
 
     private fun publish() {
         val model = prefs?.getString(PREF_MODEL, null)?.let { n -> ClaudeModel.entries.firstOrNull { it.name == n } } ?: ClaudeModel.HAIKU
         // only the last four characters ever reach the UI
-        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model)
+        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model, auto = prefs?.getBoolean(PREF_AUTO, false) ?: false)
     }
 
     private const val TAG = "ai"

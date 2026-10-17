@@ -75,15 +75,27 @@ class AnalysisStore(
         return analysis
     }
 
-    /** True when a fresh analysis exists (does not touch LRU order). */
+    /**
+     * True when a fresh analysis exists (does not touch LRU order). Reads only the file's first few hundred characters: the
+     * serializer writes `videoId`, `schemaVersion` and `analyzerId` first. Decoding the whole file (beat grids, curves,
+     * frames: ~100-400 KB) for a yes/no froze the UI 0.8 s when the settings screen counted the library (owner's log,
+     * 2026-10-17). A file whose head does not read that way is decoded in full, as before.
+     */
     @Synchronized
     fun has(videoId: String, analyzerId: String? = null): Boolean {
         val file = fileFor(videoId)
         if (!file.isFile) return false
         return try {
-            val a = json.decodeFromString(TrackAnalysis.serializer(), file.readText())
-            a.videoId == videoId && a.schemaVersion == TrackAnalysis.SCHEMA_VERSION &&
-                (analyzerId == null || a.analyzerId == analyzerId)
+            val head = file.bufferedReader().use { r -> CharArray(HEAD_CHARS).let { buf -> String(buf, 0, r.read(buf).coerceAtLeast(0)) } }
+            val m = HEAD.find(head)
+            if (m != null) {
+                m.groupValues[1] == videoId && m.groupValues[2].toInt() == TrackAnalysis.SCHEMA_VERSION &&
+                    (analyzerId == null || m.groupValues[3] == analyzerId)
+            } else {
+                val a = json.decodeFromString(TrackAnalysis.serializer(), file.readText())
+                a.videoId == videoId && a.schemaVersion == TrackAnalysis.SCHEMA_VERSION &&
+                    (analyzerId == null || a.analyzerId == analyzerId)
+            }
         } catch (e: Exception) {
             false
         }
@@ -140,6 +152,10 @@ class AnalysisStore(
     private fun fileFor(videoId: String): File = File(dir, sanitize(videoId) + EXT)
 
     companion object {
+        /** How much of a file [has] reads, and what it looks for there. */
+        private const val HEAD_CHARS = 512
+        private val HEAD = Regex("""^\{"videoId":"([^"]*)","schemaVersion":(\d+),"analyzerId":"([^"]*)"""")
+
         private const val EXT = ".json"
         const val DEFAULT_MAX_BYTES = 48L * 1024 * 1024
         const val DEFAULT_MAX_ENTRIES = 4000

@@ -417,6 +417,9 @@ class DjEngine(
     private var aiKey: String? = null
     private var aiPoints: org.simpmusic.dj.model.AiMixPoints? = null
     private var aiJob: kotlinx.coroutines.Job? = null
+
+    /** The pair "auto" already asked Claude about (once per pair, whatever the answer). */
+    private var aiAutoKey: String? = null
     /** The running pipeline serves a "perfect mix" request (cleared when the pair changes). */
     private var perfectKey: String? = null
     private var pipeline: Job? = null
@@ -697,6 +700,7 @@ class DjEngine(
         mixNowKey = null
         perfectKey = null
         aiKey = null
+        aiAutoKey = null
         consumedKey = null
         stopMixView()
     }
@@ -710,6 +714,11 @@ class DjEngine(
         if (k == null || from == null || to == null || k == consumedKey) return AiMixResult.NO_PAIR
         if (_debug.value.isMixing) return AiMixResult.ALREADY_MIXING
         if (aiJob?.isActive == true) return AiMixResult.BUSY
+        launchAiAsk(k, from, to)
+        return AiMixResult.ASKING
+    }
+
+    private fun launchAiAsk(k: String, from: String, to: String) {
         val model = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model
         aiSay("AI: asking ${model.label}…", asking = true)
         aiJob =
@@ -725,7 +734,20 @@ class DjEngine(
                     _debug.update { it.copy(aiAsking = false) }
                 }
             }
-        return AiMixResult.ASKING
+    }
+
+    /**
+     * "Claude chooses every mix" (`ClaudeSettings.auto`): once per pair, as soon as both analyses are ready. The regular plan
+     * is made meanwhile, so a mix is always prepared; Claude's answer re-plans the pair when it lands.
+     */
+    private fun maybeAutoAsk(fromId: String, toId: String) {
+        val k = key(fromId, toId)
+        val claude = org.simpmusic.dj.android.ai.ClaudeSettings.state.value
+        if (!claude.auto || org.simpmusic.dj.android.ai.ClaudeSettings.apiKey() == null) return
+        if (aiKey == k || aiAutoKey == k || aiJob?.isActive == true || k == consumedKey || pairKey != k || _debug.value.isMixing) return
+        aiAutoKey = k
+        DjLog.i(TAG, "ai mix: auto, asking ${claude.model.id} for $fromId -> $toId")
+        launchAiAsk(k, fromId, toId)
     }
 
     private fun aiSay(status: String, asking: Boolean = false) {
@@ -970,6 +992,7 @@ class DjEngine(
             }
         }
         _debug.update { it.copy(phase = "planning", currentAnalysis = AnalysisStatus.Analysed, nextAnalysis = AnalysisStatus.Analysed) }
+        maybeAutoAsk(fromId, toId)
         val settings = settingsFlow.value
         // The window needs the outgoing audio decoded and rendered before it plays, so the mix cannot start sooner than that.
         // The real-time engine only needs the incoming player cued (a few seconds): the mix can come much sooner.

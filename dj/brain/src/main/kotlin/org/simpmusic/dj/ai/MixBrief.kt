@@ -70,14 +70,17 @@ object MixBrief {
         1. Overlap the outgoing's INSTRUMENTAL with the incoming's INSTRUMENTAL, with the bass present in BOTH (bass >= 4
            on both sides through the overlap). That is where a mix is felt.
         2. Never two voices at once: no singing on both tracks in the same bars. If the incoming sings from its first bar,
-           make the overlap short and end it right where its voice starts.
+           end the overlap right where its voice starts. When the voice column comes from the vocal detector, read it as a
+           hint: on cumbia it often hears the accordion or the keyboards as a voice, so only clear contrasts (0-2 against
+           7-9) mean something; synced lyrics are reliable.
         3. Phrase on phrase: start the mix on a phrase line ("P" or better "B") of both tracks when you can.
         4. The best moment to leave is right after a chorus ends, when the band plays an instrumental and the song would
            start over. The incoming's phrase 1 (its first sung line, or the start of its next section) should arrive
            exactly when the outgoing's instrumental ends, so the incoming takes over at full volume.
         5. Do not cut a sung line in half; do not leave in the middle of a chorus.
-        6. Prefer an overlap of 4 to 16 bars, as long as both instrumentals last; when nothing clean exists, a short overlap
-           on a phrase line beats a long messy one.
+        6. The overlap is at least 4 bars: a shorter one is not heard as a mix. Use the owner's usual length (given below)
+           whenever both sides allow it; otherwise the longest that stays clean. When nothing clean exists, 4 bars on a
+           phrase line beat a long messy overlap.
 
         Use only bar numbers from the tables and stay inside the allowed ranges given. Answer with the JSON only.
         """.trimIndent()
@@ -86,6 +89,9 @@ object MixBrief {
     private const val MAX_BARS = 220
     private const val MAX_LYRIC_LINES = 90
     private const val MAX_LYRIC_CHARS = 60
+
+    /** The shortest overlap an answer may ask for (shorter answers are lengthened). */
+    const val MIN_OVERLAP_BARS = 4
 
     /** An exit must leave this many bars of the outgoing for the overlap. */
     private const val EXIT_TAIL_BARS = 4
@@ -113,7 +119,7 @@ object MixBrief {
                 append(table(inc, inBars))
                 append("\nAllowed: exit_bar ").append(exitFrom).append("..").append(exitTo)
                 append(" (earlier bars have already played or come too soon), entry_bar 0..").append(entryTo)
-                append(", overlap_bars 1..32. The owner's usual overlap is ").append(requestedBars).append(" bars.\n")
+                append(", overlap_bars ").append(MIN_OVERLAP_BARS).append("..32. The owner's usual overlap is ").append(requestedBars).append(" bars.\n")
             }
         return Brief(SYSTEM, user, outBars, inBars, exitFrom, exitTo, entryTo)
     }
@@ -130,9 +136,10 @@ object MixBrief {
             require(exit in brief.exitFrom..brief.exitTo) { "exit_bar $exit is outside ${brief.exitFrom}..${brief.exitTo}" }
             require(entry in 0..brief.entryTo) { "entry_bar $entry is outside 0..${brief.entryTo}" }
             require(overlap >= 1) { "overlap_bars $overlap" }
-            // never more overlap than the outgoing has bars left
-            val room = brief.outBarsMs.size - 1 - exit
-            AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceAtMost(room).coerceIn(1, 32), why.ifEmpty { "no reason given" })
+            // at least MIN_OVERLAP_BARS (a model asked for 1-bar mixes on the owner's first session: ~3 s, not heard as a
+            // mix), never more than the outgoing has bars left
+            val room = (brief.outBarsMs.size - 1 - exit).coerceAtLeast(1)
+            AiMixPoints(brief.outBarsMs[exit], brief.inBarsMs[entry], overlap.coerceIn(MIN_OVERLAP_BARS, 32).coerceAtMost(room), why.ifEmpty { "no reason given" })
         }
 
     // ---------------------------------------------------------------------------------------------

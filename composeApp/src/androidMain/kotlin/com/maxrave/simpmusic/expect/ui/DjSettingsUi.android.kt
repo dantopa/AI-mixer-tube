@@ -70,6 +70,8 @@ import simpmusic.composeapp.generated.resources.ai_dj_log
 import simpmusic.composeapp.generated.resources.ai_dj_log_description
 import simpmusic.composeapp.generated.resources.ai_dj_advanced
 import simpmusic.composeapp.generated.resources.ai_dj_advanced_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_auto
+import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_label
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_message
@@ -264,24 +266,32 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                     },
                 )
                 AnimatedVisibility(visible = claude.hasKey) {
-                    SettingItem(
-                        title = modelTitle,
-                        subtitle = modelLabels.first { it.first == claude.model }.second,
-                        smallSubtitle = true,
-                        onClick = {
-                            viewModel.setAlertData(
-                                SettingAlertState(
-                                    title = modelTitle,
-                                    selectOne = SettingAlertState.SelectData(listSelect = modelLabels.map { (m, label) -> (m == claude.model) to label }),
-                                    confirm =
-                                        confirm to { state ->
-                                            modelLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.ai.ClaudeSettings.setModel(it) }
-                                        },
-                                    dismiss = dismiss,
-                                ),
-                            )
-                        },
-                    )
+                    Column {
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_claude_auto),
+                            subtitle = stringResource(Res.string.ai_dj_claude_auto_description),
+                            smallSubtitle = true,
+                            switch = (claude.auto to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(on) }),
+                        )
+                        SettingItem(
+                            title = modelTitle,
+                            subtitle = modelLabels.first { it.first == claude.model }.second,
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = modelTitle,
+                                        selectOne = SettingAlertState.SelectData(listSelect = modelLabels.map { (m, label) -> (m == claude.model) to label }),
+                                        confirm =
+                                            confirm to { state ->
+                                                modelLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.ai.ClaudeSettings.setModel(it) }
+                                            },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                    }
                 }
                 // the library analysis in one row: the action as title, the progress and its state below
                 SettingItem(

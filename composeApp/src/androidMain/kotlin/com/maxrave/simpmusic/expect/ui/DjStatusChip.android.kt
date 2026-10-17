@@ -79,6 +79,9 @@ import simpmusic.composeapp.generated.resources.dj_chip_mixing
 import simpmusic.composeapp.generated.resources.dj_mark_entry
 import simpmusic.composeapp.generated.resources.dj_mark_exit
 import simpmusic.composeapp.generated.resources.dj_mark_solo
+import simpmusic.composeapp.generated.resources.dj_ai_auto
+import simpmusic.composeapp.generated.resources.dj_ai_auto_description
+import simpmusic.composeapp.generated.resources.dj_ai_auto_on
 import simpmusic.composeapp.generated.resources.dj_ai_busy
 import simpmusic.composeapp.generated.resources.dj_ai_mix
 import simpmusic.composeapp.generated.resources.dj_ai_mix_short
@@ -312,13 +315,32 @@ private fun DjActionsRow(feedback: DjChipFeedback) {
             }
             // "AI Mix": Claude reads both tracks bar by bar (and their lyrics) and chooses the exit, the entry and the overlap.
             // Only with a key in Settings -> AI DJ -> Claude.
-            if (claude.hasKey) {
+            // "Auto" keeps it on: Claude chooses every mix by itself (once per pair); tap the lit pill to turn it off.
+            if (claude.hasKey && claude.auto) {
+                val autoDescription = stringResource(Res.string.dj_ai_auto_description)
+                ChipPill(
+                    modifier = Modifier.semantics { contentDescription = autoDescription }.clickable { org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(false) },
+                    lit = true,
+                ) {
+                    ChipLabel("✨ " + stringResource(Res.string.dj_ai_auto_on), bold = true, color = MaterialTheme.colorScheme.onPrimary)
+                }
+            } else if (claude.hasKey) {
                 val aiDescription = stringResource(Res.string.dj_ai_mix)
                 ChipPill(
                     modifier = Modifier.semantics { contentDescription = aiDescription }.clickable { feedback.ai = hooks.aiMix() },
                     lit = debug.aiPlan || debug.aiAsking,
                 ) {
                     ChipLabel("✨ " + stringResource(Res.string.dj_ai_mix_short))
+                }
+                val autoDescription = stringResource(Res.string.dj_ai_auto_description)
+                ChipPill(
+                    modifier = Modifier.semantics { contentDescription = autoDescription }.clickable {
+                        org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(true)
+                        // the pair already planned is asked about now, the next ones as soon as they are analysed
+                        feedback.ai = hooks.aiMix()
+                    },
+                ) {
+                    ChipLabel(stringResource(Res.string.dj_ai_auto))
                 }
             }
         }
