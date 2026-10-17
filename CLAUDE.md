@@ -460,6 +460,25 @@ Service modules:
   - **Per track**: a "✕ marks" pill at the end of the bar counter's correction row (shown only while the playing track has a mark) calls `DjHooks.forgetTrackMarks()`: Out / In / Solo (`UserMixMarks.clearTrack`), the tapped 1 and the phrase mark of that track, then `replanForMarks` re-plans the prepared pair (unless it is mixing).
   - **All tracks**: Settings -> AI DJ -> "Your marks" (`markedTrackCount()`, the union of the three stores' ids) asks for confirmation and calls `forgetAllMarks()` (`clearAll()` on `UserMixMarks`, `UserDownbeats`, `UserPhrases`). The 👍 / 👎 ratings in the mix journal are kept: they are Claude's memory, not marks.
   - The refined analyses are keyed by the anchors, so the next read is the detector's again. No unit test (the stores are SharedPreferences, and `:djAndroid` has no Robolectric). Not run on a device.
+- **AI plans three mixes ahead, "Order list" with Claude, the medley goal, an incremental export (2026-10-17, build bf)**: the owner's build-be export: 43 AI Auto questions, 21 answers. The rest ended in "not enough of this track left to mix". Claude was asked only once a pair became current. The mix before it often entered the track deep (52 s into a 1:38 track), and the question reserved 60 s for the answer plus 16 s of cue. 52 + 76 s is past the end. The owner: "a real DJ is always ahead: solve the next three tracks".
+  - **Ahead chain** (`DjEngine.aiPlanAhead`, `aiAskAhead`, `claudePoints`): with AI Auto on, Claude solves the next `AI_AHEAD_PAIRS` 3 pairs of the queue (`upcomingIds`, from `DjPlayerPort.snapshot()`; none while shuffled or blocked), one question at a time, after the current pair's own question.
+    - A pair's outgoing is heard from its hand-over (`handoverOf`: entry + overlap of the pair before, from the real plan or a dry-run plan of the ahead answer), so its exits are offered from there + `AI_AHEAD_SOLO_MS` 30 s. The playhead and the answer time no longer limit it.
+    - Answers go to `aiBook`. When the pair becomes current, `onQueueContext` plans them at once (no question, no wait).
+    - A booked answer that cannot be planned asks again for now. One whose exit falls before the new hand-over + 16 s (the mix before moved) is dropped and asked again (`noteHandover`).
+    - The two upcoming analyses run at NEXT_UP and survive `cancelStale` (`DjAnalysisScheduler.setAiAhead`).
+    - In steady state this is one question per track, as before, only earlier. The brief says the outgoing is "not playing yet" (`MixBrief.build(ahead = true)`).
+    - The lit "AI Auto" pill shows `· +N` (`DjDebugState.aiAhead`).
+  - **"Order list"** (`ai/SetBrief`, `DjEngine.orderWithAi`, `ClaudeMixClient.askJson`): Claude orders the next `AI_ORDER_TRACKS` 10 tracks with structured output (labels T1..Tn).
+    - Each track carries its title (`DjPlayerPort.queuedTitle`) and, when a stored analysis exists, bpm, key, length, loudness and `SongMap.describe`.
+    - The rules: tempo within ~6 % first, keys, an instrumental end into an intro, the energy arc, the same style together. The playing track stays first. `SetBrief.parse` drops unknown labels and appends missing ones.
+    - The order is applied with `moveToNext` from the last id back, each step waiting until the queue shows it.
+    - `ClaudeOrder.ids` makes `QueueLookAhead` leave that order alone, and the ahead book is cleared.
+  - **The prompt's goal** (`MixBrief.SYSTEM`, above the rules): the change must not be felt, like a live band's "enganchado". The groove never stops, the next sung line comes where a line would, and between two clean options Claude takes the one that sounds most like one song.
+  - **Log and export**:
+    - The 18 MB zip was not the log (1.6 MB): it was 325 analyses (26 MB) and their phasegrams/phrasegrams (10 MB), sent every time.
+    - "Export analyses" now carries only the analyses and pictures of tracks mixed (journal) or analysed since the previous export (`dj_export` prefs; the first export covers the last 24 h).
+    - "Clear" empties the log on disk too (`RotatingLogFile.clear`) and resets the export point.
+  - Tests: `MixBriefTest.aPairSolvedAheadSaysTheOutgoingIsNotPlayingYet`, `SetBriefTest`. Not run on a device; no real request from the build server.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies

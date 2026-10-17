@@ -277,10 +277,17 @@ class DjAnalysisScheduler(
         lookAhead = ids
     }
 
+    /** The upcoming tracks "AI Auto" solves mixes for ahead (see `DjEngine.aiPlanAhead`): kept like the look-ahead's. */
+    @Volatile private var aiAhead: Set<String> = emptySet()
+
+    fun setAiAhead(ids: Set<String>) {
+        aiAhead = ids
+    }
+
     /** Forget queued NOW_PLAYING/NEXT_UP work that is not for [current] or [next]; abort the running one if stale. */
     fun cancelStale(current: String?, next: String?) {
         synchronized(lock) {
-            val keep = setOfNotNull(current, next) + lookAhead
+            val keep = setOfNotNull(current, next) + lookAhead + aiAhead
             val dropped = ArrayList<String>()
             val it = queue.values.iterator()
             while (it.hasNext()) {

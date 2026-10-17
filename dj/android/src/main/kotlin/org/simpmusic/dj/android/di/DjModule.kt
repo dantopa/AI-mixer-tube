@@ -2,6 +2,7 @@
 
 package org.simpmusic.dj.android.di
 
+import org.simpmusic.dj.android.AI_AHEAD_PAIRS
 import android.os.Process
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.SimpleCache
@@ -192,6 +193,16 @@ val djModule =
                     lyrics = runCatching { get<DjLyricsSource>() }.onFailure { DjLog.e("boot", "lyric vocals are OFF", it) }.getOrNull(),
                     // the real-time engine: one mixer and ONE audio output for every player (players opt in when they are built)
                     bus = runCatching { org.simpmusic.dj.android.bus.AndroidMixBus() }.onFailure { DjLog.e("boot", "real-time engine is OFF", it) }.getOrNull(),
+                    // what AI Auto plans ahead: the queue after the playing track, in playing order (none while shuffled or blocked)
+                    playerPort = { getOrNull<DjPlayerPort>() },
+                    upcomingIds = {
+                        val snap = get<DjPlayerPort>().snapshot()
+                        if (snap.currentIndex < 0 || snap.shuffle || snap.blockedReason?.let { it != "repeat all" } == true) {
+                            emptyList()
+                        } else {
+                            snap.queueIds.drop(snap.currentIndex + 1).take(AI_AHEAD_PAIRS)
+                        }
+                    },
                 )
             // The library analysis, the recommender, Auto DJ and the diagnostics start with the engine (they idle while off).
             // A failure here must never take the player down with it: the transition engine works without any of this.

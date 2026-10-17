@@ -157,6 +157,56 @@ class ClaudeMixClient {
         }
     }
 
+    /**
+     * One structured-output question with no tools ("order the list"): [system] cached, [user] as the message, the answer
+     * JSON matching [schema]. Blocking: call it off the main thread.
+     */
+    fun askJson(system: String, user: String, schema: Map<String, Any>, what: String): Result<Answer> {
+        val apiKey = ClaudeSettings.apiKey() ?: return Result.failure(IllegalStateException("no Claude API key (Settings -> AI DJ)"))
+        val model = ClaudeSettings.state.value.model
+        val t0 = System.nanoTime()
+        DjLog.i(TAG, "asking ${model.id} ($what): ${user.length} chars")
+        return try {
+            val format = JsonOutputFormat.Schema.builder().apply { schema.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
+            val b =
+                MessageCreateParams.builder()
+                    .model(model.id)
+                    .maxTokens(MAX_TOKENS)
+                    .systemOfTextBlockParams(listOf(TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()))
+                    .addUserMessage(user)
+                    .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).build())
+            val m = clientFor(apiKey).messages().create(b.build())
+            when (m.stopReason().orElse(null)) {
+                StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
+                StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
+                else -> {}
+            }
+            val text = m.content().mapNotNull { blk -> blk.text().orElse(null)?.text() }.joinToString("").trim()
+            if (text.isEmpty()) return Result.failure(IllegalStateException("Claude gave no answer"))
+            val elapsed = (System.nanoTime() - t0) / 1_000_000
+            val u = m.usage()
+            DjLog.i(TAG, "answer from ${model.id} ($what) in $elapsed ms (${u.inputTokens()} in / ${u.outputTokens()} out tokens): $text")
+            Result.success(
+                Answer(
+                    text, u.inputTokens(), u.outputTokens(), model, elapsed,
+                    cacheReadTokens = u.cacheReadInputTokens().orElse(0L), cacheWriteTokens = u.cacheCreationInputTokens().orElse(0L),
+                ),
+            )
+        } catch (e: Exception) {
+            Result.failure(failureOf(e, model))
+        }
+    }
+
+    private fun failureOf(e: Exception, model: ClaudeModel): Exception =
+        when (e) {
+            is UnauthorizedException -> IllegalStateException("the API key was refused (401)")
+            is PermissionDeniedException -> IllegalStateException("the API key may not use ${model.label} (403)")
+            is RateLimitException -> IllegalStateException("rate limited, try again in a minute (429)")
+            is AnthropicServiceException -> IllegalStateException("Claude answered ${e.statusCode()}: ${e.message?.take(120)}")
+            is AnthropicIoException -> IllegalStateException("no connection to Claude (${e.javaClass.simpleName})")
+            else -> IllegalStateException("${e.javaClass.simpleName}: ${e.message?.take(120)}")
+        }
+
     private fun toolOf(spec: MixTools.Spec): Tool {
         @Suppress("UNCHECKED_CAST")
         val props = spec.schema["properties"] as Map<String, Any>

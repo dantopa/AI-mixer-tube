@@ -84,6 +84,11 @@ class HandlerPlayerPort(
         h.onPlayerEvent(PlayerEvent.Next)
     }
 
+    override fun queuedTitle(videoId: String): String? =
+        handler().queueData.value?.data?.listTracks?.firstOrNull { it.videoId == videoId }?.let { t ->
+            t.title + t.artists.orEmpty().joinToString(", ") { it.name }.let { a -> if (a.isBlank()) "" else " - $a" }
+        }
+
     override suspend fun moveToNext(videoId: String): Boolean {
         val h = handler()
         val s = snapshotOf(h)

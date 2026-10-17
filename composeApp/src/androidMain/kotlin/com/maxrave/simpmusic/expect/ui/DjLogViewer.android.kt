@@ -178,7 +178,7 @@ fun DjLogViewerDialog(onDismiss: () -> Unit) {
                     OutlinedButton(onClick = { shareDjLog(context, shareTitle) }, contentPadding = PaddingValues(horizontal = 10.dp)) {
                         Text(stringResource(Res.string.dj_log_share), fontSize = 12.sp)
                     }
-                    OutlinedButton(onClick = { DjLog.clear() }, contentPadding = PaddingValues(horizontal = 10.dp)) {
+                    OutlinedButton(onClick = { clearDjLog(context) }, contentPadding = PaddingValues(horizontal = 10.dp)) {
                         Text(stringResource(Res.string.dj_log_clear), fontSize = 12.sp)
                     }
                 }
@@ -278,21 +278,51 @@ fun shareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, S
 
 private val djExportRunning = java.util.concurrent.atomic.AtomicBoolean(false)
 
+/**
+ * Exports are incremental: each one carries only the analyses (and their pictures) of the tracks mixed or analysed since
+ * the previous export, or since the log was cleared. The owner's export had grown to 18 MB, almost all of it the 325
+ * stored analyses (26 MB unzipped) and their phasegrams (10 MB), sent again every time; the logs were 1.6 MB.
+ */
+private fun exportPrefs(context: Context) = context.getSharedPreferences("dj_export", Context.MODE_PRIVATE)
+
+private const val EXPORT_SINCE = "since"
+
+/** The first export (nothing to count from) carries the last day. */
+private const val FIRST_EXPORT_SPAN_MS = 24 * 3_600_000L
+
+/** "Clear": the log (memory and disk) starts from zero, and so does the next export. */
+fun clearDjLog(context: Context) {
+    DjLog.clear()
+    exportPrefs(context).edit().putLong(EXPORT_SINCE, System.currentTimeMillis()).apply()
+}
+
 private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, names: Map<String, String>) {
     runCatching {
         val dir = File(context.cacheDir, "dj_log").apply { mkdirs() }
         // a fresh name per export: a share target may still be reading the previous one
         dir.listFiles { f -> f.name.startsWith("dj-analyses") && f.name.endsWith(".zip") }?.forEach { it.delete() }
-        val zip = File(dir, "dj-analyses-${System.currentTimeMillis()}.zip")
+        val startedAt = System.currentTimeMillis()
+        val zip = File(dir, "dj-analyses-$startedAt.zip")
+        val since = exportPrefs(context).getLong(EXPORT_SINCE, 0L).takeIf { it > 0L } ?: (startedAt - FIRST_EXPORT_SPAN_MS)
+        // the tracks of the mixes since then (journal), plus every analysis made or updated since then
+        val mixed =
+            org.simpmusic.dj.android.journal.MixJournal.files()
+                .flatMap { f -> runCatching { f.readLines() }.getOrDefault(emptyList()) }
+                .mapNotNull { runCatching { org.simpmusic.dj.android.journal.MixJournal.decode(it) }.getOrNull() }
+                .filter { it.atEpochMs >= since }
+                .flatMap { listOfNotNull(it.fromId, it.toId) }
+                .toSet()
+        val analyses =
+            File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }.orEmpty()
+                .filter { f -> f.lastModified() >= since || f.name.removeSuffix(".json") in mixed }
+        DjLog.i("export", "export since ${java.time.Instant.ofEpochMilli(since)}: ${analyses.size} analyses, ${mixed.size} tracks mixed")
         java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
             fun put(name: String, bytes: ByteArray) {
                 out.putNextEntry(java.util.zip.ZipEntry(name))
                 out.write(bytes)
                 out.closeEntry()
             }
-            File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
-                put("analysis/${f.name}", f.readBytes())
-            }
+            analyses.forEach { f -> put("analysis/${f.name}", f.readBytes()) }
             put("dj-log.txt", DjLog.text().toByteArray())
             // only the lines about the mixes, from every session on disk: the file to open first
             put("mixes.txt", DjLog.mixLines().joinToString("\n").toByteArray())
@@ -321,7 +351,7 @@ private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, name
                 if (f.isFile) put(name, f.readBytes())
             }
             // One phasegram per analysis that carries the bar-phase evidence: does the "1" sit where the network hears it?
-            File(context.filesDir, "dj/analysis").listFiles { f -> f.isFile && f.name.endsWith(".json") }?.forEach { f ->
+            analyses.forEach { f ->
                 runCatching {
                     val a = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString(org.simpmusic.dj.model.TrackAnalysis.serializer(), f.readText())
                     org.simpmusic.dj.android.perfect.Phasegram.png(a, names[a.videoId])?.let { put("phasegram/${a.videoId}.png", it) }
@@ -339,5 +369,7 @@ private fun buildAndShareDjAnalyses(context: Context, chooserTitle: String, name
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             runCatching { context.startActivity(Intent.createChooser(send, chooserTitle).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }) }
         }
+        // the next export starts from here
+        exportPrefs(context).edit().putLong(EXPORT_SINCE, startedAt).apply()
     }.onFailure { DjLog.w("export", "analysis export failed: ${it.message}") }
 }

@@ -138,6 +138,8 @@ data class DjDebugState(
     val aiAsking: Boolean = false,
     /** The prepared / playing plan is Claude's ([PlanSource.AI_MIX]). */
     val aiPlan: Boolean = false,
+    /** How many of the upcoming mixes (after the current one) Claude has already solved, see `DjEngine.aiPlanAhead`. */
+    val aiAhead: Int = 0,
 ) {
     /** A DJ mix is audible right now (the adapter started the window). */
     val isMixing: Boolean get() = phase == "mixing"
@@ -256,6 +258,12 @@ interface DjHooks {
      * its points. UI, main thread; the answer arrives in [debug] (`aiStatus`).
      */
     fun aiMix(): AiMixResult = AiMixResult.DISABLED
+
+    /**
+     * "Order with AI": Claude puts the radio's next tracks in the order that mixes best (every join a natural continuation).
+     * The answer arrives in [debug] (`aiStatus`); the queue is reordered by itself. UI, main thread.
+     */
+    fun orderWithAi(): AiMixResult = AiMixResult.DISABLED
 
     /**
      * "Perfect mix": re-plan for the best point within the next couple of minutes where BOTH 1s are trusted, phrase on
@@ -382,6 +390,13 @@ class DjEngine(
     private val bus: org.simpmusic.dj.android.bus.AndroidMixBus? = null,
     /** "AI Mix": asks Claude (the key and the model are the owner's, `ClaudeSettings`). */
     private val claude: org.simpmusic.dj.android.ai.ClaudeMixClient = org.simpmusic.dj.android.ai.ClaudeMixClient(),
+    /**
+     * The tracks queued after the playing one, in playing order (empty when unknown, shuffled or blocked): what "AI Auto"
+     * plans ahead ([AI_AHEAD_PAIRS] mixes), like a DJ who has the next records lined up before the current one ends.
+     */
+    private val upcomingIds: () -> List<String> = { emptyList() },
+    /** The app's queue, to reorder it ("Order with AI"); null in tests that do not use it. */
+    private val playerPort: () -> org.simpmusic.dj.android.recommend.DjPlayerPort? = { null },
 ) : DjHooks {
     override fun createAudioOutputProvider(): androidx.media3.exoplayer.audio.AudioOutputProvider? {
         val b = bus ?: return null
@@ -435,6 +450,19 @@ class DjEngine(
 
     /** The pair "auto" already asked Claude about (once per pair, whatever the answer). */
     private var aiAutoKey: String? = null
+
+    /**
+     * Claude's answers for UPCOMING pairs (key -> points), solved while an earlier track plays (see [aiPlanAhead]): when a
+     * pair becomes the current one its points are used at once, with no question and no wait. Main thread.
+     */
+    private val aiBook = LinkedHashMap<String, org.simpmusic.dj.model.AiMixPoints>()
+
+    /** Upcoming pairs already asked about, whatever the answer (Claude is asked once per pair). Main thread. */
+    private val aiAheadAsked = LinkedHashSet<String>()
+
+    /** Per pair, where its incoming track plays alone from (entry + overlap, its own source ms): where the next mix may leave. */
+    private val handoverOf = HashMap<String, Long>()
+    private var aiAheadJob: Job? = null
     /** The running pipeline serves a "perfect mix" request (cleared when the pair changes). */
     private var perfectKey: String? = null
     private var pipeline: Job? = null
@@ -776,6 +804,92 @@ class DjEngine(
         return AiMixResult.ASKING
     }
 
+    private var orderJob: Job? = null
+
+    override fun orderWithAi(): AiMixResult {
+        if (!settingsFlow.value.enabled) return AiMixResult.DISABLED
+        if (org.simpmusic.dj.android.ai.ClaudeSettings.apiKey() == null) return AiMixResult.NO_KEY
+        val port = playerPort() ?: return AiMixResult.NO_PAIR
+        if (orderJob?.isActive == true) return AiMixResult.BUSY
+        val snap = port.snapshot()
+        val current = snap.currentId ?: return AiMixResult.NO_PAIR
+        if (snap.blockedReason != null || snap.currentIndex < 0) return AiMixResult.NO_PAIR
+        val upcoming = snap.queueIds.drop(snap.currentIndex + 1).take(AI_ORDER_TRACKS)
+        if (upcoming.size < 3) return AiMixResult.NO_PAIR
+        val model = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model
+        aiSay("AI: ordering the next ${upcoming.size} tracks with ${model.label}…", asking = true)
+        orderJob =
+            scope.launch {
+                try {
+                    orderAhead(port, current, upcoming)
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    DjLog.e(TAG, "order with AI failed", e)
+                    aiSay("AI: ${e.javaClass.simpleName}")
+                } finally {
+                    _debug.update { it.copy(aiAsking = false) }
+                }
+            }
+        return AiMixResult.ASKING
+    }
+
+    private suspend fun orderAhead(port: org.simpmusic.dj.android.recommend.DjPlayerPort, current: String, upcoming: List<String>) {
+        // only stored analyses (no new work: the order is asked now); the others go by title and what Claude knows
+        val tracks =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                (listOf(current) + upcoming).map { id ->
+                    val title = port.queuedTitle(id) ?: runCatching { titleOf(id) }.getOrNull() ?: id
+                    val a = runCatching { scheduler.get(id) }.getOrNull()
+                    org.simpmusic.dj.ai.SetBrief.Track(id, title, a?.let { Timelines.of(it) })
+                }
+            }
+        val brief =
+            org.simpmusic.dj.ai.SetBrief.build(
+                tracks.first(), tracks.drop(1),
+                taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
+            ) ?: run {
+                aiSay("AI: not enough upcoming tracks to order")
+                return
+            }
+        DjLog.i(TAG, "order with AI: ${tracks.size - 1} upcoming, ${tracks.count { it.timeline != null } - 1} analysed")
+        val answer =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                claude.askJson(brief.system, brief.user, org.simpmusic.dj.ai.SetBrief.SCHEMA, "order the list")
+            }.getOrElse {
+                aiSay("AI: ${it.message}")
+                return
+            }
+        val order = org.simpmusic.dj.ai.SetBrief.parse(brief, answer.json).getOrElse {
+            DjLog.w(TAG, "order with AI: unusable answer (${it.message}): ${answer.json}")
+            aiSay("AI: unusable answer (${it.message})")
+            return
+        }
+        // the queue must still be what was ordered
+        val now = port.snapshot()
+        if (now.currentId != current || now.queueIds.drop(now.currentIndex + 1).take(upcoming.size) != upcoming) {
+            aiSay("AI: the queue changed meanwhile, nothing moved")
+            return
+        }
+        org.simpmusic.dj.android.ai.ClaudeOrder.ids = order.ids.toSet()
+        // into place from the last: each one moved right after the current pushes the ones moved before it back by one
+        var moved = 0
+        for (id in order.ids.asReversed()) {
+            if (port.moveToNext(id)) moved++
+            // the handler moves one step at a time: wait until the queue shows it in the next slot
+            withTimeoutOrNull(ORDER_STEP_WAIT_MS) {
+                while (port.snapshot().let { it.queueIds.getOrNull(it.currentIndex + 1) } != id) kotlinx.coroutines.delay(50)
+            }
+        }
+        val result = port.snapshot().let { it.queueIds.drop(it.currentIndex + 1).take(order.ids.size) }
+        DjLog.i(TAG, "order with AI: ${order.ids.joinToString(" > ")} (${order.why}); moved $moved, queue now ${result.joinToString(" > ")}; \$${"%.4f".format(java.util.Locale.ROOT, claude.costUsd(answer))}")
+        // the mixes solved ahead were for the old order
+        aiBook.clear()
+        aiAheadAsked.clear()
+        _debug.update { it.copy(aiAhead = 0) }
+        aiSay("AI: list ordered · ${order.why}")
+    }
+
     private fun launchAiAsk(k: String, from: String, to: String) {
         val model = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model
         aiSay("AI: asking ${model.label}…", asking = true)
@@ -790,6 +904,8 @@ class DjEngine(
                     aiSay("AI: ${e.javaClass.simpleName}")
                 } finally {
                     _debug.update { it.copy(aiAsking = false) }
+                    // the current pair is settled (answered or not): the upcoming ones can be solved now
+                    scope.launch { aiPlanAhead() }
                 }
             }
     }
@@ -821,71 +937,15 @@ class DjEngine(
             return
         }
         val settings = settingsFlow.value
-        // Tempos the engine cannot meet (it bends each deck at most OWNER_TEMPO_BEND): Claude cannot fix that, so it is not
-        // asked (the owner's first Opus session paid for 3 answers at 97 -> 125 and 102 -> 84 bpm, all thrown away).
-        val bpmOut = Timelines.of(from).bpm?.value
-        val bpmIn = Timelines.of(to).bpm?.value
-        if (bpmOut != null && bpmIn != null) {
-            val r = bpmIn / bpmOut
-            val gap = listOf(r, r * 2f, r / 2f).minOf { kotlin.math.abs(it - 1f) }
-            if (gap > AI_MAX_TEMPO_GAP) {
-                aiSay("AI: tempos too far apart (%.0f → %.0f bpm), the DJ mixes this one".format(bpmOut, bpmIn))
-                DjLog.i(TAG, "ai mix $fromId -> $toId not asked: tempo gap %.0f %% (%.1f -> %.1f bpm)".format(gap * 100, bpmOut, bpmIn))
-                return
-            }
-        }
         val withTools = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.tools
         // the answer takes seconds (more with tools: several turns), then the mix needs its usual lead
         val lead = (if (withTools) AI_TOOLS_BUDGET_MS else AI_ANSWER_BUDGET_MS) + if (bus != null && settings.realtimeEngine) BUS_EARLIEST_EXIT_AHEAD_MS else EARLIEST_EXIT_AHEAD_MS
         val position = playbackPositionMs
-        val titleFrom = runCatching { titleOf(fromId) }.getOrNull() ?: fromId
-        val titleTo = runCatching { titleOf(toId) }.getOrNull() ?: toId
-        val brief =
-            withContext(kotlinx.coroutines.Dispatchers.IO) {
-                org.simpmusic.dj.ai.MixBrief.build(
-                    org.simpmusic.dj.ai.MixBrief.Track(titleFrom, Timelines.of(from), lyrics?.linesOnTrack(fromId)),
-                    org.simpmusic.dj.ai.MixBrief.Track(titleTo, Timelines.of(to), lyrics?.linesOnTrack(toId)),
-                    earliestExitMs = position + lead,
-                    requestedBars = settings.overlapBars,
-                    positionMs = position,
-                    // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
-                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
-                )
-            }
-        if (brief == null) {
-            aiSay("AI: not enough of this track left to mix")
-            return
-        }
-        val earliest = position + lead
-        val answer =
-            withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val tFrom = Timelines.of(from)
-                val tTo = Timelines.of(to)
-                // the fingerprint of both tracks as a picture, for Claude's eye
-                val image = org.simpmusic.dj.android.ai.FingerprintImage.png(brief, tFrom, tTo, titleFrom, titleTo)
-                val tools =
-                    if (withTools) {
-                        org.simpmusic.dj.ai.MixTools(brief, from, to, lyrics?.linesOnTrack(fromId), lyrics?.linesOnTrack(toId), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliest, planner)
-                    } else {
-                        null
-                    }
-                claude.ask(brief, image, tools)
-            }.getOrElse {
-                DjLog.w(TAG, "ai mix: ${it.message}")
-                aiSay("AI: ${it.message}")
-                return
-            }
-        val pts = (answer.committed?.let { Result.success(it) } ?: org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json)).getOrElse {
-            DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
-            aiSay("AI: unusable answer (${it.message})")
-            return
-        }
+        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = position + lead, heardFromMs = position, ahead = false, say = { aiSay(it) }) ?: return
         if (pairKey != k || k == consumedKey || _debug.value.isMixing) {
             aiSay("AI: the pair changed meanwhile")
             return
         }
-        val cost = claude.costUsd(answer)
-        DjLog.i(TAG, "ai mix $fromId -> $toId: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars, moves ${pts.moves.describe()} (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
         aiKey = k
         aiPoints = pts
         mixNowKey = null
@@ -895,6 +955,190 @@ class DjEngine(
         ready = null
         startPipeline(fromId, toId)
         aiSay("AI: out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars" + (if (pts.moves.isDefault) "" else " · ${pts.moves.describe()}") + " · ${pts.why}")
+    }
+
+    /**
+     * Claude's points for [fromId] -> [toId], exits offered from [earliestExitMs] (outgoing source ms); the outgoing is heard
+     * from [heardFromMs] (the playhead now, or where an earlier mix hands it over, when [ahead]). Null when there is no usable
+     * answer; why is said through [say]. Suspends on IO for the brief, the picture and the request.
+     */
+    private suspend fun claudePoints(
+        fromId: String,
+        toId: String,
+        from: TrackAnalysis,
+        to: TrackAnalysis,
+        earliestExitMs: Long,
+        heardFromMs: Long,
+        ahead: Boolean,
+        say: (String) -> Unit,
+    ): org.simpmusic.dj.model.AiMixPoints? {
+        val settings = settingsFlow.value
+        // Tempos the engine cannot meet (it bends each deck at most OWNER_TEMPO_BEND): Claude cannot fix that, so it is not
+        // asked (the owner's first Opus session paid for 3 answers at 97 -> 125 and 102 -> 84 bpm, all thrown away).
+        val bpmOut = Timelines.of(from).bpm?.value
+        val bpmIn = Timelines.of(to).bpm?.value
+        if (bpmOut != null && bpmIn != null) {
+            val r = bpmIn / bpmOut
+            val gap = listOf(r, r * 2f, r / 2f).minOf { kotlin.math.abs(it - 1f) }
+            if (gap > AI_MAX_TEMPO_GAP) {
+                say("AI: tempos too far apart (%.0f → %.0f bpm), the DJ mixes this one".format(bpmOut, bpmIn))
+                DjLog.i(TAG, "ai mix $fromId -> $toId not asked: tempo gap %.0f %% (%.1f -> %.1f bpm)".format(gap * 100, bpmOut, bpmIn))
+                return null
+            }
+        }
+        val withTools = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.tools
+        val titleFrom = runCatching { titleOf(fromId) }.getOrNull() ?: fromId
+        val titleTo = runCatching { titleOf(toId) }.getOrNull() ?: toId
+        val brief =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                org.simpmusic.dj.ai.MixBrief.build(
+                    org.simpmusic.dj.ai.MixBrief.Track(titleFrom, Timelines.of(from), lyrics?.linesOnTrack(fromId)),
+                    org.simpmusic.dj.ai.MixBrief.Track(titleTo, Timelines.of(to), lyrics?.linesOnTrack(toId)),
+                    earliestExitMs = earliestExitMs,
+                    requestedBars = settings.overlapBars,
+                    positionMs = heardFromMs,
+                    // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
+                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
+                    ahead = ahead,
+                )
+            }
+        if (brief == null) {
+            DjLog.i(TAG, "ai mix $fromId -> $toId not asked: no exit left from $earliestExitMs ms (track ${from.durationMs} ms)")
+            say("AI: not enough of this track left to mix")
+            return null
+        }
+        val answer =
+            withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val tFrom = Timelines.of(from)
+                val tTo = Timelines.of(to)
+                // the fingerprint of both tracks as a picture, for Claude's eye
+                val image = org.simpmusic.dj.android.ai.FingerprintImage.png(brief, tFrom, tTo, titleFrom, titleTo)
+                val tools =
+                    if (withTools) {
+                        org.simpmusic.dj.ai.MixTools(brief, from, to, lyrics?.linesOnTrack(fromId), lyrics?.linesOnTrack(toId), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliestExitMs, planner)
+                    } else {
+                        null
+                    }
+                claude.ask(brief, image, tools)
+            }.getOrElse {
+                DjLog.w(TAG, "ai mix: ${it.message}")
+                say("AI: ${it.message}")
+                return null
+            }
+        val pts = (answer.committed?.let { Result.success(it) } ?: org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json)).getOrElse {
+            DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
+            say("AI: unusable answer (${it.message})")
+            return null
+        }
+        val cost = claude.costUsd(answer)
+        DjLog.i(TAG, "ai mix $fromId -> $toId${if (ahead) " (ahead)" else ""}: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars, moves ${pts.moves.describe()} (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
+        return pts
+    }
+
+    /**
+     * "AI Auto" plans AHEAD, like a DJ who already has the next records worked out: while a track plays, Claude solves the
+     * mixes of the next [AI_AHEAD_PAIRS] pairs of the queue, one after the other. The next pair's outgoing is heard from where
+     * the mix before hands it over ([handoverOf]: entry + overlap), so its exits are offered from there + [AI_AHEAD_SOLO_MS];
+     * nothing depends on the playhead, and when a pair becomes current its answer is used at once ([aiBook]).
+     *
+     * Before this, Claude was asked only when a pair became current. A mix that entered the next track 52 s in (of 1:38)
+     * then left no exit after the 60 s an answer may take: "not enough of this track left" (owner, build bd, 2026-10-17).
+     * Main thread; at most one ahead question at a time, after the current pair's own question.
+     */
+    private fun aiPlanAhead() {
+        val claudeState = org.simpmusic.dj.android.ai.ClaudeSettings.state.value
+        if (!claudeState.auto || org.simpmusic.dj.android.ai.ClaudeSettings.apiKey() == null || !settingsFlow.value.enabled) return
+        if (aiAheadJob?.isActive == true || aiJob?.isActive == true) return
+        val current = pairFrom ?: return
+        val next = pairTo ?: return
+        val upcoming = runCatching { upcomingIds() }.getOrDefault(emptyList())
+        if (upcoming.firstOrNull() != next) return // the queue moved, or it cannot be read: the next context change retries
+        val chain = listOf(current) + upcoming.take(AI_AHEAD_PAIRS)
+        scheduler.setAiAhead(chain.drop(2).toSet())
+        // the first upcoming pair not asked yet, whose outgoing's hand-over is known (the pair before it is planned)
+        for (i in 1 until chain.size - 1) {
+            val a = chain[i]
+            val b = chain[i + 1]
+            val k = key(a, b)
+            if (k in aiBook || k in aiAheadAsked) continue
+            val heard = handoverOf[key(chain[i - 1], a)] ?: return
+            aiAheadAsked += k
+            while (aiAheadAsked.size > AI_AHEAD_MEMORY) aiAheadAsked.remove(aiAheadAsked.first())
+            aiAheadJob =
+                scope.launch {
+                    try {
+                        aiAskAhead(k, a, b, heard)
+                    } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                        throw e
+                    } catch (e: Throwable) {
+                        DjLog.e(TAG, "ai ahead $a -> $b failed", e)
+                    }
+                    // the next pair down the chain (its hand-over is known now)
+                    aiPlanAhead()
+                }
+            return
+        }
+    }
+
+    private suspend fun aiAskAhead(k: String, fromId: String, toId: String, heardFromMs: Long) {
+        lyrics?.request(fromId)
+        lyrics?.request(toId)
+        // the upcoming tracks are analysed at NEXT_UP priority, one at a time (kept through cancelStale, see setAiAhead)
+        scheduler.request(fromId, AnalysisPriority.NEXT_UP)
+        scheduler.request(toId, AnalysisPriority.NEXT_UP)
+        val pair =
+            withTimeoutOrNull(AI_AHEAD_ANALYSIS_WAIT_MS) {
+                combine(scheduler.observe(fromId), scheduler.observe(toId)) { a, b -> if (a != null && b != null) a to b else null }.filterNotNull().first()
+            }
+        if (pair == null) {
+            DjLog.i(TAG, "ai ahead $fromId -> $toId: analyses not ready after ${AI_AHEAD_ANALYSIS_WAIT_MS / 1000} s, asked when the pair comes")
+            aiAheadAsked.remove(k)
+            return
+        }
+        val (from, to) = pair
+        val earliest = heardFromMs + AI_AHEAD_SOLO_MS
+        DjLog.i(TAG, "ai ahead: asking for $fromId -> $toId (outgoing heard from $heardFromMs ms, exits from $earliest ms)")
+        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = earliest, heardFromMs = heardFromMs, ahead = true, say = { DjLog.i(TAG, "ai ahead $fromId -> $toId: $it") })
+        if (pts == null) {
+            // no answer (tempos too far apart, no room, an error): the DJ's own plan says where the next pair starts from
+            val regular = withContext(heavyDispatcher) { planner.plan(from, to, settingsFlow.value, PlanConstraints(earliestExitMs = earliest, preferPerfect = true)) }
+            handoverOf[k] = regular.entryPointMs + regular.overlapMs
+            return
+        }
+        // planned now (milliseconds), to know where the incoming is handed over: the start of the pair after it
+        val settings = settingsFlow.value.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
+        val plan = withContext(heavyDispatcher) { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliest, aiPoints = pts)) }
+        if (plan.meta?.source != org.simpmusic.dj.model.PlanSource.AI_MIX) {
+            DjLog.i(TAG, "ai ahead $fromId -> $toId: Claude's points cannot be planned (${plan.reason.substringAfter(org.simpmusic.dj.model.AiMixPoints.NOT_USED, plan.reason).take(160)}); the DJ plans this pair when it comes")
+            handoverOf[k] = plan.entryPointMs + plan.overlapMs
+            return
+        }
+        aiBook[k] = pts
+        while (aiBook.size > AI_AHEAD_MEMORY) aiBook.remove(aiBook.keys.first())
+        handoverOf[k] = plan.entryPointMs + plan.overlapMs
+        _debug.update { it.copy(aiAhead = aiBook.size) }
+    }
+
+    /**
+     * The current pair was planned: its incoming is heard alone from [atMs]. An answer solved ahead for the pair after it
+     * that leaves before that (the previous mix moved) is dropped and asked again; then the chain goes on.
+     */
+    private fun noteHandover(k: String, atMs: Long) {
+        handoverOf[k] = atMs
+        val to = pairTo
+        val after = runCatching { upcomingIds() }.getOrDefault(emptyList()).getOrNull(1)
+        if (to != null && after != null) {
+            val nk = key(to, after)
+            val booked = aiBook[nk]
+            if (booked != null && booked.exitMs < atMs + AI_AHEAD_MIN_SOLO_MS) {
+                DjLog.i(TAG, "ai ahead $nk: exit ${booked.exitMs} ms comes before the hand-over at $atMs ms; asking again")
+                aiBook.remove(nk)
+                aiAheadAsked.remove(nk)
+                _debug.update { it.copy(aiAhead = aiBook.size) }
+            }
+        }
+        while (handoverOf.size > AI_AHEAD_MEMORY * 2) handoverOf.remove(handoverOf.keys.first())
+        aiPlanAhead()
     }
 
     private fun clockOf(ms: Long) = "%d:%02d".format(ms / 60_000, ms / 1000 % 60)
@@ -973,6 +1217,15 @@ class DjEngine(
         mixNowKey = null
         perfectKey = null
         aiKey = null
+        // Solved ahead while the previous track played: plan Claude's points right away, nothing to ask or wait for.
+        aiBook.remove(k)?.let { pts ->
+            DjLog.i(TAG, "ai mix ${context.currentId} -> $next: solved ahead (exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars)")
+            aiKey = k
+            aiPoints = pts
+            aiAutoKey = k
+            aiSay("AI: solved ahead · out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars")
+        }
+        _debug.update { it.copy(aiAhead = aiBook.size) }
         startPipeline(context.currentId, next)
     }
 
@@ -1100,6 +1353,11 @@ class DjEngine(
                     DjLog.i(TAG, "ai mix: not possible ($why); keeping the regular plan")
                     aiKey = null
                     aiSay("AI mix not possible: ${why.take(120)}")
+                    // an answer solved ahead may not fit any more (the previous mix ended elsewhere): ask again, for now
+                    if (aiAutoKey == key(fromId, toId) && aiJob?.isActive != true) {
+                        aiAutoKey = null
+                        scope.launch { maybeAutoAsk(fromId, toId) }
+                    }
                     withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints.copy(preferPerfect = true)) }
                 }
             } else if (perfectKey == key(fromId, toId)) {
@@ -1137,6 +1395,8 @@ class DjEngine(
                 withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints.copy(preferPerfect = true)) }
             }
         publishPlan(from, to, plan)
+        // where the incoming plays alone from: the next mix (solved ahead by Claude) may leave from there
+        noteHandover(key(fromId, toId), plan.entryPointMs + plan.overlapMs)
         if (plan.kind == PlanKind.SIMPLE_CROSSFADE) {
             DjLog.i(TAG, "plan is SIMPLE_CROSSFADE (${plan.reason}): the app's normal crossfade will do this transition")
             _mixView.value = null
@@ -1359,6 +1619,27 @@ private const val AI_TOOLS_BUDGET_MS = 60_000L
 
 /** Above this tempo gap (half/double aware) Claude is not asked: the engine bends each deck at most 10 %. */
 private const val AI_MAX_TEMPO_GAP = 0.12f
+
+/** "AI Auto" solves this many upcoming mixes ahead (current+1 -> +2, ..., the pair ending 3 tracks ahead), see `aiPlanAhead`. */
+internal const val AI_AHEAD_PAIRS = 3
+
+/** A mix solved ahead leaves at least this long after its outgoing plays alone (the track is heard on its own a while). */
+private const val AI_AHEAD_SOLO_MS = 30_000L
+
+/** Below this much solo time an answer solved ahead no longer fits (the mix before it moved): it is asked again. */
+private const val AI_AHEAD_MIN_SOLO_MS = 16_000L
+
+/** How long an ahead question waits for its two analyses (they are NEXT_UP work, one track at a time). */
+private const val AI_AHEAD_ANALYSIS_WAIT_MS = 6 * 60_000L
+
+/** How many pairs the ahead book and its bookkeeping remember (old ones fall off: the queue moved on). */
+private const val AI_AHEAD_MEMORY = 12
+
+/** "Order with AI" orders this many upcoming tracks. */
+private const val AI_ORDER_TRACKS = 10
+
+/** How long one move of the reorder may take to show in the queue. */
+private const val ORDER_STEP_WAIT_MS = 2_000L
 
 /** "Perfect mix" looks this far past the earliest possible exit for a point where both 1s are trusted. */
 private const val PERFECT_SPAN_MS = 120_000L

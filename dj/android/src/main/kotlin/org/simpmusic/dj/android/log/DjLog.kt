@@ -63,6 +63,16 @@ class RotatingLogFile(private val file: File, private val maxBytes: Long = 1_000
     }
 
     fun files(): List<File> = listOf(File(file.path + ".1"), file).filter { it.isFile }
+
+    /** Deletes both files: the log starts again from nothing. */
+    fun clear() {
+        try {
+            File(file.path + ".1").delete()
+            file.delete()
+        } catch (_: Exception) {
+        }
+        size = 0L
+    }
 }
 
 /**
@@ -223,7 +233,14 @@ object DjLog {
 
     fun text(): String = logger.text()
 
-    fun clear() = logger.clear()
+    /**
+     * Empties the log: the in-memory ring AND both files on disk (the owner's "start from zero", so the next export
+     * carries only what happened since). On the writer thread, after any line still queued.
+     */
+    fun clear() {
+        logger.clear()
+        installedFile?.let { f -> writer.execute { f.clear() } }
+    }
 
     val version: StateFlow<Long> get() = logger.version
 

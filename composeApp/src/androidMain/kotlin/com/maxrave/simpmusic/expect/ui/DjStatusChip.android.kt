@@ -83,6 +83,8 @@ import simpmusic.composeapp.generated.resources.dj_forget_track_marks
 import simpmusic.composeapp.generated.resources.dj_ai_auto
 import simpmusic.composeapp.generated.resources.dj_ai_auto_description
 import simpmusic.composeapp.generated.resources.dj_ai_auto_on
+import simpmusic.composeapp.generated.resources.dj_ai_order
+import simpmusic.composeapp.generated.resources.dj_ai_order_description
 import simpmusic.composeapp.generated.resources.dj_ai_busy
 import simpmusic.composeapp.generated.resources.dj_ai_mix
 import simpmusic.composeapp.generated.resources.dj_ai_mix_short
@@ -323,7 +325,8 @@ private fun DjActionsRow(feedback: DjChipFeedback) {
                     modifier = Modifier.semantics { contentDescription = autoDescription }.clickable { org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(false) },
                     lit = true,
                 ) {
-                    ChipLabel("✨ " + stringResource(Res.string.dj_ai_auto_on), bold = true, color = MaterialTheme.colorScheme.onPrimary)
+                    // "+2": the next mixes Claude has already solved ahead (it works a few tracks in advance, like a DJ)
+                    ChipLabel("✨ " + stringResource(Res.string.dj_ai_auto_on) + (if (debug.aiAhead > 0) " · +${debug.aiAhead}" else ""), bold = true, color = MaterialTheme.colorScheme.onPrimary)
                 }
             } else if (claude.hasKey) {
                 val aiDescription = stringResource(Res.string.dj_ai_mix)
@@ -342,6 +345,13 @@ private fun DjActionsRow(feedback: DjChipFeedback) {
                     },
                 ) {
                     ChipLabel(stringResource(Res.string.dj_ai_auto))
+                }
+            }
+            // "Order with AI": Claude puts the radio's next tracks in the order where every join is a natural continuation
+            if (claude.hasKey) {
+                val orderDescription = stringResource(Res.string.dj_ai_order_description)
+                ChipPill(modifier = Modifier.semantics { contentDescription = orderDescription }.clickable { feedback.ai = hooks.orderWithAi() }) {
+                    ChipLabel("✨ " + stringResource(Res.string.dj_ai_order))
                 }
             }
         }

@@ -87,6 +87,11 @@ class QueueLookAhead(
         val window = s.queueIds.drop(s.currentIndex + 1).take(windowSize().coerceIn(2, org.simpmusic.dj.recommend.SetOrder.MAX_TRACKS))
         if (window.size < 2) return
         if (decidedFor == current) return
+        if (window.first() in org.simpmusic.dj.android.ai.ClaudeOrder.ids) {
+            decidedFor = current
+            log("look-ahead: Claude ordered this list; leaving it")
+            return
+        }
         if (window.first() in handPlaced) {
             decidedFor = current
             log("look-ahead: the next track was put there on purpose; leaving it")

@@ -636,6 +636,8 @@
     <string name="dj_ai_auto">Auto</string>
     <string name="dj_ai_auto_on">AI Auto</string>
     <string name="dj_ai_auto_description">Claude chooses every mix by itself</string>
+    <string name="dj_ai_order">Order list</string>
+    <string name="dj_ai_order_description">Claude puts the next tracks of the radio in the order where every song continues naturally into the next</string>
     <string name="ai_dj_claude_tools">Claude works like a DJ (experiment)</string>
     <string name="ai_dj_claude_tools_description">Besides the tables, Claude gets a picture of both tracks (the fingerprint) and tools: it zooms in, tries mixes on the engine that will play them (tempo, harmony, voice over voice, bass) and keeps the best. Slower (several turns) and a few cents more per mix. Off = one answer from the tables.</string>
     <string name="ai_dj_claude_auto">Claude chooses every mix</string>

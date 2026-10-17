@@ -66,4 +66,7 @@ interface DjPlayerPort {
      * shifting the ones in between back by one. Nothing is added or removed. False when it was not possible.
      */
     suspend fun moveToNext(videoId: String): Boolean = false
+
+    /** "title - artists" of a queued track, for Claude; null when unknown. */
+    fun queuedTitle(videoId: String): String? = null
 }

@@ -42,6 +42,25 @@ class MixBriefTest {
         )!!
 
     @Test
+    fun aPairSolvedAheadSaysTheOutgoingIsNotPlayingYet() {
+        // AI Auto solves the next pairs while an earlier track plays: the outgoing is heard from where the mix before hands
+        // it over, and its exits start 30 s after that, whatever the playhead
+        val b =
+            MixBrief.build(
+                MixBrief.Track("Lo Dejaría Todo", Timelines.of(out)),
+                MixBrief.Track("A Prueba de Balas", Timelines.of(inc)),
+                earliestExitMs = 42_000L,
+                requestedBars = 8,
+                positionMs = 12_000L,
+                ahead = true,
+            )!!
+        assertTrue(b.user.startsWith("OUTGOING (not playing yet"), b.user.take(120))
+        assertTrue(b.user.contains("plays on its own from 0:12"), b.user.take(160))
+        assertTrue(b.outBarsMs[b.exitFrom] >= 42_000L)
+        assertTrue(brief().user.startsWith("OUTGOING (playing now"), "a current pair is unchanged")
+    }
+
+    @Test
     fun theBriefIsOneRowPerBarWithTheAllowedRanges() {
         val b = brief()
         println(b.user.lines().take(12).joinToString("\n"))

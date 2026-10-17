@@ -102,6 +102,15 @@ object MixBrief {
         An image may come with the tables: both tracks drawn bar by bar (loudness, bass, highs, voice, and a 12-row chroma
         strip, the notes being played), with the phrase lines and bar numbers; use it to see the shape of each song.
 
+        THE GOAL, above every rule: the change from one song to the next must not be felt. It should sound like a live band's
+        medley ("enganchado"): the band ends a phrase of one song and the next song comes in exactly where the ear expects
+        the music to go on. The groove never stops, the beat keeps landing where it should, and the next sung line starts
+        where a line would naturally come, so even the lyrics seem to continue. One song may drop out, but the other is
+        already there at that very moment: the music never pauses and nothing feels forced. Every rule below serves this.
+        Read where each track sings and where only the band plays, and place the points so the incoming's music (and its
+        first sung line) arrives as the natural continuation of the outgoing. Between two clean options, take the one that
+        sounds most like one continuous song.
+
         The owner's rules, most important first:
         1. Overlap the outgoing's INSTRUMENTAL with the incoming's INSTRUMENTAL, with the bass present in BOTH (bass >= 4
            on both sides through the overlap). That is where a mix is felt.
@@ -174,7 +183,7 @@ object MixBrief {
      * The brief for [out] -> [inc], or null when a track has no beat grid (nothing to count bars on). Exits are allowed from
      * [earliestExitMs] (the playhead plus the time the answer and the cue take) to [EXIT_TAIL_BARS] before the end.
      */
-    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long, taste: String? = null): Brief? {
+    fun build(out: Track, inc: Track, earliestExitMs: Long, requestedBars: Int, positionMs: Long, taste: String? = null, ahead: Boolean = false): Brief? {
         val outBars = bars(out.timeline) ?: return null
         val inBars = bars(inc.timeline) ?: return null
         val exitFrom = outBars.indexOfFirst { it >= earliestExitMs }.takeIf { it >= 0 } ?: return null
@@ -192,7 +201,12 @@ object MixBrief {
         }
         val user =
             buildString {
-                append("OUTGOING (playing now, at ${clock(positionMs)})\n")
+                // ahead: this pair is solved before it plays (the DJ works a few mixes ahead); the outgoing is not playing yet
+                if (ahead) {
+                    append("OUTGOING (not playing yet: it comes after the mix into it, and plays on its own from ${clock(positionMs)})\n")
+                } else {
+                    append("OUTGOING (playing now, at ${clock(positionMs)})\n")
+                }
                 append(table(out, outBars))
                 append("\nINCOMING (next)\n")
                 append(table(inc, inBars))
