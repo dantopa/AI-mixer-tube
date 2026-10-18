@@ -265,7 +265,7 @@ object MixBrief {
     }
 
     /** One mix the owner rated (👍 / 👎), as Claude reads it in [taste]. Null fields are left out. */
-    class RatedMix(
+    data class RatedMix(
         val liked: Boolean,
         /** Who placed it: AI_MIX, REGULAR, PERFECT, STRUCTURE, OWNER... */
         val source: String?,
@@ -281,19 +281,63 @@ object MixBrief {
         val moves: String? = null,
         val why: String? = null,
         val titles: String? = null,
+        /** Set when the mix involved this question's tracks ("THIS SAME PAIR", "with the incoming track as outgoing"...). */
+        val about: String? = null,
+        /** What the outgoing was doing around its exit and the incoming around its entry ([pointContext]). */
+        val outAt: String? = null,
+        val inAt: String? = null,
     )
+
+    /**
+     * What a track is doing over [startMs]..[endMs] (the part of it in a mix) and just before / after: sung or instrumental
+     * (and from what: lyrics or the detector), whether the voice comes back or starts soon after, the bass and loudness as
+     * 0-9 of the track's own range, whether the span starts on a 16-bar / 8-bar line, and where in the track it is. So a
+     * rating says not only "liked" but on which structure, which is what lets Claude learn which trick fits which shape.
+     */
+    fun pointContext(t: TrackTimeline, startMs: Long, endMs: Long): String {
+        val a = t.refined
+        val dur = a.durationMs.coerceAtLeast(1)
+        val hop = a.energyHopMs.coerceAtLeast(1)
+        val parts = ArrayList<String>()
+        parts += "at %d%% of the track".format(java.util.Locale.ROOT, (100 * startMs / dur).toInt())
+        val v = t.vocals?.value
+        if (v == null) {
+            parts += "voice unknown"
+        } else {
+            val share = sungShare(v, startMs, endMs)
+            parts += when {
+                share < 0.15 -> "instrumental"
+                share > 0.7 -> "sung"
+                else -> "partly sung"
+            } + if (t.vocalsFromLyrics) " (lyrics)" else " (detector)"
+            if (sungShare(v, startMs - 8_000, startMs) > 0.5) parts += "a voice just before"
+            v.firstOrNull { it.startMs >= endMs - 500 && it.startMs < endMs + 8_000 }?.let { parts += "voice starts %.0f s after".format(java.util.Locale.ROOT, (it.startMs - endMs) / 1000.0) }
+        }
+        parts += "bass " + Levels(a.lowBandEnergy, hop).at(startMs, endMs) + "/9"
+        parts += "loud " + Levels(a.energy, hop).at(startMs, endMs) + "/9"
+        val near = { lines: List<Long>? -> lines?.any { kotlin.math.abs(it - startMs) < 400 } == true }
+        parts += when {
+            near(t.blocks?.value?.startsMs) -> "starts on a 16-bar line"
+            near(t.phrases?.value?.startsMs) -> "starts on an 8-bar line"
+            else -> "not on a phrase line"
+        }
+        return parts.joinToString(", ")
+    }
 
     /**
      * The owner's taste as Claude reads it: their latest ratings, liked and disliked, as the numbers the planner kept
      * (overlap, where in each song, phrase on phrase, voices, harmony, moves). Few-shot memory: no training, just
      * examples in the prompt. Null when there are none.
      */
-    fun taste(mixes: List<RatedMix>): String? {
+    fun taste(mixes: List<RatedMix>, max: Int = MAX_TASTE): String? {
         if (mixes.isEmpty()) return null
         return buildString {
-            append("THE OWNER'S RATINGS of recent mixes, newest first (learn what they like, avoid what they did not):\n")
-            for (m in mixes.take(MAX_TASTE)) {
+            append("THE OWNER'S RATINGS, newest first (learn what they like, avoid what they did not). Ratings of THESE tracks come first ")
+            append("and are never forgotten: never repeat a mix of them the owner DISLIKED, and when they LIKED one of this same pair, ")
+            append("prefer those points again unless they are not allowed now:\n")
+            for (m in mixes.take(max)) {
                 append(if (m.liked) "LIKED" else "DISLIKED")
+                m.about?.let { append(" [").append(it).append(']') }
                 m.source?.let { append(' ').append(it) }
                 m.titles?.let { append(" (").append(it.take(70)).append(')') }
                 append(':')
@@ -307,6 +351,8 @@ object MixBrief {
                     m.voiceOverVoiceS?.let { if (it < 0.5) "no voice over voice" else "%.1f s voice over voice".format(java.util.Locale.ROOT, it) },
                     m.harmonyExcess?.let { if (it < 0.025f) "consonant" else if (it < 0.07f) "tense harmony" else "harmony clash" },
                     m.moves?.let { "moves: $it" },
+                    m.outAt?.let { "outgoing there: $it" },
+                    m.inAt?.let { "incoming there: $it" },
                     m.why?.let { "why: \"${it.take(120)}\"" },
                 )
                 append(' ').append(parts.joinToString(", ")).append('\n')
@@ -314,7 +360,7 @@ object MixBrief {
         }
     }
 
-    private const val MAX_TASTE = 12
+    private const val MAX_TASTE = 22
 
     /** Claude's JSON answer as points on both tracks' clocks, or why it cannot be used. */
     fun parse(brief: Brief, json: String): Result<AiMixPoints> =
@@ -372,6 +418,7 @@ object MixBrief {
                     else -> "the vocal detector"
                 },
             ).append('\n')
+            org.simpmusic.dj.analysis.SongStructure.describe(t)?.let { append("sections (from the voice and what repeats): ").append(it).append('\n') }
             append("bar t loud bass high voice line\n")
             for (i in bars.indices) {
                 val s = bars[i]

@@ -635,8 +635,14 @@
     <string name="dj_ai_mix_short">AI Mix</string>
     <string name="dj_ai_auto">Auto</string>
     <string name="dj_ai_auto_on">AI Auto</string>
+    <string name="dj_ai_recalc">Ask again</string>
+    <string name="dj_ai_recalc_description">Ask Claude again for this mix (its earlier answer for these two tracks is replaced)</string>
     <string name="dj_ai_auto_description">Claude chooses every mix by itself</string>
     <string name="dj_ai_order">Order list</string>
+    <string name="ai_dj_claude_learn">Learn from my ratings</string>
+    <string name="ai_dj_claude_learn_description">Claude reads every mix you rated 👍 / 👎 and writes your rules; every later mix question follows them. Rate a few mixes first.</string>
+    <string name="ai_dj_claude_learn_done">%1$d rules from %2$d ratings</string>
+    <string name="ai_dj_claude_learn_now">Learn now</string>
     <string name="ai_dj_claude_auto_order">Claude keeps the radio in order</string>
     <string name="ai_dj_claude_auto_order_description">With AI Auto: when the radio brings new tracks, Claude orders them so every song continues naturally into the next (the next three, whose mixes are already solved, stay where they are). One short question each time.</string>
     <string name="dj_ai_order_description">Claude puts the next tracks of the radio in the order where every song continues naturally into the next</string>

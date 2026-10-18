@@ -167,6 +167,8 @@ private class MixPainter(
             axis()
             return@with
         }
+        sections(data.outgoing, laneATop, c.a, labelAtTop = true)
+        sections(data.incoming, laneBTop, c.b, labelAtTop = false)
         zone(overlapText)
         grid(data.outgoing, laneATop, c.a)
         grid(data.incoming, laneBTop, c.b)
@@ -235,6 +237,30 @@ private class MixPainter(
     }
 
     /** Bar lines through the lane at each downbeat: the beat grid of the deck, in its own colour. */
+    /**
+     * The track's sections (Intro, Verse n, Chorus n, Instrumental n, Outro) as tinted bands behind the waveform, with
+     * their names: sung sections warmer (the chorus strongest), instrumental ones barely tinted, a thin line between two.
+     */
+    private fun DrawScope.sections(deck: DjMixDeck, top: Float, color: Color, labelAtTop: Boolean) {
+        for (s in deck.sections) {
+            val x0 = max(0f, x(s.startMs.toDouble()))
+            val x1 = min(w, x(s.endMs.toDouble()))
+            if (x1 - x0 < 1f) continue
+            val alpha = when (s.kind) {
+                "CHORUS" -> 0.16f
+                "VERSE" -> 0.10f
+                else -> 0.03f
+            }
+            drawRect(color.copy(alpha = alpha), topLeft = Offset(x0, top), size = Size(x1 - x0, laneH))
+            if (x0 > 0f) drawLine(color.copy(alpha = 0.45f), Offset(x0, top), Offset(x0, top + laneH), strokeWidth = 1.5f * dp1)
+            val t = text(s.label, labelStyle)
+            if (t.size.width + 4 * dp1 <= x1 - x0) {
+                val y = if (labelAtTop) top + 2 * dp1 else top + laneH - t.size.height - 2 * dp1
+                drawText(t, color = color.copy(alpha = 0.9f), topLeft = Offset(x0 + 3 * dp1, y))
+            }
+        }
+    }
+
     private fun DrawScope.grid(deck: DjMixDeck, top: Float, color: Color) {
         for (t in deck.downbeatsMs) {
             val xx = x(t.toDouble())

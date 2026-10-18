@@ -7,6 +7,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -82,6 +83,10 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_key_set
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model
 import simpmusic.composeapp.generated.resources.ai_dj_claude_model_choice
 import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_order
+import simpmusic.composeapp.generated.resources.ai_dj_claude_learn
+import simpmusic.composeapp.generated.resources.ai_dj_claude_learn_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_learn_done
+import simpmusic.composeapp.generated.resources.ai_dj_claude_learn_now
 import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_order_description
 import simpmusic.composeapp.generated.resources.ai_dj_forget_marks
 import simpmusic.composeapp.generated.resources.ai_dj_forget_marks_confirm
@@ -325,6 +330,30 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             smallSubtitle = true,
                             isEnable = claude.auto,
                             switch = (claude.autoOrder to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setAutoOrder(on) }),
+                        )
+                        // "Learn from my ratings": Claude distils every 👍 / 👎 into the owner's rules, carried by every later question
+                        val lessons by org.simpmusic.dj.android.ai.OwnerLessons.state.collectAsState()
+                        val learnTitle = stringResource(Res.string.ai_dj_claude_learn)
+                        val learnNow = stringResource(Res.string.ai_dj_claude_learn_now)
+                        val learnDescription = stringResource(Res.string.ai_dj_claude_learn_description)
+                        SettingItem(
+                            title = learnTitle,
+                            subtitle =
+                                lessons?.let { stringResource(Res.string.ai_dj_claude_learn_done, it.lessons.size, it.fromRatings) + " · " + it.summary }
+                                    ?: stringResource(Res.string.ai_dj_claude_learn_description),
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = learnTitle,
+                                        message =
+                                            lessons?.lessons?.mapIndexed { i, l -> "${i + 1}. $l" }?.joinToString("\n")
+                                                ?: learnDescription,
+                                        confirm = learnNow to { _ -> hooks.learnFromRatings() },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
                         )
                         SettingItem(
                             title = modelTitle,

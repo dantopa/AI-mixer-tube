@@ -51,6 +51,8 @@ data class LastMix(
     val toId: String,
     val endedAtEpochMs: Long,
     val rating: Int? = null,
+    /** The mix was Claude's ("AI MIX"): its rating also keeps or forgets the remembered answer. */
+    val ai: Boolean = false,
 ) {
     /** Still open to a rating (the journal accepts one for [MixJournal.RATEABLE_MS] after the mix ends). */
     fun rateableAt(nowMs: Long): Boolean = nowMs - endedAtEpochMs in 0..MixJournal.RATEABLE_MS

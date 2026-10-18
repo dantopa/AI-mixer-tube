@@ -83,6 +83,8 @@ import simpmusic.composeapp.generated.resources.dj_forget_track_marks
 import simpmusic.composeapp.generated.resources.dj_ai_auto
 import simpmusic.composeapp.generated.resources.dj_ai_auto_description
 import simpmusic.composeapp.generated.resources.dj_ai_auto_on
+import simpmusic.composeapp.generated.resources.dj_ai_recalc
+import simpmusic.composeapp.generated.resources.dj_ai_recalc_description
 import simpmusic.composeapp.generated.resources.dj_ai_order
 import simpmusic.composeapp.generated.resources.dj_ai_order_description
 import simpmusic.composeapp.generated.resources.dj_ai_busy
@@ -328,6 +330,14 @@ private fun DjActionsRow(feedback: DjChipFeedback) {
                     // "+2": the next mixes Claude has already solved ahead (it works a few tracks in advance, like a DJ)
                     ChipLabel("✨ " + stringResource(Res.string.dj_ai_auto_on) + (if (debug.aiAhead > 0) " · +${debug.aiAhead}" else ""), bold = true, color = MaterialTheme.colorScheme.onPrimary)
                 }
+                // Claude's answers are remembered per pair (a skip back costs nothing): this asks again for the playing pair
+                val recalcDescription = stringResource(Res.string.dj_ai_recalc_description)
+                ChipPill(
+                    modifier = Modifier.semantics { contentDescription = recalcDescription }.clickable { feedback.ai = hooks.aiMix() },
+                    lit = debug.aiAsking,
+                ) {
+                    ChipLabel("↻ " + stringResource(Res.string.dj_ai_recalc))
+                }
             } else if (claude.hasKey) {
                 val aiDescription = stringResource(Res.string.dj_ai_mix)
                 ChipPill(
@@ -340,8 +350,8 @@ private fun DjActionsRow(feedback: DjChipFeedback) {
                 ChipPill(
                     modifier = Modifier.semantics { contentDescription = autoDescription }.clickable {
                         org.simpmusic.dj.android.ai.ClaudeSettings.setAuto(true)
-                        // the pair already planned is asked about now, the next ones as soon as they are analysed
-                        feedback.ai = hooks.aiMix()
+                        // the pair already planned is asked about now (or its remembered answer reused), the next ones as soon as they are analysed
+                        feedback.ai = hooks.aiMixRemembered()
                     },
                 ) {
                     ChipLabel(stringResource(Res.string.dj_ai_auto))

@@ -260,10 +260,22 @@ interface DjHooks {
     fun aiMix(): AiMixResult = AiMixResult.DISABLED
 
     /**
+     * Like [aiMix], but an answer Claude already gave for this pair (`AiAnswerCache`, not disliked) is reused instead of
+     * paying for a new one: what turning "Auto" on does. [aiMix] itself always asks again (the owner's "recalculate").
+     */
+    fun aiMixRemembered(): AiMixResult = aiMix()
+
+    /**
      * "Order with AI": Claude puts the radio's next tracks in the order that mixes best (every join a natural continuation).
      * The answer arrives in [debug] (`aiStatus`); the queue is reordered by itself. UI, main thread.
      */
     fun orderWithAi(): AiMixResult = AiMixResult.DISABLED
+
+    /**
+     * "Learn from my ratings": one question over every rated mix; Claude writes the owner's rules ([OwnerLessons]), which
+     * every later mix question carries in its (cached) system prompt. The result arrives in [debug] (`aiStatus`).
+     */
+    fun learnFromRatings(): AiMixResult = AiMixResult.DISABLED
 
     /**
      * "Perfect mix": re-plan for the best point within the next couple of minutes where BOTH 1s are trusted, phrase on
@@ -738,7 +750,7 @@ class DjEngine(
         mixInFlight?.takeIf { it.prepared === prepared }?.let { m ->
             val now = System.currentTimeMillis()
             org.simpmusic.dj.android.journal.MixJournal.ended(m.id, outcome, now)
-            lastEndedMix = org.simpmusic.dj.android.journal.LastMix(m.id, prepared.fromId, prepared.toId, endedAtEpochMs = now)
+            lastEndedMix = org.simpmusic.dj.android.journal.LastMix(m.id, prepared.fromId, prepared.toId, endedAtEpochMs = now, ai = prepared.plan.meta?.source == org.simpmusic.dj.model.PlanSource.AI_MIX)
             mixInFlight = null
         }
         consumedKey = key(prepared.fromId, prepared.toId)
@@ -774,6 +786,7 @@ class DjEngine(
         // a second tap (a change of mind) is journaled too: the last rating of a mix is the one that counts
         org.simpmusic.dj.android.journal.MixJournal.rated(m.id, up, now)
         lastEndedMix = m.copy(rating = if (up) 1 else -1)
+        if (m.ai) org.simpmusic.dj.android.ai.AiAnswerCache.rate(key(m.fromId, m.toId), up)
         DjLog.i(TAG, "mix ${m.id} rated ${if (up) "+1" else "-1"} by the owner")
         return true
     }
@@ -807,7 +820,57 @@ class DjEngine(
         return AiMixResult.ASKING
     }
 
+    override fun aiMixRemembered(): AiMixResult {
+        val k = pairKey
+        val from = pairFrom
+        val to = pairTo
+        val e = k?.let { org.simpmusic.dj.android.ai.AiAnswerCache.usable(it) }
+        if (k == null || from == null || to == null || e == null || k == consumedKey || _debug.value.isMixing || aiJob?.isActive == true || !settingsFlow.value.enabled) return aiMix()
+        if (aiKey == k && aiPoints == e.points) return AiMixResult.ASKING
+        DjLog.i(TAG, "ai mix $from -> $to: remembered answer (${e.model}) reused, not asked")
+        aiKey = k
+        aiPoints = e.points
+        aiAutoKey = k
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        startPipeline(from, to)
+        aiSay("AI: from memory${if (e.rating == 1) " 👍" else ""} · out ${clockOf(e.points.exitMs)} → in ${clockOf(e.points.entryMs)}, ${e.points.overlapBars} bars")
+        return AiMixResult.ASKING
+    }
+
     private var orderJob: Job? = null
+    private var learnJob: Job? = null
+
+    override fun learnFromRatings(): AiMixResult {
+        if (org.simpmusic.dj.android.ai.ClaudeSettings.apiKey() == null) return AiMixResult.NO_KEY
+        if (learnJob?.isActive == true) return AiMixResult.BUSY
+        val model = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model
+        aiSay("AI: learning from your ratings with ${model.label}…", asking = true)
+        learnJob =
+            scope.launch {
+                try {
+                    val (rated, answer) =
+                        withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            val ids = org.simpmusic.dj.android.ai.OwnerTaste.rated().flatMap { (r, _) -> listOfNotNull(r.fromId, r.toId) }.toSet()
+                            val titles = ids.associateWith { id -> runCatching { titleOf(id) }.getOrNull() }
+                            val rated = org.simpmusic.dj.android.ai.OwnerTaste.allForLearning({ id -> titles[id] }, analysisOf = { id -> kotlinx.coroutines.runBlocking { scheduler.get(id) } })
+                            val q = org.simpmusic.dj.android.ai.OwnerLessons.question(rated)
+                            rated to q?.let { claude.askJson(org.simpmusic.dj.android.ai.OwnerLessons.SYSTEM_PROMPT, it, org.simpmusic.dj.android.ai.OwnerLessons.SCHEMA, "learn from ${rated.size} ratings") }
+                        }
+                    if (answer == null) {
+                        aiSay("AI: rate at least 3 mixes first (${rated.size} so far)")
+                        return@launch
+                    }
+                    val a = answer.getOrElse { e -> aiSay("AI: ${e.message}"); return@launch }
+                    val l = org.simpmusic.dj.android.ai.OwnerLessons.store(a.json, rated.size, model.id).getOrElse { e -> aiSay("AI: ${e.message}"); return@launch }
+                    aiSay("AI: learned ${l.lessons.size} rules from ${rated.size} ratings · \$${"%.3f".format(java.util.Locale.ROOT, claude.costUsd(a))} · ${l.summary}")
+                } finally {
+                    _debug.update { it.copy(aiAsking = false) }
+                }
+            }
+        return AiMixResult.ASKING
+    }
 
     override fun orderWithAi(): AiMixResult {
         if (!settingsFlow.value.enabled) return AiMixResult.DISABLED
@@ -1016,6 +1079,7 @@ class DjEngine(
         }
         aiKey = k
         aiPoints = pts
+        org.simpmusic.dj.android.ai.AiAnswerCache.put(k, pts, org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model.id)
         mixNowKey = null
         perfectKey = null
         cancelPipeline()
@@ -1073,7 +1137,7 @@ class DjEngine(
                     requestedBars = settings.overlapBars,
                     positionMs = heardFromMs,
                     // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
-                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent()) }.getOrNull(),
+                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent(fromId = fromId, toId = toId, analysisOf = { id -> kotlinx.coroutines.runBlocking { scheduler.get(id) } })) }.getOrNull(),
                     ahead = ahead,
                     entryLatestMs = entryLatest,
                 )
@@ -1196,7 +1260,11 @@ class DjEngine(
         DjLog.i(TAG, "ai ahead: asking for $fromId -> $toId (outgoing heard from $heardFromMs ms, exits from $earliest ms)")
         // the track after toId may not be analysed yet; it is asked for, and the limit applies when it is there
         afterId?.let { lyrics?.request(it); scheduler.request(it, AnalysisPriority.NEXT_UP) }
-        val pts = claudePoints(fromId, toId, from, to, earliestExitMs = earliest, heardFromMs = heardFromMs, ahead = true, afterId = afterId, say = { DjLog.i(TAG, "ai ahead $fromId -> $toId: $it") })
+        // Claude solved this pair before (a skip back, a radio that repeats, an earlier session): reused, nothing is paid
+        val memo = org.simpmusic.dj.android.ai.AiAnswerCache.usable(k)?.points?.takeIf { it.exitMs >= earliest }
+        val remembered = memo != null
+        if (remembered) DjLog.i(TAG, "ai ahead $fromId -> $toId: remembered answer reused (exit ${memo!!.exitMs} ms, entry ${memo.entryMs} ms), not asked")
+        val pts = memo ?: claudePoints(fromId, toId, from, to, earliestExitMs = earliest, heardFromMs = heardFromMs, ahead = true, afterId = afterId, say = { DjLog.i(TAG, "ai ahead $fromId -> $toId: $it") })
         if (pts == null) {
             // no answer (tempos too far apart, no room, an error): the DJ's own plan says where the next pair starts from
             val regular = withContext(heavyDispatcher) { planner.plan(from, to, settingsFlow.value, PlanConstraints(earliestExitMs = earliest, preferPerfect = true)) }
@@ -1212,6 +1280,7 @@ class DjEngine(
             return
         }
         aiBook[k] = pts
+        if (!remembered) org.simpmusic.dj.android.ai.AiAnswerCache.put(k, pts, org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model.id)
         while (aiBook.size > AI_AHEAD_MEMORY) aiBook.remove(aiBook.keys.first())
         handoverOf[k] = plan.entryPointMs + plan.overlapMs
         _debug.update { it.copy(aiAhead = aiBook.size) }
@@ -1342,6 +1411,17 @@ class DjEngine(
             aiPoints = pts
             aiAutoKey = k
             aiSay("AI: solved ahead · out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars")
+        }
+        if (aiKey != k) {
+            // answered before (a skip back, an earlier session): reused instead of asking again. The ✨ button still asks.
+            org.simpmusic.dj.android.ai.AiAnswerCache.usable(k)?.takeIf { org.simpmusic.dj.android.ai.ClaudeSettings.state.value.auto || it.rating == 1 }?.let { e ->
+                val pts = e.points
+                DjLog.i(TAG, "ai mix ${context.currentId} -> $next: remembered answer (${e.model}${if (e.rating == 1) ", liked" else ""}): exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars; not asked")
+                aiKey = k
+                aiPoints = pts
+                aiAutoKey = k
+                aiSay("AI: from memory${if (e.rating == 1) " 👍" else ""} · out ${clockOf(pts.exitMs)} → in ${clockOf(pts.entryMs)}, ${pts.overlapBars} bars")
+            }
         }
         _debug.update { it.copy(aiAhead = aiBook.size) }
         startPipeline(context.currentId, next)
@@ -1474,7 +1554,7 @@ class DjEngine(
                     aiSay("AI mix not possible: ${why.take(120)}")
                     // an answer solved ahead may not fit any more (the previous mix ended elsewhere): ask again, for now
                     val k = key(fromId, toId)
-                    if (aiAutoKey == k && aiJob?.isActive != true && aiRetried.add(k)) {
+                    if (aiAutoKey == k && aiJob?.isActive != true && !org.simpmusic.dj.android.ai.AiAnswerCache.liked(k) && aiRetried.add(k)) {
                         aiAutoKey = null
                         scope.launch { maybeAutoAsk(fromId, toId) }
                     }

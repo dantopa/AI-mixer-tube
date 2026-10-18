@@ -125,7 +125,27 @@ object DjMixViewBuilder {
             }
         }
 
+        // Sections (Intro, Verse n, Chorus n, Instrumental n, Outro), read through source(t) like the energy: a stretched or
+        // looped deck shows them where they are heard
+        val sections = ArrayList<org.simpmusic.dj.mixview.DjMixSection>()
+        val songSections = timeline?.let { org.simpmusic.dj.analysis.SongStructure.of(it) }.orEmpty()
+        if (songSections.isNotEmpty()) {
+            var cur: org.simpmusic.dj.analysis.SongStructure.Section? = null
+            var from = 0L
+            for (i in 0 until n) {
+                val t = start + i.toLong() * step
+                val sec = if (t < activeFrom) null else org.simpmusic.dj.analysis.SongStructure.at(songSections, source(t.toDouble()).toLong())
+                if (sec != cur) {
+                    cur?.let { sections += org.simpmusic.dj.mixview.DjMixSection(from, t, it.label, it.kind.name) }
+                    cur = sec
+                    from = t
+                }
+            }
+            cur?.let { sections += org.simpmusic.dj.mixview.DjMixSection(from, end, it.label, it.kind.name) }
+        }
+
         return DjMixDeck(
+            sections = sections,
             title = title,
             bpm = timeline?.bpm?.value,
             key = analysis?.key?.value?.camelot(),

@@ -80,7 +80,7 @@ class ClaudeMixClient {
         var cacheWrite = 0L
         val ephemeral = CacheControlEphemeral.builder().build()
         // the system prompt is the same for every pair: cached on its own, it is read back by the next pair's question
-        val system = TextBlockParam.builder().text(if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system).cacheControl(ephemeral).build()
+        val system = TextBlockParam.builder().text((if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system) + OwnerLessons.block()).cacheControl(ephemeral).build()
         return try {
             val client = clientFor(apiKey)
             val turns = if (tools != null) MixTools.MAX_TURNS else 1

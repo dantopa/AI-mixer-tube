@@ -22,6 +22,13 @@ enum class DjMixPhase {
 }
 
 /**
+ * One section of a track (Intro, Verse 2, Chorus 1, Instrumental 1, Outro: [org.simpmusic.dj.analysis.SongStructure]) as
+ * heard in the picture: plan ms, clipped to the shown range. [kind] is the section kind's name (INTRO, VERSE, CHORUS,
+ * INSTRUMENTAL, OUTRO), so the UI can colour it without the brain's enum.
+ */
+data class DjMixSection(val startMs: Long, val endMs: Long, val label: String, val kind: String)
+
+/**
  * Everything the picture needs about ONE deck, already on the plan's time axis: sample `i` of every series sits at
  * plan time `DjMixViewData.startMs + i * stepMs` (T0 = 0 = the instant the incoming deck starts).
  *
@@ -57,6 +64,8 @@ data class DjMixDeck(
     val pitchSemitones: List<Float>,
     /** First plan time at which this deck plays (outgoing: [DjMixViewData.startMs], incoming: 0). */
     val activeFromMs: Long,
+    /** The track's detected sections inside the shown range (empty when the voices are unknown). */
+    val sections: List<DjMixSection> = emptyList(),
 ) {
     companion object {
         fun empty(title: String, size: Int, activeFromMs: Long) = DjMixDeck(

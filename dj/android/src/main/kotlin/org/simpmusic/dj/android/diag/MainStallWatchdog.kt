@@ -8,7 +8,7 @@ import org.simpmusic.dj.android.log.DjLog
 
 /** Which build of the DJ code this is, printed at boot so a pasted log says what it came from. Bump it with every shipped change. */
 object DjBuild {
-    const val ID = "2026-10-17-bi lyrics for radio tracks by name, lyric lines on the bar.beat in the AI brief"
+    const val ID = "2026-10-18-bj remembered AI answers, learn from ratings, song sections on the mix picture"
 }
 
 /**
