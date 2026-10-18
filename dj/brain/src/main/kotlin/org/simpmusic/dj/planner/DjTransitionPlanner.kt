@@ -721,7 +721,8 @@ class DjTransitionPlanner : TransitionPlanner {
         if (exit < lower || exit > upper) return Attempt.fail("the AI's exit %.1f s is outside %.1f-%.1f s".format(exit / 1000.0, lower / 1000.0, upper / 1000.0))
         val asked = p.overlapBars.coerceIn(1, OWNER_MAX_BARS)
         val unsure = listOfNotNull("bars untrusted".takeIf { !c.barsMode }, "voice unknown".takeIf { c.vocalsOut == null || c.vocalsIn == null })
-        val bars = if (unsure.isEmpty()) asked else min(asked, AiMixPoints.UNSURE_MAX_BARS)
+        // the owner's own edit is played as they made it: the safety cap is for Claude, who cannot hear the tracks
+        val bars = if (unsure.isEmpty() || p.byOwner) asked else min(asked, AiMixPoints.UNSURE_MAX_BARS)
         val capNote = if (bars < asked) " (${AiMixPoints.UNSURE_CAP}$asked -> $bars bars: ${unsure.joinToString(", ")})" else ""
         val units = ownerUnits(c, bars)
         val t = chooseTempo(localPeriod(out, exit, ahead = true), localPeriod(inc, entry, ahead = true), max(c.settings.maxTempoBend, OWNER_TEMPO_BEND).toDouble())
@@ -733,7 +734,7 @@ class DjTransitionPlanner : TransitionPlanner {
         val plan = moved.plan.let { m -> if (moved.notes.isEmpty()) m else m.copy(reason = m.reason + "; moves: " + moved.notes.joinToString("; ")) }
         return Attempt.ok(
             plan.copy(reason = plan.reason.replace(CLAMPED_NOTE, "")).withReason(
-                AiMixPoints.TAG + "exit %.1f s, entry %.1f s, %s%s (%s); ".format(
+                (if (p.byOwner) AiMixPoints.OWNER_TAG else AiMixPoints.TAG) + "exit %.1f s, entry %.1f s, %s%s (%s); ".format(
                     exit / 1000.0, entry / 1000.0, if (c.barsMode) "$units bars" else "$units beats (bars untrusted)", capNote, p.why.take(AI_WHY_CHARS),
                 ),
             ).sourced(PlanSource.AI_MIX),

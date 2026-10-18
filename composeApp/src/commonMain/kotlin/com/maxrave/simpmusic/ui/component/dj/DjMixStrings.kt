@@ -31,6 +31,16 @@ data class DjMixStrings(
     val legendFader: String = "Fader",
     val legendCut: String = "EQ cut",
     val close: String = "Close",
+    val editStart: String = "Edit mix",
+    val editDone: String = "Done",
+    val editHint: String = "Drag a track left or right to change where it meets the other (snaps to bars)",
+    val editBarsTemplate: String = "{0} bars",
+    val editLoopOff: String = "Loop off",
+    val editLoopTemplate: String = "Loop {0}",
+    val editSave: String = "Save",
+    val editSaved: String = "Saved",
+    val editReset: String = "Reset",
+    val editBusy: String = "Editing is possible before the mix starts",
 ) {
     fun kindLabel(kind: DjMixKind?): String = when (kind) {
         DjMixKind.BEAT_MATCHED -> kindBeatMatched

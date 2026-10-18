@@ -50,6 +50,10 @@ object SetBrief {
            intro), so the two instrumentals can overlap; two tracks that both sing to the very edge are harder.
         4. A sensible energy arc: no sudden drops; build up, keep it, let it breathe now and then.
         5. Same style and feel next to each other (the radio already mixed styles; keep similar ones together).
+        6. Similar STRUCTURE next to each other: tracks whose sections have similar lengths (an intro of about the same
+           number of bars as the instrumental the other ends on, verses and choruses of similar length) join best, because
+           the incoming's voice can start exactly where the outgoing's voice would have come back. Read the "sections"
+           of each track for this.
 
         The first track is playing now and stays first: order only the others. Name every label once. Answer with the JSON
         only.
@@ -101,7 +105,8 @@ object SetBrief {
             a.key?.let { k -> append(" | key ").append(k.value).append(if (k.confidence < org.simpmusic.dj.model.Trust.KEY) " (unsure)" else "") }
             append(" | ").append(a.durationMs / 60_000).append(':').append("%02d".format(a.durationMs / 1000 % 60))
             if (a.energy.isNotEmpty()) append(" | loud %.2f".format(java.util.Locale.ROOT, a.energy.average()))
-            SongMap.describe(a)?.let { append(" | song map: ").append(it.take(MAX_MAP)) }
+            org.simpmusic.dj.analysis.SongStructure.describe(tl)?.let { append(" | sections: ").append(it.take(MAX_MAP)) }
+                ?: SongMap.describe(a)?.let { append(" | song map: ").append(it.take(MAX_MAP)) }
         }
 
     private const val MAX_TITLE = 80

@@ -83,6 +83,9 @@ object OwnerLessons {
         swap, fade, filter, echo, loop) worked for which pair of shapes, e.g. "outgoing sung to the end + incoming that
         sings at once: keep it under 4 bars with an early hand-over" or "instrumental after the chorus into the intro, on
         16-bar lines, 16 bars with the bass swap in the middle: liked". Write rules as "when <shape>, do <trick>".
+        Mixes whose source is OWNER_EDIT were placed by the owner by hand in the mix editor: they show what the owner
+        wants, learn their shape first. The owner's ideal: the incoming's voice starts exactly where the outgoing's voice
+        would have come back, the two instrumentals overlapping with the same length.
         Only write rules the ratings support; when a rule rests on one or two mixes, say "tentative". Keep the earlier
         lessons that the ratings still support. Answer with the JSON only.
         """.trimIndent()

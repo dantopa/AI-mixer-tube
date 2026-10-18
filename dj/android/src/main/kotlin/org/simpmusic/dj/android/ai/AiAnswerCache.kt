@@ -53,6 +53,8 @@ object AiAnswerCache {
     /** A new answer for [key] replaces the old one (and its rating: it is a different mix). */
     @Synchronized
     fun put(key: String, points: AiMixPoints, model: String) {
+        // an AI answer found ahead never replaces the owner's own edit (the ✨ / Ask again path drops it first)
+        if (map[key]?.model == OWNER && !points.byOwner) return
         map.remove(key)
         map[key] = Entry(points, model, System.currentTimeMillis())
         while (map.size > MAX) map.remove(map.keys.first())
@@ -70,6 +72,29 @@ object AiAnswerCache {
         DjLog.i(TAG, "$key ${if (up) "liked: kept for good" else "disliked: forgotten, Claude is asked again next time"}")
         save()
     }
+
+    /** The owner's own edit of [key] (mix editor, saved): kept for good, like a 👍, and never replaced by an AI answer. */
+    @Synchronized
+    fun putOwner(key: String, points: AiMixPoints) {
+        map.remove(key)
+        map[key] = Entry(points.copy(byOwner = true), OWNER, System.currentTimeMillis(), rating = 1)
+        while (map.size > MAX) map.remove(map.keys.first())
+        save()
+    }
+
+    @Synchronized
+    fun isOwner(key: String): Boolean = map[key]?.model == OWNER
+
+    @Synchronized
+    fun forgetOwner(key: String) {
+        if (map[key]?.model == OWNER && map.remove(key) != null) save()
+    }
+
+    /** The owner's saved edits, for "learn from my ratings" (they are the owner's own mixes: the gold standard). */
+    @Synchronized
+    fun ownerEdits(): Map<String, AiMixPoints> = map.filterValues { it.model == OWNER }.mapValues { it.value.points }
+
+    const val OWNER = "owner"
 
     @Synchronized
     fun count(): Int = map.size

@@ -140,6 +140,15 @@ data class DjDebugState(
     val aiPlan: Boolean = false,
     /** How many of the upcoming mixes (after the current one) Claude has already solved, see `DjEngine.aiPlanAhead`. */
     val aiAhead: Int = 0,
+    /** The mix editor: the prepared plan is the owner's hand edit ([PlanSource.OWNER_EDIT]), and whether it is saved. */
+    val ownerEdit: Boolean = false,
+    val ownerEditSaved: Boolean = false,
+    /** The editor's last word ("moved", "not possible: …", "saved"), and when. */
+    val editStatus: String? = null,
+    val editStatusAtEpochMs: Long? = null,
+    /** The prepared plan's overlap in bars and its outgoing loop (bars, 0 = none): what the editor's +/- and Loop change. */
+    val planBars: Int? = null,
+    val planLoopBars: Int = 0,
 ) {
     /** A DJ mix is audible right now (the adapter started the window). */
     val isMixing: Boolean get() = phase == "mixing"
@@ -276,6 +285,20 @@ interface DjHooks {
      * every later mix question carries in its (cached) system prompt. The result arrives in [debug] (`aiStatus`).
      */
     fun learnFromRatings(): AiMixResult = AiMixResult.DISABLED
+
+    /**
+     * The mix editor (the owner drags the tracks on the mix picture): move where the outgoing leaves by [exitShiftMs] and
+     * where the incoming enters by [entryShiftMs] (both source ms, snapped to the grid by the planner), change the overlap by
+     * [barsDelta] bars, and set the outgoing loop to [loopBars] bars (null = keep). The pair is re-planned at once on those
+     * points and plays that way (a preview until [saveMixEdit]). False when there is no prepared pair or a mix is playing.
+     */
+    fun editMix(exitShiftMs: Long, entryShiftMs: Long, barsDelta: Int = 0, loopBars: Int? = null): Boolean = false
+
+    /** Keeps the edited mix for this pair for good (reused every time the pair comes, the AI is not asked). */
+    fun saveMixEdit(): Boolean = false
+
+    /** Drops the edit (saved or not) for this pair; the DJ / Claude plan it again. */
+    fun resetMixEdit(): Boolean = false
 
     /**
      * "Perfect mix": re-plan for the best point within the next couple of minutes where BOTH 1s are trusted, phrase on
@@ -816,6 +839,8 @@ class DjEngine(
         if (k == null || from == null || to == null || k == consumedKey) return AiMixResult.NO_PAIR
         if (_debug.value.isMixing) return AiMixResult.ALREADY_MIXING
         if (aiJob?.isActive == true) return AiMixResult.BUSY
+        // asking again on purpose: the owner's saved edit of this pair (if any) gives way to Claude's new answer
+        org.simpmusic.dj.android.ai.AiAnswerCache.forgetOwner(k)
         launchAiAsk(k, from, to)
         return AiMixResult.ASKING
     }
@@ -840,6 +865,81 @@ class DjEngine(
     }
 
     private var orderJob: Job? = null
+    private fun editSay(status: String) {
+        _debug.update { it.copy(editStatus = status, editStatusAtEpochMs = System.currentTimeMillis()) }
+    }
+
+    override fun editMix(exitShiftMs: Long, entryShiftMs: Long, barsDelta: Int, loopBars: Int?): Boolean {
+        val k = pairKey ?: return false
+        val from = pairFrom ?: return false
+        val to = pairTo ?: return false
+        if (k == consumedKey || _debug.value.isMixing) {
+            editSay("edit: wait until this mix is over")
+            return false
+        }
+        val plan = ready?.plan?.takeIf { it.fromId == from && it.toId == to }
+        val base =
+            aiPoints?.takeIf { aiKey == k }
+                ?: plan?.let { p ->
+                    val bar = (p.mixBpm?.takeIf { it > 0f } ?: return@let null).let { 4 * 60_000.0 / it }
+                    org.simpmusic.dj.model.AiMixPoints(p.exitPointMs, p.entryPointMs, (p.overlapMs / bar).roundToIntSafe().coerceAtLeast(1), "owner edit", p.outLoop?.let { l -> org.simpmusic.dj.model.MixMoves(loopBars = _debug.value.planLoopBars) } ?: org.simpmusic.dj.model.MixMoves())
+                }
+        if (base == null) {
+            editSay("edit: no beat-matched mix to edit yet")
+            return false
+        }
+        val bars = (base.overlapBars + barsDelta).coerceIn(1, 32)
+        val pts =
+            base.copy(
+                exitMs = (base.exitMs + exitShiftMs).coerceAtLeast(0L),
+                entryMs = (base.entryMs + entryShiftMs).coerceAtLeast(0L),
+                overlapBars = bars,
+                moves = base.moves.copy(loopBars = loopBars ?: base.moves.loopBars),
+                why = "owner edit",
+                byOwner = true,
+            )
+        DjLog.i(TAG, "mix edit $from -> $to: exit ${base.exitMs} -> ${pts.exitMs} ms, entry ${base.entryMs} -> ${pts.entryMs} ms, ${base.overlapBars} -> $bars bars, loop ${pts.moves.loopBars}")
+        aiKey = k
+        aiPoints = pts
+        aiAutoKey = k
+        mixNowKey = null
+        perfectKey = null
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        startPipeline(from, to)
+        editSay("edit: re-planning…")
+        return true
+    }
+
+    override fun saveMixEdit(): Boolean {
+        val k = pairKey ?: return false
+        val pts = aiPoints?.takeIf { aiKey == k && it.byOwner } ?: return false
+        org.simpmusic.dj.android.ai.AiAnswerCache.putOwner(k, pts)
+        _debug.update { it.copy(ownerEditSaved = true) }
+        editSay("edit saved: this pair mixes this way from now on")
+        return true
+    }
+
+    override fun resetMixEdit(): Boolean {
+        val k = pairKey ?: return false
+        val from = pairFrom ?: return false
+        val to = pairTo ?: return false
+        if (_debug.value.isMixing) return false
+        org.simpmusic.dj.android.ai.AiAnswerCache.forgetOwner(k)
+        if (aiPoints?.byOwner == true && aiKey == k) {
+            aiKey = null
+            aiPoints = null
+        }
+        aiAutoKey = null
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        startPipeline(from, to)
+        editSay("edit dropped: the DJ plans this pair again")
+        return true
+    }
+
     private var learnJob: Job? = null
 
     override fun learnFromRatings(): AiMixResult {
@@ -1546,7 +1646,18 @@ class DjEngine(
                 DjLog.i(TAG, "planning AI MIX: exit ${aiFor.exitMs}, entry ${aiFor.entryMs}, ${aiFor.overlapBars} bars, earliest exit $earliest ms (position $playbackPositionMs ms)")
                 val p = withContext(heavyDispatcher) { planner.plan(from, to, anywhere, PlanConstraints(earliestExitMs = earliest, aiPoints = aiFor)) }
                 if (p.meta?.source == org.simpmusic.dj.model.PlanSource.AI_MIX) {
-                    p
+                    if (aiFor.byOwner) {
+                        editSay("edit: out ${clockOf(p.exitPointMs)} → in ${clockOf(p.entryPointMs)}, ${(p.overlapMs / 1000.0).let { "%.1f".format(java.util.Locale.ROOT, it) }} s" + if (aiFor.moves.loopBars > 0) " · loop ${aiFor.moves.loopBars} bars" else "")
+                        p.copy(meta = p.meta?.copy(source = org.simpmusic.dj.model.PlanSource.OWNER_EDIT, quality = org.simpmusic.dj.model.MixQuality.BEST))
+                    } else {
+                        p
+                    }
+                } else if (aiFor.byOwner) {
+                    val why = p.reason.substringAfter(org.simpmusic.dj.model.AiMixPoints.NOT_USED, "no beat-matched mix at those points")
+                    DjLog.i(TAG, "mix edit: not possible ($why); keeping the regular plan")
+                    aiKey = null
+                    editSay("edit not possible: ${why.take(120)}")
+                    withContext(heavyDispatcher) { planner.plan(from, to, settings, constraints.copy(preferPerfect = true)) }
                 } else {
                     val why = p.reason.substringAfter(org.simpmusic.dj.model.AiMixPoints.NOT_USED, "no beat-matched mix at those points")
                     DjLog.i(TAG, "ai mix: not possible ($why); keeping the regular plan")
@@ -1747,6 +1858,10 @@ class DjEngine(
                 confidence = plan.confidence,
                 perfect = isPerfect(plan),
                 aiPlan = plan.meta?.source == org.simpmusic.dj.model.PlanSource.AI_MIX,
+                ownerEdit = plan.meta?.source == org.simpmusic.dj.model.PlanSource.OWNER_EDIT,
+                ownerEditSaved = plan.meta?.source == org.simpmusic.dj.model.PlanSource.OWNER_EDIT && org.simpmusic.dj.android.ai.AiAnswerCache.usable(key(plan.fromId, plan.toId))?.let { it.model == org.simpmusic.dj.android.ai.AiAnswerCache.OWNER && it.points == aiPoints } == true,
+                planBars = plan.mixBpm?.takeIf { it > 0f }?.let { b -> (plan.overlapMs / (4 * 60_000.0 / b)).roundToIntSafe() },
+                planLoopBars = plan.outLoop?.let { l -> plan.mixBpm?.takeIf { it > 0f }?.let { b -> (l.lengthMs / (4 * 60_000.0 / b)).roundToIntSafe() } } ?: 0,
             )
         }
     }
@@ -1894,3 +2009,5 @@ private const val REFERENCE_LEAD_MS = 1000.0
 
 /** An incoming decode range starting before this decodes from 0 (no extractor seek): a few seconds at 10x+ real time. */
 private const val DECODE_FROM_ZERO_BELOW_MS = 30_000L
+
+private fun Double.roundToIntSafe(): Int = if (isNaN()) 0 else kotlin.math.round(this).toInt()

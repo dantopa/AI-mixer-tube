@@ -280,7 +280,25 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(feedback: D
     }
     if (showLog) DjLogViewerDialog(onDismiss = { showLog = false })
     // Read live: the sheet keeps following the engine's flow while it is open, and closes itself when the mix is gone.
-    if (showMix) DjMixSheet(data = mix, onDismiss = { showMix = false })
+    if (showMix) {
+        // the mix editor: drag the tracks, change the length and the loop, save the mix for this pair
+        val editStatus = debug.editStatus?.takeIf { (debug.editStatusAtEpochMs ?: 0L) > System.currentTimeMillis() - 30_000L }
+        val editor =
+            com.maxrave.simpmusic.ui.component.dj.DjMixEditor(
+                onShift = { e, i -> hooks.editMix(e, i) },
+                onBars = { d -> hooks.editMix(0L, 0L, barsDelta = d) },
+                onLoop = { b -> hooks.editMix(0L, 0L, loopBars = b) },
+                onSave = { hooks.saveMixEdit() },
+                onReset = { hooks.resetMixEdit() },
+                status = editStatus,
+                bars = debug.planBars,
+                loopBars = debug.planLoopBars,
+                isEdit = debug.ownerEdit,
+                isSaved = debug.ownerEditSaved,
+                enabled = !debug.isMixing,
+            )
+        DjMixSheet(data = mix, onDismiss = { showMix = false }, editor = editor)
+    }
 }
 
 /** Row 2: what the listener can ask for. Nothing is drawn when nothing applies (a mix playing, no rating due). */

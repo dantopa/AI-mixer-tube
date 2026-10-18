@@ -159,6 +159,15 @@ object MixBrief {
           it, a bridge between the two. Loop whole phrases' bars (2 or 4) when you can; the loop must start on a bar
           whose groove repeats well.
 
+        THE SWEET SPOT (the owner's words): the incoming's voice starts EXACTLY where the outgoing's voice would have come
+        back. Read both tracks' sections and lyrics: if the outgoing would sing again after N bars of instrumental, enter
+        the incoming so that it also sings after N bars, on the same beat, phrase on phrase; the two instrumentals then
+        lie on top of each other with the same length, and the vocal line continues as if it were one song. When the two
+        songs have similar shapes (intro / verse / chorus of similar lengths) this is easy; when they differ, use a trick:
+        enter the incoming a few bars earlier or later in its intro, shorten or lengthen the overlap by whole bars, or
+        loop an instrumental bar of the outgoing until the incoming's voice is due. OWNER_EDIT mixes in the ratings were
+        placed by the owner by hand: they are the best examples of their taste.
+
         Use only bar numbers from the tables and stay inside the allowed ranges given. Answer with the JSON only.
         """.trimIndent()
 

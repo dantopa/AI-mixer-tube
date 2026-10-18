@@ -40,6 +40,7 @@ import org.simpmusic.dj.mixview.DjMixViewData
 fun DjMixSheet(
     data: DjMixViewData?,
     onDismiss: () -> Unit,
+    editor: DjMixEditor? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
@@ -82,7 +83,7 @@ fun DjMixSheet(
                     }
                 }
                 if (data != null) {
-                    DjMixPanel(data = data, strings = strings, canvasHeight = 240.dp, modifier = Modifier.padding(bottom = 8.dp))
+                    DjMixPanel(data = data, strings = strings, canvasHeight = 240.dp, modifier = Modifier.padding(bottom = 8.dp), editor = editor)
                 }
             }
         }

@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
@@ -65,6 +67,9 @@ fun DjMixCanvas(
     modifier: Modifier = Modifier,
     strings: DjMixStrings = DjMixStrings(),
     animatePlayhead: Boolean = true,
+    /** The mix editor's live drag: how far (px) the outgoing / incoming lane's audio is moved under the fixed mix. */
+    shiftAPx: Float = 0f,
+    shiftBPx: Float = 0f,
 ) {
     val cs = MaterialTheme.colorScheme
     val colors = MixColors(
@@ -90,7 +95,7 @@ fun DjMixCanvas(
 
     Canvas(modifier = modifier) {
         val now = if (animatePlayhead) shown.value else data.nowMs
-        val painter = MixPainter(this, data, colors, measurer, cache, labelStyle, badgeStyleA, badgeStyleB)
+        val painter = MixPainter(this, data, colors, measurer, cache, labelStyle, badgeStyleA, badgeStyleB, shiftAPx, shiftBPx)
         painter.draw(now, overlapText, if (data.phase == DjMixPhase.ANALYSING) strings.analysing else null, emptyStyle)
     }
 }
@@ -139,6 +144,8 @@ private class MixPainter(
     private val labelStyle: TextStyle,
     private val badgeStyleA: TextStyle,
     private val badgeStyleB: TextStyle,
+    private val shiftA: Float = 0f,
+    private val shiftB: Float = 0f,
 ) {
     private val dp1 = with(scope) { 1.dp.toPx() }
     private val w = scope.size.width
@@ -167,23 +174,37 @@ private class MixPainter(
             axis()
             return@with
         }
-        sections(data.outgoing, laneATop, c.a, labelAtTop = true)
-        sections(data.incoming, laneBTop, c.b, labelAtTop = false)
+        // The audio of each deck (its sections, bars, waveform and beat ticks) moves with an editor drag; the mix itself
+        // (overlap zone, faders, EQ cuts) stays where it is: the track slides under it, like a DJ's waveform.
+        moved(laneATop, shiftA) {
+            sections(data.outgoing, laneATop, c.a, labelAtTop = true)
+            grid(data.outgoing, laneATop, c.a)
+            waveform(data.outgoing, laneATop, c.a)
+        }
+        moved(laneBTop, shiftB) {
+            sections(data.incoming, laneBTop, c.b, labelAtTop = false)
+            grid(data.incoming, laneBTop, c.b)
+            waveform(data.incoming, laneBTop, c.b)
+        }
         zone(overlapText)
-        grid(data.outgoing, laneATop, c.a)
-        grid(data.incoming, laneBTop, c.b)
-        waveform(data.outgoing, laneATop, c.a)
-        waveform(data.incoming, laneBTop, c.b)
         cutBands(data.outgoing, laneATop)
         cutBands(data.incoming, laneBTop)
         fader(data.outgoing, laneATop)
         fader(data.incoming, laneBTop)
-        ticks(data.outgoing, laneATop + laneH, down = true, color = c.a)
-        ticks(data.incoming, laneBTop, down = false, color = c.b)
+        translate(shiftA, 0f) { ticks(data.outgoing, laneATop + laneH, down = true, color = c.a) }
+        translate(shiftB, 0f) { ticks(data.incoming, laneBTop, down = false, color = c.b) }
         axis()
         if (now != null) playhead(now)
         badge("A", c.a, badgeStyleA, laneATop, readout(data.outgoing))
         badge("B", c.b, badgeStyleB, laneBTop, readout(data.incoming))
+    }
+
+    private inline fun DrawScope.moved(top: Float, dx: Float, crossinline block: DrawScope.() -> Unit) {
+        if (dx == 0f) {
+            block()
+            return
+        }
+        clipRect(0f, top, w, top + laneH) { translate(dx, 0f) { block() } }
     }
 
     private fun DrawScope.lane(top: Float, color: Color, isTop: Boolean) {

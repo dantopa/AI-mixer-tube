@@ -173,6 +173,7 @@ class MixTools(
             ).append('\n')
             val loop = p.outLoop
             append("voice over voice: ").append(voiceOverVoice(p.exitPointMs, p.entryPointMs, p.overlapMs, loop)).append('\n')
+            voiceContinuity(p.exitPointMs, p.entryPointMs, f?.rateOut ?: 1f, f?.rateIn ?: 1f, p.mixBpm, loop)?.let { append(it).append('\n') }
             // the bass of each track over its own part of the overlap, 0-9 of that track's range (a loop's: the loop itself)
             val outEnd = p.exitPointMs + p.overlapMs
             val inEnd = p.entryPointMs + p.overlapMs
@@ -208,6 +209,33 @@ class MixTools(
             t += STEP_MS
         }
         return if (both == 0L) "none" else "%.1f s".format(java.util.Locale.ROOT, both / 1000.0)
+    }
+
+    /**
+     * The owner's sweet spot: the incoming's voice starts exactly where the outgoing's voice would have come back, so the
+     * song seems to go on (and the two instrumentals have the same length). Measured in wall time from T0: the outgoing's
+     * next sung line after its exit (what it would have done) against the incoming's first sung line after its entry.
+     */
+    private fun voiceContinuity(exitMs: Long, entryMs: Long, rateOut: Float, rateIn: Float, mixBpm: Float?, loop: org.simpmusic.dj.model.SourceLoop?): String? {
+        val vo = outT.vocals?.value ?: return null
+        val vi = inT.vocals?.value ?: return null
+        val nextOut = org.simpmusic.dj.analysis.SongMap.sung(vo).firstOrNull { it.startMs >= exitMs + 500 }?.startMs
+        val nextIn = org.simpmusic.dj.analysis.SongMap.sung(vi).firstOrNull { it.startMs >= entryMs - 500 }?.startMs
+        if (nextIn == null) return "voice continuity: the incoming does not sing after its entry"
+        val inWall = (nextIn - entryMs) / rateIn.coerceAtLeast(0.5f)
+        if (nextOut == null || loop != null) return "voice continuity: the incoming starts singing %.1f s after T0 (the outgoing has no voice to come back to%s)".format(java.util.Locale.ROOT, inWall / 1000.0, if (loop != null) ", it loops" else "")
+        val outWall = (nextOut - exitMs) / rateOut.coerceAtLeast(0.5f)
+        val diff = inWall - outWall
+        val beat = mixBpm?.takeIf { it > 0f }?.let { 60_000.0 / it }
+        val beats = beat?.let { " = %+.1f beats".format(java.util.Locale.ROOT, diff / it) } ?: ""
+        val verdict = when {
+            abs(diff) <= (beat ?: 500.0) -> "SEAMLESS: the incoming sings where the outgoing would have"
+            diff < 0 -> "the incoming sings EARLIER than the outgoing would have"
+            else -> "the incoming sings LATER than the outgoing would have (a longer instrumental)"
+        }
+        return "voice continuity: the outgoing's voice would come back %.1f s after T0, the incoming sings %.1f s after T0 (%+.1f s%s): %s".format(
+            java.util.Locale.ROOT, outWall / 1000.0, inWall / 1000.0, diff / 1000.0, beats, verdict,
+        )
     }
 
     private fun commit(o: JsonObject): Outcome {
@@ -277,6 +305,9 @@ class MixTools(
             section of the incoming). When try_mix says the overlap came out shorter than asked and why, move the points
             (an entry past the incoming's intro, an exit with more song after it) if that gives a longer clean overlap. Prefer the candidate with no voice over voice, the
             bass on both sides, a consonant overlap and phrase on phrase, at the owner's usual length when it stays clean.
+            try_mix also reports "voice continuity": aim for SEAMLESS (the incoming's voice starts on the beat where the
+            outgoing's voice would have come back, the two instrumentals the same length); when the shapes differ, move the
+            entry or the exit by whole bars, or use a loop or a longer/shorter overlap, until it is.
             try_mix takes the moves too and says what they did (and when a loop could not be used, why): try a candidate with
             the plain mix and one with the moves you think fit, and keep what the engine measures as cleaner. A loop changes
             what the outgoing plays under the overlap, so try_mix measures the loop's own bass and voice.

@@ -159,4 +159,14 @@ class MixBriefTest {
         val bars = if (f.unitIsBar) f.overlapUnits else f.overlapUnits / (out.beatsPerBar ?: 4)
         assertTrue(bars <= AiMixPoints.UNSURE_MAX_BARS, blind.reason)
     }
+
+    @Test
+    fun theOwnersOwnEditIsNotCappedAndIsTaggedAsTheirs() {
+        val pts = AiMixPoints(exitMs = 93_600L, entryMs = 80_900L, overlapBars = 16, why = "owner edit", byOwner = true)
+        val p = DjTransitionPlanner().plan(out.copy(vocals = null), inc.copy(vocals = null), settings, PlanConstraints(earliestExitMs = 30_000L, aiPoints = pts))
+        // the planner executes it like Claude's points (the engine relabels the source OWNER_EDIT), without the safety cap
+        assertEquals(PlanSource.AI_MIX, p.meta?.source, p.reason)
+        assertTrue(p.reason.startsWith(AiMixPoints.OWNER_TAG), p.reason)
+        assertTrue(AiMixPoints.UNSURE_CAP !in p.reason, p.reason)
+    }
 }

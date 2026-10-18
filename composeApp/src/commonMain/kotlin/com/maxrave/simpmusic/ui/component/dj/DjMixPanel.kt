@@ -18,7 +18,16 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -41,8 +50,20 @@ fun DjMixPanel(
     strings: DjMixStrings = DjMixStrings(),
     canvasHeight: Dp = 200.dp,
     animatePlayhead: Boolean = true,
+    /** The mix editor (drag the tracks, length, loop, save); null = a view only. */
+    editor: DjMixEditor? = null,
 ) {
     val cs = MaterialTheme.colorScheme
+    var editing by remember { mutableStateOf(false) }
+    var dragA by remember { mutableStateOf(0f) }
+    var dragB by remember { mutableStateOf(0f) }
+    var dragLane by remember { mutableStateOf(0) }
+    var widthPx by remember { mutableStateOf(1) }
+    // a new picture (the re-planned edit) starts from where the tracks now are
+    LaunchedEffect(data) {
+        dragA = 0f
+        dragB = 0f
+    }
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             DeckTitle(data.outgoing.title, cs.primary, Modifier.weight(1f))
@@ -62,12 +83,44 @@ fun DjMixPanel(
             overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.height(6.dp))
+        val canEdit = editing && editor != null && editor.enabled && data.kind != null
         DjMixCanvas(
             data = data,
             strings = strings,
             animatePlayhead = animatePlayhead,
-            modifier = Modifier.fillMaxWidth().height(canvasHeight),
+            shiftAPx = dragA,
+            shiftBPx = dragB,
+            modifier =
+                Modifier.fillMaxWidth().height(canvasHeight).onSizeChanged { widthPx = it.width.coerceAtLeast(1) }.then(
+                    if (!canEdit) {
+                        Modifier
+                    } else {
+                        Modifier.pointerInput(data) {
+                            detectHorizontalDragGestures(
+                                onDragStart = { o -> dragLane = if (o.y < size.height / 2f) 1 else 2 },
+                                onHorizontalDrag = { change, dx ->
+                                    change.consume()
+                                    if (dragLane == 1) dragA += dx else dragB += dx
+                                },
+                                onDragEnd = {
+                                    val msPerPx = (data.endMs - data.startMs).toDouble() / widthPx
+                                    // the track slid right by t: its EARLIER part now plays under the mix
+                                    val exitShift = -(dragA * msPerPx).toLong()
+                                    val entryShift = -(dragB * msPerPx).toLong()
+                                    if (exitShift != 0L || entryShift != 0L) editor?.onShift?.invoke(exitShift, entryShift)
+                                },
+                                onDragCancel = {
+                                    dragA = 0f
+                                    dragB = 0f
+                                },
+                            )
+                        }
+                    },
+                ),
         )
+        if (editor != null) {
+            DjMixEditBar(editor, strings, editing, onToggle = { editing = !editing })
+        }
         Spacer(Modifier.height(4.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -85,6 +138,60 @@ fun DjMixPanel(
             Spacer(Modifier.width(12.dp))
             Legend(strings)
         }
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun DjMixEditBar(editor: DjMixEditor, strings: DjMixStrings, editing: Boolean, onToggle: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        androidx.compose.foundation.layout.FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            EditPill(if (editing) strings.editDone else "✎ " + strings.editStart, lit = editing, enabled = true, onClick = onToggle)
+            if (editing) {
+                EditPill("−", enabled = editor.enabled) { editor.onBars(-1) }
+                Text(
+                    editor.bars?.let { strings.editBarsTemplate.replace("{0}", it.toString()) } ?: "—",
+                    style = MaterialTheme.typography.labelLarge, color = cs.onSurface, modifier = Modifier.align(Alignment.CenterVertically),
+                )
+                EditPill("+", enabled = editor.enabled) { editor.onBars(+1) }
+                // the loop cycles 0 -> 1 -> 2 -> 4 -> 0 bars of the outgoing from its exit
+                val next = when (editor.loopBars) { 0 -> 1; 1 -> 2; 2 -> 4; else -> 0 }
+                EditPill(
+                    if (editor.loopBars == 0) strings.editLoopOff else strings.editLoopTemplate.replace("{0}", editor.loopBars.toString()),
+                    lit = editor.loopBars > 0, enabled = editor.enabled,
+                ) { editor.onLoop(next) }
+                EditPill(if (editor.isSaved) "✓ " + strings.editSaved else strings.editSave, lit = editor.isSaved, enabled = editor.enabled && editor.isEdit && !editor.isSaved) { editor.onSave() }
+                EditPill(strings.editReset, enabled = editor.enabled && editor.isEdit) { editor.onReset() }
+            }
+        }
+        if (editing) {
+            Text(
+                text = if (!editor.enabled) strings.editBusy else editor.status ?: strings.editHint,
+                style = MaterialTheme.typography.labelSmall,
+                color = cs.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun EditPill(label: String, lit: Boolean = false, enabled: Boolean, onClick: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val bg = if (lit) cs.primary else cs.onSurface.copy(alpha = 0.08f)
+    val fg = (if (lit) cs.onPrimary else cs.onSurface).copy(alpha = if (enabled) 1f else 0.38f)
+    Box(
+        Modifier
+            .background(bg, androidx.compose.foundation.shape.RoundedCornerShape(50))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = fg, maxLines = 1)
     }
 }
 

@@ -311,8 +311,19 @@ data class MixMoves(
 
 /** Where Claude would mix one pair (source times, ms), and its one-line why. See [PlanConstraints.aiPoints]. */
 @Serializable
-data class AiMixPoints(val exitMs: Long, val entryMs: Long, val overlapBars: Int, val why: String, val moves: MixMoves = MixMoves()) {
+data class AiMixPoints(
+    val exitMs: Long,
+    val entryMs: Long,
+    val overlapBars: Int,
+    val why: String,
+    val moves: MixMoves = MixMoves(),
+    /** The owner made these points by hand in the mix editor (no safety cap; the plan is [PlanSource.OWNER_EDIT]). */
+    val byOwner: Boolean = false,
+) {
     companion object {
+        /** Start of a plan's reason when the owner placed it by hand in the mix editor. */
+        const val OWNER_TAG = "OWNER EDIT: "
+
         /** Start of a plan's reason when Claude placed it. */
         const val TAG = "AI MIX: "
 

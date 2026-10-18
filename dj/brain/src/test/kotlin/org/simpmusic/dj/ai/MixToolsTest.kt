@@ -39,6 +39,7 @@ class MixToolsTest {
         println(t)
         assertTrue(t.startsWith("OK"), t)
         assertTrue(t.contains("voice over voice") && t.contains("harmony of the overlap") && t.contains("bass through the overlap"), t)
+        assertTrue(t.contains("voice continuity"), t)
         val bad = text(tools.call(MixTools.TRY, """{"exit_bar":${brief.exitFrom - 1},"entry_bar":0,"overlap_bars":4}"""))
         assertTrue(bad.startsWith("error"), bad)
         val c = tools.call(MixTools.COMMIT, """{"exit_bar":$exitBar,"entry_bar":$entryBar,"overlap_bars":4,"why":"inst over inst"}""")
