@@ -83,7 +83,10 @@ class ClaudeMixClient {
         val system = TextBlockParam.builder().text((if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system) + OwnerLessons.block()).cacheControl(ephemeral).build()
         return try {
             val client = clientFor(apiKey)
-            val turns = if (tools != null) MixTools.MAX_TURNS else 1
+            // a turn that ends on text with no tool call (a progress note, a plan announced but not taken) is nudged on, at
+            // most CONTINUATIONS times, instead of failing the question: those turns count on top of MAX_TURNS
+            val turns = if (tools != null) MixTools.MAX_TURNS + CONTINUATIONS else 1
+            var nudges = 0
             for (turn in 1..turns) {
                 val b =
                     MessageCreateParams.builder()
@@ -96,9 +99,10 @@ class ClaudeMixClient {
                 if (tools != null) b.cacheControl(ephemeral)
                 if (tools != null) {
                     MixTools.SPECS.forEach { b.addTool(toolOf(it)) }
+                    effortOf(model)?.let { b.outputConfig(OutputConfig.builder().effort(it).build()) }
                 } else {
                     val schema = JsonOutputFormat.Schema.builder().apply { MixBrief.SCHEMA.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
-                    b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).build())
+                    b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).apply { effortOf(model)?.let { effort(it) } }.build())
                 }
                 val m = client.messages().create(b.build())
                 inTok += m.usage().inputTokens()
@@ -106,7 +110,7 @@ class ClaudeMixClient {
                 cacheRead += m.usage().cacheReadInputTokens().orElse(0L)
                 cacheWrite += m.usage().cacheCreationInputTokens().orElse(0L)
                 when (m.stopReason().orElse(null)) {
-                    StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
+                    StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request${refusalOf(m)}"))
                     StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
                     else -> {}
                 }
@@ -120,7 +124,12 @@ class ClaudeMixClient {
                 val uses = m.content().mapNotNull { blk -> blk.toolUse().orElse(null) }
                 if (uses.isEmpty()) {
                     val said = m.content().mapNotNull { blk -> blk.text().orElse(null)?.text() }.joinToString(" ").take(200)
-                    return Result.failure(IllegalStateException("Claude stopped without committing a mix ($said)"))
+                    if (nudges >= CONTINUATIONS) return Result.failure(IllegalStateException("Claude stopped without committing a mix ($said)"))
+                    nudges++
+                    DjLog.i(TAG, "turn $turn: ended on text without a tool call, nudged on ($nudges/$CONTINUATIONS): $said")
+                    messages += m.toParam()
+                    messages += MessageParam.builder().role(MessageParam.Role.USER).content(CONTINUE).build()
+                    continue
                 }
                 messages += m.toParam()
                 val results = ArrayList<ContentBlockParam>()
@@ -174,10 +183,10 @@ class ClaudeMixClient {
                     .maxTokens(MAX_TOKENS)
                     .systemOfTextBlockParams(listOf(TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()))
                     .addUserMessage(user)
-                    .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).build())
+                    .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).apply { effortOf(model)?.let { effort(it) } }.build())
             val m = clientFor(apiKey).messages().create(b.build())
             when (m.stopReason().orElse(null)) {
-                StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request"))
+                StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request${refusalOf(m)}"))
                 StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
                 else -> {}
             }
@@ -206,6 +215,20 @@ class ClaudeMixClient {
             is AnthropicIoException -> IllegalStateException("no connection to Claude (${e.javaClass.simpleName})")
             else -> IllegalStateException("${e.javaClass.simpleName}: ${e.message?.take(120)}")
         }
+
+    /** " (category: explanation)" of a safeguard decline, or "". */
+    private fun refusalOf(m: com.anthropic.models.messages.Message): String {
+        val d = m.stopDetails().orElse(null) ?: return ""
+        val c = d.category().map { it.toString() }.orElse("unknown")
+        return " ($c${d.explanation().map { ": " + it.take(120) }.orElse("")})"
+    }
+
+    /**
+     * Effort, set explicitly only where it is documented: Opus 5.5 at medium, its default (Anthropic's guide: medium on
+     * Opus 5.5 matches Opus 5 at high; set it explicitly and lower it before prompting for less thinking). Haiku and Sonnet
+     * keep their own defaults (null: the field is not sent).
+     */
+    private fun effortOf(model: ClaudeModel): OutputConfig.Effort? = if (model == ClaudeModel.OPUS) OutputConfig.Effort.MEDIUM else null
 
     private fun toolOf(spec: MixTools.Spec): Tool {
         @Suppress("UNCHECKED_CAST")
@@ -251,8 +274,18 @@ class ClaudeMixClient {
 
     private companion object {
         const val TAG = "ai"
-        /** The answer is a small JSON or a tool call; the rest is room for the model's own (adaptive) thinking. */
-        const val MAX_TOKENS = 8_000L
+        /**
+         * The answer is a small JSON or a tool call; the rest is room for the model's thinking, which counts toward
+         * max_tokens even when it is not returned. 8 000 was sized for thinking off; only the tokens used are billed.
+         */
+        const val MAX_TOKENS = 32_000L
+
+        /** Text-only turns nudged on before the question fails (Anthropic: two or three, so a stuck run still ends). */
+        const val CONTINUATIONS = 2
+        const val CONTINUE =
+            "You ended the turn without a tool call, so nothing was committed and the mix is still owed. Continue: try_mix " +
+                "what you were about to try, or commit_mix the best candidate so far. If something blocks every candidate, " +
+                "commit the cleanest one and say why in its why."
         const val TIMEOUT_S = 90L
     }
 }

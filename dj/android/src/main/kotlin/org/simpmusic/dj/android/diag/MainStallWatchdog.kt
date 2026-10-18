@@ -8,7 +8,7 @@ import org.simpmusic.dj.android.log.DjLog
 
 /** Which build of the DJ code this is, printed at boot so a pasted log says what it came from. Bump it with every shipped change. */
 object DjBuild {
-    const val ID = "2026-10-18-bl listen to the mix while editing (rendered preview)"
+    const val ID = "2026-10-18-bm Claude client per the Opus 5.5 guide (nudge, max_tokens, effort)"
 }
 
 /**

@@ -312,6 +312,9 @@ class MixTools(
             the plain mix and one with the moves you think fit, and keep what the engine measures as cleaner. A loop changes
             what the outgoing plays under the overlap, so try_mix measures the loop's own bass and voice.
             Do not explain at length between calls; the commit's why is enough.
+            Nobody is watching this conversation: a message with no tool call ends it and no mix is committed. Do not end a
+            turn with a summary that announces the next step, an offer to continue, or questions for the owner; put any note
+            in the same message as your next tool call. The conversation ends only with commit_mix.
             """.trimIndent()
 
         private fun clock(ms: Long): String {
