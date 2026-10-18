@@ -205,6 +205,12 @@ val djModule =
                     lyrics = runCatching { get<DjLyricsSource>() }.onFailure { DjLog.e("boot", "lyric vocals are OFF", it) }.getOrNull(),
                     // the real-time engine: one mixer and ONE audio output for every player (players opt in when they are built)
                     bus = runCatching { org.simpmusic.dj.android.bus.AndroidMixBus() }.onFailure { DjLog.e("boot", "real-time engine is OFF", it) }.getOrNull(),
+                    // the mix editor's "Listen": the app's playback pauses while the rendered preview plays, then goes on
+                    previewPlayer =
+                        org.simpmusic.dj.android.preview.AndroidMixPreviewPlayer(
+                            pauseMain = { getOrNull<MediaPlayerHandler>()?.player?.let { p -> p.isPlaying.also { playing -> if (playing) p.pause() } } ?: false },
+                            resumeMain = { getOrNull<MediaPlayerHandler>()?.player?.play() },
+                        ),
                     // what AI Auto plans ahead: the queue after the playing track, in playing order (none while shuffled or blocked)
                     playerPort = { getOrNull<DjPlayerPort>() },
                     upcomingIds = {

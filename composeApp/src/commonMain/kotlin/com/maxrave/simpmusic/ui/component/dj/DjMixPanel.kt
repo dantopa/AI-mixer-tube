@@ -150,6 +150,8 @@ private fun DjMixEditBar(editor: DjMixEditor, strings: DjMixStrings, editing: Bo
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
+            // hear the prepared mix (the AI's, the DJ's or the edit) without waiting for the song to get there
+            EditPill(if (editor.isListening) "■ " + strings.listenStop else "▶ " + strings.listen, lit = editor.isListening, enabled = editor.enabled || editor.isListening, onClick = editor.onListen)
             EditPill(if (editing) strings.editDone else "✎ " + strings.editStart, lit = editing, enabled = true, onClick = onToggle)
             if (editing) {
                 EditPill("−", enabled = editor.enabled) { editor.onBars(-1) }
@@ -168,7 +170,7 @@ private fun DjMixEditBar(editor: DjMixEditor, strings: DjMixStrings, editing: Bo
                 EditPill(strings.editReset, enabled = editor.enabled && editor.isEdit) { editor.onReset() }
             }
         }
-        if (editing) {
+        if (editing || editor.isListening || editor.status != null) {
             Text(
                 text = if (!editor.enabled) strings.editBusy else editor.status ?: strings.editHint,
                 style = MaterialTheme.typography.labelSmall,

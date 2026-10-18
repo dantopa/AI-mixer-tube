@@ -290,6 +290,8 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(feedback: D
                 onLoop = { b -> hooks.editMix(0L, 0L, loopBars = b) },
                 onSave = { hooks.saveMixEdit() },
                 onReset = { hooks.resetMixEdit() },
+                onListen = { hooks.previewMix() },
+                isListening = debug.previewing,
                 status = editStatus,
                 bars = debug.planBars,
                 loopBars = debug.planLoopBars,
@@ -297,7 +299,15 @@ private fun androidx.compose.foundation.layout.RowScope.DjStatusLine(feedback: D
                 isSaved = debug.ownerEditSaved,
                 enabled = !debug.isMixing,
             )
-        DjMixSheet(data = mix, onDismiss = { showMix = false }, editor = editor)
+        DjMixSheet(
+            data = mix,
+            onDismiss = {
+                showMix = false
+                // closing the sheet stops a preview (the app's playback then goes on)
+                if (debug.previewing) hooks.previewMix()
+            },
+            editor = editor,
+        )
     }
 }
 

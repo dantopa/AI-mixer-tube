@@ -149,6 +149,8 @@ data class DjDebugState(
     /** The prepared plan's overlap in bars and its outgoing loop (bars, 0 = none): what the editor's +/- and Loop change. */
     val planBars: Int? = null,
     val planLoopBars: Int = 0,
+    /** The mix editor's "Listen": a preview of the prepared mix is being rendered or is playing. */
+    val previewing: Boolean = false,
 ) {
     /** A DJ mix is audible right now (the adapter started the window). */
     val isMixing: Boolean get() = phase == "mixing"
@@ -294,6 +296,13 @@ interface DjHooks {
      */
     fun editMix(exitShiftMs: Long, entryShiftMs: Long, barsDelta: Int = 0, loopBars: Int? = null): Boolean = false
 
+    /**
+     * "Listen": renders the prepared mix (a few seconds before it to the end of the overlap) and plays it on its own, the
+     * app's playback paused meanwhile and resumed after; pressed again, it stops. The queue and the prepared mix are not
+     * touched. False when there is nothing prepared to hear.
+     */
+    fun previewMix(): Boolean = false
+
     /** Keeps the edited mix for this pair for good (reused every time the pair comes, the AI is not asked). */
     fun saveMixEdit(): Boolean = false
 
@@ -423,6 +432,8 @@ class DjEngine(
     private val lyrics: org.simpmusic.dj.android.lyrics.DjLyricsSource? = null,
     /** The real-time engine's mixer (one output for every player); null = the window + splice path only. */
     private val bus: org.simpmusic.dj.android.bus.AndroidMixBus? = null,
+    /** Plays a rendered preview of the prepared mix (mix editor "Listen"); null = no preview. */
+    private val previewPlayer: org.simpmusic.dj.android.preview.MixPreviewPlayer? = null,
     /** "AI Mix": asks Claude (the key and the model are the owner's, `ClaudeSettings`). */
     private val claude: org.simpmusic.dj.android.ai.ClaudeMixClient = org.simpmusic.dj.android.ai.ClaudeMixClient(),
     /**
@@ -898,6 +909,13 @@ class DjEngine(
                 why = "owner edit",
                 byOwner = true,
             )
+        // the owner edits by ear: the new mix is played as soon as it is re-planned (a preview playing now stops)
+        if (_debug.value.previewing) {
+            previewJob?.cancel()
+            previewPlayer?.stop()
+            _debug.update { it.copy(previewing = false) }
+        }
+        previewAfterEdit = previewPlayer != null
         DjLog.i(TAG, "mix edit $from -> $to: exit ${base.exitMs} -> ${pts.exitMs} ms, entry ${base.entryMs} -> ${pts.entryMs} ms, ${base.overlapBars} -> $bars bars, loop ${pts.moves.loopBars}")
         aiKey = k
         aiPoints = pts
@@ -909,6 +927,62 @@ class DjEngine(
         ready = null
         startPipeline(from, to)
         editSay("edit: re-planning…")
+        return true
+    }
+
+    private var previewJob: Job? = null
+
+    /** An edit was made while the editor was listening: its re-planned mix is played as soon as it is ready. */
+    @Volatile private var previewAfterEdit = false
+
+    private fun previewAfterEditIfAsked() {
+        if (!previewAfterEdit) return
+        previewAfterEdit = false
+        scope.launch { if (!_debug.value.previewing) previewMix() }
+    }
+
+    override fun previewMix(): Boolean {
+        val player = previewPlayer ?: return false
+        if (_debug.value.previewing) {
+            previewJob?.cancel()
+            player.stop()
+            _debug.update { it.copy(previewing = false) }
+            return true
+        }
+        val p = ready
+        if (p == null || _debug.value.isMixing) {
+            editSay(if (_debug.value.isMixing) "listen: the mix is playing now" else "listen: the mix is still being planned")
+            return false
+        }
+        _debug.update { it.copy(previewing = true) }
+        editSay("listen: preparing the preview…")
+        previewJob =
+            scope.launch {
+                try {
+                    val tl = p.timeline
+                    val file = File(windowDir, "preview.wav")
+                    val rendered =
+                        withContext(heavyDispatcher) {
+                            val cancel = CancelSignal { !isActive }
+                            val out = tl.outgoingDecodeRange()
+                            val inn = tl.incomingDecodeRange()
+                            val outPcm = decoder.decodeStereoRange(p.fromId, out.first, out.last, cancel)
+                            val inPcm = decoder.decodeStereoRange(p.toId, inn.first, inn.last, cancel)
+                            // from a few seconds before the mix (enough to hear where it comes from) to the window's end
+                            val start = maxOf(tl.startRelMs, -PREVIEW_LEAD_MS)
+                            renderer.render(RenderRequest(p.plan, start, tl.endRelMs, outPcm, inPcm, outPcm.sampleRate, file))
+                        }
+                    if (!_debug.value.previewing) return@launch
+                    editSay("listen: playing ${"%.0f".format(java.util.Locale.ROOT, rendered.durationMs / 1000.0)} s of the mix (tap again to stop)")
+                    player.play(rendered.file) { _debug.update { it.copy(previewing = false) } }
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    DjLog.w(TAG, "preview failed: ${e.javaClass.simpleName}: ${e.message}")
+                    editSay("listen: could not render the preview (${e.javaClass.simpleName})")
+                    _debug.update { it.copy(previewing = false) }
+                }
+            }
         return true
     }
 
@@ -1744,6 +1818,7 @@ class DjEngine(
                     "${"%.0f".format(prepared.busStartSourceMs())} ms, incoming cued at ${"%.0f".format(prepared.triggerSourceMs(0.0))} ms (${plan.kind}: ${plan.reason})",
             )
             listener?.invoke(prepared)
+            previewAfterEditIfAsked()
             return
         }
         val cancel = CancelSignal { cancelFlag.get() || !scope.isActive }
@@ -1801,6 +1876,7 @@ class DjEngine(
                 "window player must start at src ${"%.0f".format(prepared.triggerSourceMs(calibrator.startLatencyMs))} ms (${plan.kind}: ${plan.reason})",
         )
         listener?.invoke(prepared)
+        previewAfterEditIfAsked()
     }
 
     /**
@@ -1937,6 +2013,9 @@ private const val AI_MAX_TEMPO_GAP = 0.12f
 
 /** "AI Auto" solves this many upcoming mixes ahead (current+1 -> +2, ..., the pair ending 3 tracks ahead), see `aiPlanAhead`. */
 internal const val AI_AHEAD_PAIRS = 3
+
+/** The mix editor's preview starts this long before the mix (plan time), so the ear hears where it comes from. */
+private const val PREVIEW_LEAD_MS = 8_000L
 
 /** A mix solved ahead leaves at least this long after its outgoing plays alone (the track is heard on its own a while). */
 private const val AI_AHEAD_SOLO_MS = 30_000L
