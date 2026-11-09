@@ -237,8 +237,11 @@ data class LyricVocals(
             if (t.isEmpty()) return true
             if (t.none { it.isLetterOrDigit() }) return true
             val bare = t.trim('(', ')', '[', ']', '*', ' ')
-            return bare == "instrumental" || bare == "music" || bare == "música" || bare == "musica"
+            return bare in MARKER_WORDS
         }
+
+        /** A whole line that is only one of these is a marker (YouTube captions write "[Música]", "[Aplausos]"). */
+        private val MARKER_WORDS = setOf("instrumental", "music", "música", "musica", "aplausos", "applause", "risas", "laughter", "silencio", "intro", "outro", "solo", "coro instrumental")
 
         /** Vowel groups, at least one per word: a rough syllable count for Spanish / English / Portuguese lines. */
         internal fun syllables(text: String): Int {

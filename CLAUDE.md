@@ -516,6 +516,11 @@ Service modules:
   - **Effort is set explicitly, on Opus only** (`effortOf`: `medium`, its documented default); Haiku and Sonnet send no effort field.
   - A safeguard decline now gives its `stop_details` category and explanation.
   - Not run against the API from the build server (no key), not run on a device.
+- **More tracks with synced lyrics: the search, not the providers (2026-11-09, build bn)**: the owner's export had synced lyrics on 15 of 36 tracks. LRCLIB has most of these songs; the DJ asked for them wrongly: the app's LRCLIB search sends the raw YouTube `"artist title"` ("Los Palmeras - Bombón Asesino (Video Oficial)") as one query and keeps the first result within 10 s, synced or not, which misses the song or takes another one of the same length; the providers were also asked one after another with a 20 s timeout each.
+  - **`LyricQuery`** (`dj/brain` `timeline/LyricSearch.kt`): cleans a YouTube title (drops "(Video Oficial)", "[Official Music Video]", "| Cumbia 2024", the "Artist - " prefix when it names the artist or a short form of it, the feat. part) and splits the artist string (`,` `&` `/` `x` `y` feat. ...). "(En Vivo)" stays in a spelled variant, since a live take has its own sheet. **`LyricMatch`** judges a found sheet: it must be synced, the title must agree (accents and case ignored), and the length within `MAX_DURATION_GAP_S` 6 s, or up to `MAX_VIDEO_GAP_S` 25 s when title AND artist agree (a music video carries an intro; `LyricVocals` then finds the offset against the audio or rejects the sheet); with no length, the artist must agree. **`Lrc.parse`** reads LRC (several stamps per line, enhanced word stamps).
+  - **`LrclibClient`** (`:djAndroid` `lyrics/`, plain `HttpURLConnection`): `/api/get` by name and length, then searches by the cleaned title with and without the artist; stops at a match >= 0.9.
+  - **`DjLyricsSource.fetch`** asks SimpMusic, BetterLyrics (cleaned names), LRCLIB and the video's own YouTube caption track (`getYouTubeCaption`, "es"; at least 6 sung lines) AT ONCE, one timeout for all, and takes the first of `PRIORITY` (simpmusic > betterlyrics > lrclib > youtube) with synced lines. Caption markers "[Música]", "[Aplausos]" are breaks (`LyricVocals.isInstrumental`). A "no lyrics" written by an older search (`LyricsFile.searchVersion` < `SEARCH_VERSION` 2) is asked again at once instead of waiting out its week.
+  - Measured against lrclib.net from the build server on 15 YouTube-style titles of Argentine/Latin cumbia (`LyricSearchReport`, `LYRICS_LIVE=1`; lengths unknown there): synced sheets found 4 -> 14. Musixmatch-backed sources (an unofficial token) were deliberately not added. Not run on a device.
 - **The DJ log (2026-09-30)**: `DjLog` is the single sink for every DJ component (ring of 3000 lines, rotating `filesDir/dj/dj-debug.log` 1 MB x 2, Logcat tag `DJ`); Settings -> AI DJ mode -> DJ log (or the chip on Now Playing) shows it live with Copy / Share / Clear, "Run analysis now" and a self-check. Read it before guessing when the DJ "waits for analysis": three bugs that each kept it waiting forever were found by reading the pipeline (an `Error` from a failed ONNX load ended the scheduler loop; `CompositeAnalyzer` without a neural grid kept the DSP analyzer's id, which `AnalysisStore` deletes as stale; store reads queued behind the running decode on the same thread).
 
 ## 🛠️ Key Technologies
@@ -1299,6 +1304,6 @@ After completing any of the following types of changes, the AI agent **MUST** up
 
 *This document helps AI Agents quickly understand the SimpMusic project. Update regularly when there are major changes to architecture or structure.*
 
-**Last updated**: 2026-10-18
+**Last updated**: 2026-11-09
 **Project version**: Check latest release on GitHub
 **Maintained by**: maxrave-dev and contributors
