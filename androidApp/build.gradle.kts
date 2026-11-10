@@ -83,6 +83,28 @@ android {
         }
     }
 
+    // The owner's sideloaded 'profile' build is signed with ONE fixed key, so every new build installs over the last one.
+    // The debug key lived in each build machine's ~/.android and was lost with it, which forced an uninstall (and the
+    // loss of the DJ's marks and ratings). The keystore is committed (signing/bagracho-dev.p12, PKCS12 = encrypted);
+    // its password is NOT: `bagracho.signing.password` in local.properties or BAGRACHO_SIGNING_PASSWORD.
+    val bagrachoKeystore = rootProject.file("signing/bagracho-dev.p12")
+    val bagrachoPassword =
+        System.getenv("BAGRACHO_SIGNING_PASSWORD")?.takeIf { it.isNotBlank() }
+            ?: rootProject.file("local.properties").takeIf { it.exists() }?.let { f ->
+                Properties().apply { f.inputStream().use { load(it) } }.getProperty("bagracho.signing.password")
+            }?.takeIf { it.isNotBlank() }
+    signingConfigs {
+        if (bagrachoKeystore.exists() && bagrachoPassword != null) {
+            create("bagracho") {
+                storeFile = bagrachoKeystore
+                storeType = "pkcs12"
+                storePassword = bagrachoPassword
+                keyAlias = "bagracho"
+                keyPassword = bagrachoPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             buildConfigField("boolean", "SKIP_OFFICIAL_CHECK", "false")
@@ -114,7 +136,10 @@ android {
             initWith(getByName("release"))
             applicationIdSuffix = ".dev"
             versionNameSuffix = "-profile"
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig =
+                signingConfigs.findByName("bagracho") ?: signingConfigs.getByName("debug").also {
+                    logger.warn("profile build: no Bagracho signing password, signing with this machine's debug key (it will NOT install over the owner's app)")
+                }
             matchingFallbacks += listOf("release")
             isDebuggable = false
             // signed with a debug key, so the official-build check (release key from F-Droid metadata) must not run
