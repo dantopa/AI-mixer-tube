@@ -3154,6 +3154,7 @@ fun SettingScreen(
                                     )
                                 },
                                 isError = !verify.first,
+                                maxLines = alertState.textField.maxLines,
                                 label = { Text(text = alertState.textField.label) },
                                 supportingText = {
                                     if (!verify.first) {

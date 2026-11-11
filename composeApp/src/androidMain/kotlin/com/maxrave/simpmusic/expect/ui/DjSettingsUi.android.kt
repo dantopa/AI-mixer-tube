@@ -76,6 +76,13 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_effort
+import simpmusic.composeapp.generated.resources.ai_dj_claude_effort_default
+import simpmusic.composeapp.generated.resources.ai_dj_claude_effort_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_prompt
+import simpmusic.composeapp.generated.resources.ai_dj_claude_prompt_message
+import simpmusic.composeapp.generated.resources.ai_dj_claude_prompt_default
+import simpmusic.composeapp.generated.resources.ai_dj_claude_prompt_edited
 import simpmusic.composeapp.generated.resources.ai_dj_claude_pro
 import simpmusic.composeapp.generated.resources.ai_dj_claude_pro_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_instructions
@@ -402,6 +409,47 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                                             confirm to { state ->
                                                 modelLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.ai.ClaudeSettings.setModel(it) }
                                             },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        // the reasoning effort, the owner's to change without a rebuild ("" = the app's default)
+                        val effortTitle = stringResource(Res.string.ai_dj_claude_effort)
+                        val effortDefault = stringResource(Res.string.ai_dj_claude_effort_default)
+                        val effortLabels = org.simpmusic.dj.android.ai.ClaudeSettings.EFFORTS.map { it to (if (it.isEmpty()) effortDefault else it) }
+                        SettingItem(
+                            title = effortTitle,
+                            subtitle = (effortLabels.firstOrNull { it.first == claude.effort }?.second ?: effortDefault) + " · " + stringResource(Res.string.ai_dj_claude_effort_description),
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = effortTitle,
+                                        selectOne = SettingAlertState.SelectData(listSelect = effortLabels.map { (e, label) -> (e == claude.effort) to label }),
+                                        confirm =
+                                            confirm to { state ->
+                                                effortLabels.firstOrNull { it.second == state.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.ai.ClaudeSettings.setEffort(it) }
+                                            },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        // Claude's main prompt, editable (blank or unchanged = the app's own, which then follows app updates)
+                        val promptTitle = stringResource(Res.string.ai_dj_claude_prompt)
+                        val promptMessage = stringResource(Res.string.ai_dj_claude_prompt_message)
+                        SettingItem(
+                            title = promptTitle,
+                            subtitle = if (claude.prompt.isBlank()) stringResource(Res.string.ai_dj_claude_prompt_default) else stringResource(Res.string.ai_dj_claude_prompt_edited, claude.prompt.length),
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = promptTitle,
+                                        message = promptMessage,
+                                        textField = SettingAlertState.TextFieldData(label = promptTitle, value = claude.prompt.ifBlank { org.simpmusic.dj.ai.MixBrief.SYSTEM }, maxLines = 12),
+                                        confirm = confirm to { state -> org.simpmusic.dj.android.ai.ClaudeSettings.setPrompt(state.textField?.value.orEmpty()) },
                                         dismiss = dismiss,
                                     ),
                                 )

@@ -99,4 +99,20 @@ class MixToolsProTest {
         assertEquals(0xFF0000, img.getRGB(0, 0) and 0xFFFFFF)
         assertEquals(0x808080, img.getRGB(2, 1) and 0xFFFFFF)
     }
+
+    @Test
+    fun theQueueToolsListTheOptionsAndSwapOnlyToAKnownTrack() {
+        val q = MixTools(brief, out, inc, null, null, settings, 30_000L, alternatives = listOf(MixTools.Alternative("alt1", "Otro tema", out)), nextTitle = "A Prueba de Balas")
+        assertTrue(q.canReorder)
+        assertTrue(q.specs.map { it.name }.containsAll(listOf(MixTools.QUEUE, MixTools.SWAP)))
+        assertFalse(MixTools(brief, out, inc, null, null, settings, 30_000L).specs.any { it.name == MixTools.QUEUE })
+        val r = q.call(MixTools.QUEUE, "{}") as MixTools.Outcome.Result
+        println(r.text)
+        assertFalse(r.isError, r.text)
+        assertTrue(r.text.contains("NOW NEXT") && r.text.contains("id alt1"), r.text)
+        assertTrue((q.call(MixTools.SWAP, """{"track_id":"nope","why":"x"}""") as MixTools.Outcome.Result).isError)
+        val sw = q.call(MixTools.SWAP, """{"track_id":"alt1","why":"closer tempo"}""") as MixTools.Outcome.Swap
+        assertEquals("alt1", sw.id)
+        for (s in MixTools.QUEUE_SPECS) assertEquals(false, s.schema["additionalProperties"], s.name)
+    }
 }

@@ -1336,6 +1336,8 @@ class DjEngine(
                             settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliestExitMs, planner,
                             ears = if (pro) earsFor(fromId, toId) else null,
                             pro = pro,
+                            alternatives = if (ahead || aiSwappedFor == fromId) emptyList() else reorderOptions(toId),
+                            nextTitle = titleTo,
                         )
                     } else {
                         null
@@ -1346,6 +1348,10 @@ class DjEngine(
                 say("AI: ${it.message}")
                 return null
             }
+        answer.swapTo?.let { id ->
+            swapNext(fromId, toId, id, say)
+            return null
+        }
         val pts = (answer.committed?.let { Result.success(it) } ?: org.simpmusic.dj.ai.MixBrief.parse(brief, answer.json)).getOrElse {
             DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
             say("AI: unusable answer (${it.message})")
@@ -1356,6 +1362,37 @@ class DjEngine(
         while (answerTimes.size > ANSWER_TIMES) answerTimes.removeFirst()
         DjLog.i(TAG, "ai mix $fromId -> $toId${if (ahead) " (ahead)" else ""}: exit ${pts.exitMs} ms, entry ${pts.entryMs} ms, ${pts.overlapBars} bars, moves ${pts.moves.describe()} (${pts.why}); ${answer.model.id}, ${answer.elapsedMs} ms, ${answer.turns} turns, ${answer.tries} tries, \$${"%.4f".format(java.util.Locale.ROOT, cost)}")
         return pts
+    }
+
+    /** The playing track Claude already reordered the queue for (one swap per track, or it could chase its own tail). */
+    @Volatile private var aiSwappedFor: String? = null
+
+    /**
+     * The upcoming tracks after [toId] that Claude may play next instead (queue tools): only analysed ones, only on a queue
+     * the DJ may reorder (upcomingIds is empty under shuffle or a block), at most [AI_REORDER_OPTIONS].
+     */
+    private suspend fun reorderOptions(toId: String): List<org.simpmusic.dj.ai.MixTools.Alternative> {
+        if (playerPort() == null) return emptyList()
+        val upcoming = runCatching { upcomingIds() }.getOrDefault(emptyList())
+        if (upcoming.firstOrNull() != toId) return emptyList()
+        return upcoming.drop(1).take(AI_REORDER_OPTIONS).mapNotNull { id ->
+            val a = runCatching { scheduler.get(id) }.getOrNull() ?: return@mapNotNull null
+            val title = runCatching { playerPort()?.queuedTitle(id) }.getOrNull() ?: runCatching { titleOf(id) }.getOrNull() ?: id
+            org.simpmusic.dj.ai.MixTools.Alternative(id, title, a)
+        }
+    }
+
+    /** Claude asked to play [id] next instead of [toId]: moved into the next slot, kept there (the look-ahead leaves it). */
+    private suspend fun swapNext(fromId: String, toId: String, id: String, say: (String) -> Unit) {
+        val port = playerPort() ?: return say("AI: the queue cannot be reordered now")
+        val now = port.snapshot()
+        if (now.currentId != fromId || now.queueIds.getOrNull(now.currentIndex + 1) != toId) return say("AI: the queue changed meanwhile, nothing moved")
+        aiSwappedFor = fromId
+        org.simpmusic.dj.android.ai.ClaudeOrder.add(listOf(id))
+        val ok = port.moveToNext(id)
+        val title = runCatching { port.queuedTitle(id) }.getOrNull() ?: id
+        DjLog.i(TAG, "ai reorder: $fromId -> $id next instead of $toId (moved: $ok)")
+        say(if (ok) "AI: \"$title\" mixes better, moved it next" else "AI: could not move \"$title\" next")
     }
 
     /**
@@ -2036,6 +2073,8 @@ private const val AI_ANSWER_BUDGET_MS = 25_000L
 private const val AI_TOOLS_BUDGET_MS = 60_000L
 
 /** Pro mode: up to 20 turns at maximum effort, rendering mixes on the phone; the current pair gets this much room. */
+/** Upcoming tracks offered to Claude's queue tools. */
+private const val AI_REORDER_OPTIONS = 5
 private const val AI_PRO_BUDGET_MS = 180_000L
 
 /** Pro mode: the longest stretch one look / listen decodes. */

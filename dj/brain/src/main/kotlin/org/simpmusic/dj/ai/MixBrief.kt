@@ -113,6 +113,14 @@ object MixBrief {
         first sung line) arrives as the natural continuation of the outgoing. Between two clean options, take the one that
         sounds most like one continuous song.
 
+        IT MUST NOT SOUND LIKE A CROSSFADE (the owner's words). A typical crossfade, one song slowly fading under the other
+        for many seconds with both at half volume, is exactly what to avoid. Keep RHYTHMIC CONTINUITY: the kick, the
+        guira/percussion and the bass pattern carry on without a stumble from one song to the other, on the same beat
+        grid, so a dancer never loses the step. Prefer a clear hand-over on a downbeat (the incoming's groove takes over
+        on a "1", the outgoing steps back) to a long blend: "hold_then_drop" or "early_handover" with a bass swap on a
+        phrase line usually sounds like one song, "smooth" over a long overlap usually sounds like a crossfade. A short,
+        rhythmically locked overlap beats a long, mushy one.
+
         The owner's rules, most important first:
         1. Overlap the outgoing's INSTRUMENTAL with the incoming's INSTRUMENTAL, with the bass present in BOTH (bass >= 4
            on both sides through the overlap). That is where a mix is felt.

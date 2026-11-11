@@ -50,6 +50,8 @@ class ClaudeMixClient {
         /** Prompt-cache tokens: read back (10 % of the input price) and written (125 %); [inputTokens] are the uncached rest. */
         val cacheReadTokens: Long = 0,
         val cacheWriteTokens: Long = 0,
+        /** Tool mode: Claude chose to play this upcoming track next instead ([MixTools.SWAP]). */
+        val swapTo: String? = null,
     )
 
     @Volatile private var client: Pair<String, AnthropicClient>? = null
@@ -91,7 +93,7 @@ class ClaudeMixClient {
         val pro = tools?.pro == true
         val system =
             TextBlockParam.builder()
-                .text((if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system) + (if (pro) MixTools.PRO_RULES else "") + OwnerLessons.block() + ownerInstructions())
+                .text((ClaudeSettings.state.value.prompt.ifBlank { brief.system }).let { if (tools != null) it + MixTools.TOOL_RULES + (if (tools.canReorder) MixTools.REORDER_RULES else "") else it } + (if (pro) MixTools.PRO_RULES else "") + OwnerLessons.block() + ownerInstructions())
                 .cacheControl(ephemeral)
                 .build()
         return try {
@@ -114,10 +116,10 @@ class ClaudeMixClient {
                     tools.specs.forEach { b.addTool(toolOf(it)) }
                     // Pro: Anthropic's own web search (runs on their side, its results come back in the same turn)
                     if (pro) b.addTool(com.anthropic.models.messages.WebSearchTool20260209.builder().maxUses(WEB_SEARCHES).build())
-                    (if (pro) OutputConfig.Effort.MAX else effortOf(model))?.let { b.outputConfig(OutputConfig.builder().effort(it).build()) }
+                    (ownerEffort() ?: if (pro) OutputConfig.Effort.MAX else effortOf(model))?.let { b.outputConfig(OutputConfig.builder().effort(it).build()) }
                 } else {
                     val schema = JsonOutputFormat.Schema.builder().apply { MixBrief.SCHEMA.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
-                    b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).apply { effortOf(model)?.let { effort(it) } }.build())
+                    b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).apply { (ownerEffort() ?: effortOf(model))?.let { effort(it) } }.build())
                 }
                 val m = client.messages().create(b.build())
                 inTok += m.usage().inputTokens()
@@ -162,6 +164,10 @@ class ClaudeMixClient {
                             val json = """{"exit_ms":${p.exitMs},"entry_ms":${p.entryMs},"overlap_bars":${p.overlapBars},"why":${JsonPrimitive(p.why)}}"""
                             DjLog.i(TAG, "commit from ${model.id} after $turn turns and ${tools.tries} tries in ${elapsed()} ms ($inTok in / $outTok out / $cacheRead cache read / $cacheWrite cache write tokens): $input")
                             return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite))
+                        }
+                        is MixTools.Outcome.Swap -> {
+                            DjLog.i(TAG, "swap from ${model.id} after $turn turns in ${elapsed()} ms: play ${o.id} next (${o.why})")
+                            return Result.success(Answer("", inTok, outTok, model, elapsed(), turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite, swapTo = o.id))
                         }
                         is MixTools.Outcome.Result -> {
                             DjLog.i(TAG, "turn $turn: ${u.name()} $input -> ${o.text.lineSequence().firstOrNull()?.take(160)}${o.image?.let { " [+ picture ${it.size} bytes]" } ?: ""}")
@@ -216,7 +222,7 @@ class ClaudeMixClient {
                     .maxTokens(MAX_TOKENS)
                     .systemOfTextBlockParams(listOf(TextBlockParam.builder().text(system + ownerInstructions()).cacheControl(CacheControlEphemeral.builder().build()).build()))
                     .addUserMessage(user)
-                    .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).apply { effortOf(model)?.let { effort(it) } }.build())
+                    .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).apply { (ownerEffort() ?: effortOf(model))?.let { effort(it) } }.build())
             val m = clientFor(apiKey).messages().create(b.build())
             when (m.stopReason().orElse(null)) {
                 StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request${refusalOf(m)}"))
@@ -261,6 +267,17 @@ class ClaudeMixClient {
      * Opus 5.5 matches Opus 5 at high; set it explicitly and lower it before prompting for less thinking). Haiku and Sonnet
      * keep their own defaults (null: the field is not sent).
      */
+    /** The effort the owner chose in Settings (null = the app's default). Sent to any model: one that does not take it answers 400. */
+    private fun ownerEffort(): OutputConfig.Effort? =
+        when (ClaudeSettings.state.value.effort) {
+            "low" -> OutputConfig.Effort.LOW
+            "medium" -> OutputConfig.Effort.MEDIUM
+            "high" -> OutputConfig.Effort.HIGH
+            "xhigh" -> OutputConfig.Effort.XHIGH
+            "max" -> OutputConfig.Effort.MAX
+            else -> null
+        }
+
     private fun effortOf(model: ClaudeModel): OutputConfig.Effort? = if (model == ClaudeModel.OPUS) OutputConfig.Effort.MEDIUM else null
 
     private fun toolOf(spec: MixTools.Spec): Tool {

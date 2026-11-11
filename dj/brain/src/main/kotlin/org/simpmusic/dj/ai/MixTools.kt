@@ -40,7 +40,20 @@ class MixTools(
     private val ears: MixEars? = null,
     /** Pro mode: the extra tools ([LOOK], [LISTEN], [CANDIDATES]) and a longer conversation ([PRO_MAX_TURNS]). */
     val pro: Boolean = false,
+    /**
+     * Other upcoming tracks of the queue (analysed), any of which Claude may play next instead of [to] ([SWAP]); empty =
+     * the queue cannot be reordered now (shuffle, a playlist, a pair solved ahead) and the queue tools are not offered.
+     */
+    private val alternatives: List<Alternative> = emptyList(),
+    /** The title of the queued next ([to]), for [QUEUE]. */
+    private val nextTitle: String = "the queued next",
 ) {
+    /** An upcoming track Claude may move into the next slot. */
+    class Alternative(val id: String, val title: String, val analysis: TrackAnalysis)
+
+    /** True when the queue tools ([QUEUE], [SWAP]) are offered. */
+    val canReorder: Boolean get() = alternatives.isNotEmpty()
+
     /** Decoded audio of a stretch of one of the two tracks (source time), or null when it cannot be had. Blocking. */
     fun interface MixEars {
         fun audio(incoming: Boolean, fromMs: Long, toMs: Long): org.simpmusic.dj.render.StereoPcm?
@@ -48,7 +61,7 @@ class MixTools(
 
     /** The tools offered in this conversation. */
     val specs: List<Spec>
-        get() = if (!pro) SPECS else SPECS + PRO_SPECS.filter { ears != null || it.name == CANDIDATES }
+        get() = (if (!pro) SPECS else SPECS + PRO_SPECS.filter { ears != null || it.name == CANDIDATES }) + (if (canReorder) QUEUE_SPECS else emptyList())
 
     /** Tool turns before the conversation is cut. */
     val maxTurns: Int get() = if (pro) PRO_MAX_TURNS else MAX_TURNS
@@ -59,6 +72,8 @@ class MixTools(
     sealed class Outcome {
         class Result(val text: String, val isError: Boolean = false, val image: ByteArray? = null) : Outcome()
         class Committed(val points: AiMixPoints) : Outcome()
+        /** Claude chose to play the upcoming track [id] next instead (the conversation ends; the new pair is asked again). */
+        class Swap(val id: String, val why: String) : Outcome()
     }
 
     private val outT: TrackTimeline = Timelines.of(from)
@@ -78,6 +93,8 @@ class MixTools(
                 LOOK -> look(o)
                 LISTEN -> listen(o)
                 CANDIDATES -> Outcome.Result(candidates(o))
+                QUEUE -> Outcome.Result(queueOptions())
+                SWAP -> swap(o)
                 else -> Outcome.Result("unknown tool $name", isError = true)
             }
         } catch (e: Exception) {
@@ -401,6 +418,49 @@ class MixTools(
         }
     }
 
+    /** One line: how [from] mixes into [a] with the DJ's own planner (where it would mix, how cleanly). */
+    private fun pairLine(label: String, title: String, a: TrackAnalysis): String {
+        val tFrom = Timelines.of(from).bpm?.value
+        val tTo = Timelines.of(a).bpm?.value
+        val gap = if (tFrom != null && tTo != null) listOf(tTo / tFrom, 2 * tTo / tFrom, tTo / (2 * tFrom)).minOf { abs(it - 1f) } else null
+        val p = runCatching { planner.plan(from, a, settings, PlanConstraints(earliestExitMs = earliestExitMs, preferPerfect = true)) }.getOrNull()
+            ?: return "$label \"$title\": could not be planned"
+        val f = p.meta?.features
+        val h = f?.harmonyExcess
+        val harmony = when { h == null -> "harmony ?"; f.harmonyClash -> "harmony CLASH"; h < 0.025 -> "consonant"; else -> "tense" }
+        val vov = voiceOverVoiceWith(a, p.exitPointMs, p.entryPointMs, p.overlapMs)
+        return "%s \"%s\": %s bpm -> %s bpm (gap %s), %s, quality %s, %.1f s overlap, %s, voice over voice %s".format(
+            java.util.Locale.ROOT, label, title, tFrom?.let { "%.0f".format(java.util.Locale.ROOT, it) } ?: "?", tTo?.let { "%.0f".format(java.util.Locale.ROOT, it) } ?: "?",
+            gap?.let { "%.0f%%".format(java.util.Locale.ROOT, 100 * it) } ?: "?", p.kind, p.meta?.quality ?: "?", p.overlapMs / 1000.0, harmony, vov,
+        )
+    }
+
+    private fun voiceOverVoiceWith(a: TrackAnalysis, exitMs: Long, entryMs: Long, overlapMs: Long): String {
+        val vo = outT.vocals?.value ?: return "unknown"
+        val vi = Timelines.of(a).vocals?.value ?: return "unknown"
+        var both = 0L
+        var t = 0L
+        while (t < overlapMs) {
+            if (vo.any { exitMs + t in it.startMs until it.endMs } && vi.any { entryMs + t in it.startMs until it.endMs }) both += STEP_MS
+            t += STEP_MS
+        }
+        return if (both == 0L) "none" else "%.1f s".format(java.util.Locale.ROOT, both / 1000.0)
+    }
+
+    /** [QUEUE]: the queued next and the other upcoming tracks, each planned from the playing track by the DJ's planner. */
+    private fun queueOptions(): String = buildString {
+        append("How the playing track would mix into each upcoming track (the DJ's own plan, before your choices):\n")
+        append(pairLine("NOW NEXT", nextTitle, to)).append('\n')
+        alternatives.forEach { append(pairLine("id ${it.id}", it.title, it.analysis)).append('\n') }
+        append("swap_next moves one of them into the next slot (the radio's other tracks keep their order); you are then asked again for that pair.")
+    }
+
+    private fun swap(o: JsonObject): Outcome {
+        val id = o["track_id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val alt = alternatives.firstOrNull { it.id == id } ?: return Outcome.Result("unknown track_id \"$id\": use an id from queue_options (${alternatives.joinToString { it.id }})", isError = true)
+        return Outcome.Swap(alt.id, o["why"]?.jsonPrimitive?.contentOrNull.orEmpty().trim().ifEmpty { "no reason given" })
+    }
+
     private fun commit(o: JsonObject): Outcome {
         val why = o["why"]?.jsonPrimitive?.contentOrNull.orEmpty().trim().ifEmpty { "no reason given" }
         return Outcome.Committed(points(o, why))
@@ -413,6 +473,8 @@ class MixTools(
         const val LOOK = "look"
         const val LISTEN = "listen"
         const val CANDIDATES = "candidates"
+        const val QUEUE = "queue_options"
+        const val SWAP = "swap_next"
 
         /** Pro mode: tool turns before the conversation is cut. */
         const val PRO_MAX_TURNS = 20
@@ -504,6 +566,35 @@ class MixTools(
                     obj(POINTS),
                 ),
             )
+
+        /** The queue tools, offered when the queue can be reordered. */
+        val QUEUE_SPECS: List<Spec> =
+            listOf(
+                Spec(
+                    QUEUE,
+                    "See the upcoming tracks of the radio: how the playing track would mix into the queued next and into each " +
+                        "of the next few tracks (tempo gap, the DJ's plan kind and quality, harmony, voice over voice). Use it " +
+                        "when the queued next does not hook well (tempos far apart, a clash, nowhere clean to mix).",
+                    obj(emptyMap()),
+                ),
+                Spec(
+                    SWAP,
+                    "Play another upcoming track next instead of the queued one, because it mixes better from the playing " +
+                        "track. Ends this conversation; you are then asked for the new pair. Use it at most once, only when an " +
+                        "option is clearly better (same style, closer tempo, a clean instrumental hand-over).",
+                    obj(mapOf("track_id" to mapOf("type" to "string", "description" to "An id from queue_options."), "why" to mapOf("type" to "string"))),
+                ),
+            )
+
+        /** Added to the system prompt when the queue tools are offered. */
+        val REORDER_RULES: String =
+            """
+
+            You may also reorder the radio. If the queued next does not hook well from the playing track (tempos too far
+            apart to beat-match, a harmonic clash, no clean instrumental to hand over on), call queue_options and, when
+            another upcoming track clearly mixes better and fits the same style, swap_next to play it next instead. Do not
+            swap for a small gain: the radio's order was chosen for its style. When the queued next is fine, mix it.
+            """.trimIndent()
 
         /** Added to the system prompt in Pro mode, after [TOOL_RULES]. */
         val PRO_RULES: String =

@@ -654,6 +654,13 @@
     <string name="ai_dj_claude_instructions_message">Added to Claude's rules on every mix question, in any language. Empty = none.</string>
     <string name="ai_dj_claude_instructions_label">Instructions</string>
     <string name="ai_dj_claude_instructions_none">None. Tap to write your own rules</string>
+    <string name="ai_dj_claude_effort">Claude's effort</string>
+    <string name="ai_dj_claude_effort_default">App default</string>
+    <string name="ai_dj_claude_effort_description">how hard Claude thinks before answering. More = slower and more tokens. Default: medium on Opus, max in Pro mode, the model's own on Haiku and Sonnet. A model that does not take a level answers an error in the chip.</string>
+    <string name="ai_dj_claude_prompt">Claude's main prompt</string>
+    <string name="ai_dj_claude_prompt_message">The rules Claude reads before every mix question. Edit them freely; clear the field (or leave it unchanged) to go back to the app's own, which then follows the app's updates. Your instructions and lessons are still added after it.</string>
+    <string name="ai_dj_claude_prompt_default">The app's own</string>
+    <string name="ai_dj_claude_prompt_edited">Edited by you (%1$d characters)</string>
     <string name="ai_dj_claude_auto">Claude chooses every mix</string>
     <string name="ai_dj_claude_auto_description">Asks Claude once per transition, as soon as both tracks are analysed (also from Now Playing: Auto). The DJ's own mix stays ready if Claude fails or is late. Each answer costs tokens: under a cent per hour with Haiku, about a dollar per hour with Opus (estimate).</string>
     <string name="dj_ai_no_key">AI Mix needs a Claude API key: Settings → AI DJ → Claude</string>

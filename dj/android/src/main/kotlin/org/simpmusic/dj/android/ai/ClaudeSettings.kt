@@ -40,6 +40,10 @@ object ClaudeSettings {
         val pro: Boolean = false,
         /** The owner's own instructions, appended to Claude's system prompt (blank = none). */
         val instructions: String = "",
+        /** Reasoning effort chosen by the owner: "" = the app's default (medium on Opus, max in Pro), else low..max. */
+        val effort: String = "",
+        /** The owner's own version of Claude's main prompt ("" = the app's [org.simpmusic.dj.ai.MixBrief.SYSTEM]). */
+        val prompt: String = "",
     )
 
     private const val PREFS = "dj_claude"
@@ -49,6 +53,10 @@ object ClaudeSettings {
     private const val PREF_AUTO_ORDER = "auto_order"
     private const val PREF_PRO = "pro"
     private const val PREF_INSTRUCTIONS = "instructions"
+    private const val PREF_EFFORT = "effort"
+    private const val PREF_PROMPT = "prompt"
+    val EFFORTS = listOf("", "low", "medium", "high", "xhigh", "max")
+    private const val MAX_PROMPT = 30_000
 
     /** Longest owner instruction text kept (it rides in every question). */
     const val MAX_INSTRUCTIONS = 4_000
@@ -128,12 +136,27 @@ object ClaudeSettings {
         DjLog.i(TAG, "claude: owner instructions ${if (t.isEmpty()) "cleared" else "set (${t.length} chars)"}")
     }
 
+    fun setEffort(e: String) {
+        val v = e.takeIf { it in EFFORTS } ?: ""
+        prefs?.edit()?.putString(PREF_EFFORT, v)?.apply()
+        publish()
+        DjLog.i(TAG, "claude: effort ${v.ifEmpty { "default" }}")
+    }
+
+    /** [text] equal to the app's prompt (or blank) is stored as "" so later app updates of the prompt still reach it. */
+    fun setPrompt(text: String) {
+        val t = text.trim().take(MAX_PROMPT).takeUnless { it.isEmpty() || it == org.simpmusic.dj.ai.MixBrief.SYSTEM.trim() } ?: ""
+        prefs?.edit()?.putString(PREF_PROMPT, t)?.apply()
+        publish()
+        DjLog.i(TAG, "claude: main prompt ${if (t.isEmpty()) "back to the app's" else "edited (${t.length} chars)"}")
+    }
+
     internal fun apiKey(): String? = key
 
     private fun publish() {
         val model = prefs?.getString(PREF_MODEL, null)?.let { n -> ClaudeModel.entries.firstOrNull { it.name == n } } ?: ClaudeModel.HAIKU
         // only the last four characters ever reach the UI
-        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model, auto = prefs?.getBoolean(PREF_AUTO, false) ?: false, tools = prefs?.getBoolean(PREF_TOOLS, true) ?: true, autoOrder = prefs?.getBoolean(PREF_AUTO_ORDER, true) ?: true, pro = prefs?.getBoolean(PREF_PRO, false) ?: false, instructions = prefs?.getString(PREF_INSTRUCTIONS, "").orEmpty())
+        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model, auto = prefs?.getBoolean(PREF_AUTO, false) ?: false, tools = prefs?.getBoolean(PREF_TOOLS, true) ?: true, autoOrder = prefs?.getBoolean(PREF_AUTO_ORDER, true) ?: true, pro = prefs?.getBoolean(PREF_PRO, false) ?: false, instructions = prefs?.getString(PREF_INSTRUCTIONS, "").orEmpty(), effort = prefs?.getString(PREF_EFFORT, "").orEmpty().takeIf { it in EFFORTS } ?: "", prompt = prefs?.getString(PREF_PROMPT, "").orEmpty())
     }
 
     private const val TAG = "ai"

@@ -2085,6 +2085,8 @@ data class SettingAlertState(
         val value: String = "",
         // User typing string -> (true or false, If false, show error message)
         val verifyCodeBlock: ((String) -> Pair<Boolean, String?>)? = null,
+        // a long text (a prompt) scrolls inside the field instead of growing past the dialog
+        val maxLines: Int = Int.MAX_VALUE,
     )
 
     data class SelectData(
