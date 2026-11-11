@@ -56,6 +56,20 @@ internal class ReplicateStems(private val token: String, private val cacheDir: F
         return StemProfile(HOP_MS, stems["vocals"]!!, stems["bass"]!!, stems["drums"]!!, stems["other"]!!, model = "htdemucs@replicate")
     }
 
+    /** GET /v1/account: a cheap way to know the token works before uploading megabytes. null = OK, else why not. */
+    fun check(): String? {
+        val c = open("$API/account", "GET")
+        return try {
+            when (val code = c.responseCode) {
+                in 200..299 -> null
+                401 -> "Replicate refused the token (401)"
+                else -> "Replicate account check answered $code"
+            }
+        } finally {
+            c.disconnect()
+        }
+    }
+
     private fun JsonObject.status(): String = this["status"]?.jsonPrimitive?.contentOrNull.orEmpty()
 
     private fun upload(wav: ByteArray, id: String): String {

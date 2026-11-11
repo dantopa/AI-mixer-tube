@@ -93,8 +93,20 @@ class DjStemsSource(
         val t0 = System.nanoTime()
         if (s.backend == StemsSettings.Backend.REPLICATE) {
             val tok = StemsSettings.replicateToken() ?: return
+            if (StemsSettings.replicateRejected) {
+                asked.remove(id)
+                DjLog.i(TAG, "stems of $id: skipped, Replicate refused the token (paste a new one in Settings -> AI DJ -> Stems)")
+                return
+            }
+            val rep = ReplicateStems(tok, context.cacheDir)
+            rep.check()?.let { why ->
+                asked.remove(id)
+                if (why.contains("401")) StemsSettings.replicateRejected = true
+                DjLog.w(TAG, "stems of $id: $why; token ${StemsSettings.shape(tok)}. Nothing was uploaded.")
+                return
+            }
             DjLog.i(TAG, "stems of $id: sending ${wav.size / 1024} kB to Replicate (Demucs)")
-            val p = ReplicateStems(tok, context.cacheDir).separate(wav, id)
+            val p = rep.separate(wav, id)
             StemsCache.put(id, p)
             DjLog.i(TAG, "stems of $id: ${p.frames} frames (${p.model}) in ${(System.nanoTime() - t0) / 1_000_000} ms, ${p.vocalRanges().size} sung ranges")
             onChanged?.invoke(id)

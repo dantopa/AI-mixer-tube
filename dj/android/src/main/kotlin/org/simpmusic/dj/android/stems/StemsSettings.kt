@@ -55,7 +55,7 @@ object StemsSettings {
         tokenFile = File(context.noBackupFilesDir, TOKEN_FILE)
         token = runCatching { tokenFile?.takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() } }.getOrNull()
         replicateFile = File(context.noBackupFilesDir, REPLICATE_FILE)
-        replicate = runCatching { replicateFile?.takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() } }.getOrNull()
+        replicate = runCatching { cleanToken(replicateFile?.takeIf { it.isFile }?.readText()) }.getOrNull()
         publish()
     }
 
@@ -97,13 +97,26 @@ object StemsSettings {
 
     /** Stores the Replicate API token (blank = forget it). A file under noBackupFilesDir, never logged or exported. */
     fun setReplicateToken(t: String?) {
-        val v = t?.trim()?.takeIf { it.isNotEmpty() }
+        val v = cleanToken(t)
         val f = replicateFile ?: return
         runCatching { if (v == null) f.delete() else f.writeText(v) }
         replicate = v
         publish()
-        DjLog.i(TAG, "replicate token ${if (v != null) "stored" else "forgotten"}")
+        replicateRejected = false
+        DjLog.i(TAG, "replicate token ${if (v != null) "stored (${shape(v)})" else "forgotten"}")
     }
+
+    /** Set after Replicate answered 401: nothing more is uploaded until the token changes. */
+    @Volatile
+    var replicateRejected = false
+
+    /** What a pasted token usually carries by mistake: spaces, line breaks, quotes, a "Bearer " prefix. */
+    internal fun cleanToken(t: String?): String? =
+        t?.replace(Regex("\\s+"), "")?.trim('"', '\'', '`')?.removePrefix("Bearer")?.removePrefix("bearer")
+            ?.filter { it.code in 33..126 }?.takeIf { it.isNotEmpty() }
+
+    /** The token's shape for the log, never its value: prefix kind and length. */
+    internal fun shape(t: String): String = "${if (t.startsWith("r8_")) "starts with r8_" else "does NOT start with r8_"}, ${t.length} chars"
 
     internal fun replicateToken(): String? = replicate
 
