@@ -648,6 +648,12 @@
     <string name="dj_ai_order_description">Claude puts the next tracks of the radio in the order where every song continues naturally into the next</string>
     <string name="ai_dj_claude_tools">Claude works like a DJ (experiment)</string>
     <string name="ai_dj_claude_tools_description">Besides the tables, Claude gets a picture of both tracks (the fingerprint) and tools: it zooms in, tries mixes on the engine that will play them (tempo, harmony, voice over voice, bass) and keeps the best. Slower (several turns) and a few cents more per mix. Off = one answer from the tables.</string>
+    <string name="ai_dj_claude_pro">Pro mode (expensive)</string>
+    <string name="ai_dj_claude_pro_description">Claude thinks at maximum effort, looks at spectrograms of the real audio, renders candidate mixes and measures them, can search the web (keys, structure) and gets up to 20 turns. Roughly 10x the cost per mix and up to 3 minutes per answer. Off = the normal DJ mode.</string>
+    <string name="ai_dj_claude_instructions">Your instructions for Claude</string>
+    <string name="ai_dj_claude_instructions_message">Added to Claude's rules on every mix question, in any language. Empty = none.</string>
+    <string name="ai_dj_claude_instructions_label">Instructions</string>
+    <string name="ai_dj_claude_instructions_none">None. Tap to write your own rules</string>
     <string name="ai_dj_claude_auto">Claude chooses every mix</string>
     <string name="ai_dj_claude_auto_description">Asks Claude once per transition, as soon as both tracks are analysed (also from Now Playing: Auto). The DJ's own mix stays ready if Claude fails or is late. Each answer costs tokens: under a cent per hour with Haiku, about a dollar per hour with Opus (estimate).</string>
     <string name="dj_ai_no_key">AI Mix needs a Claude API key: Settings → AI DJ → Claude</string>

@@ -12,6 +12,7 @@ import org.simpmusic.dj.model.PlanConstraints
 import org.simpmusic.dj.model.PlanKind
 import org.simpmusic.dj.model.PlanSource
 import org.simpmusic.dj.model.TrackAnalysis
+import org.simpmusic.dj.model.settleMs
 import org.simpmusic.dj.planner.DjTransitionPlanner
 import org.simpmusic.dj.model.TransitionPlanner
 import org.simpmusic.dj.timeline.LyricLine
@@ -35,13 +36,28 @@ class MixTools(
     private val settings: DjSettings,
     private val earliestExitMs: Long,
     private val planner: TransitionPlanner = DjTransitionPlanner(),
+    /** The tracks' audio, for [LOOK] and [LISTEN] (Pro mode); null = those tools are not offered. */
+    private val ears: MixEars? = null,
+    /** Pro mode: the extra tools ([LOOK], [LISTEN], [CANDIDATES]) and a longer conversation ([PRO_MAX_TURNS]). */
+    val pro: Boolean = false,
 ) {
+    /** Decoded audio of a stretch of one of the two tracks (source time), or null when it cannot be had. Blocking. */
+    fun interface MixEars {
+        fun audio(incoming: Boolean, fromMs: Long, toMs: Long): org.simpmusic.dj.render.StereoPcm?
+    }
+
+    /** The tools offered in this conversation. */
+    val specs: List<Spec>
+        get() = if (!pro) SPECS else SPECS + PRO_SPECS.filter { ears != null || it.name == CANDIDATES }
+
+    /** Tool turns before the conversation is cut. */
+    val maxTurns: Int get() = if (pro) PRO_MAX_TURNS else MAX_TURNS
     /** One tool as the API declares it: a name, what it does, and a strict JSON schema of its input. */
     class Spec(val name: String, val description: String, val schema: Map<String, Any>)
 
     /** What a call gave: text for Claude, or the committed points (the end of the conversation). */
     sealed class Outcome {
-        class Result(val text: String, val isError: Boolean = false) : Outcome()
+        class Result(val text: String, val isError: Boolean = false, val image: ByteArray? = null) : Outcome()
         class Committed(val points: AiMixPoints) : Outcome()
     }
 
@@ -59,6 +75,9 @@ class MixTools(
                 ZOOM -> Outcome.Result(zoom(o))
                 TRY -> Outcome.Result(tryMix(o))
                 COMMIT -> commit(o)
+                LOOK -> look(o)
+                LISTEN -> listen(o)
+                CANDIDATES -> Outcome.Result(candidates(o))
                 else -> Outcome.Result("unknown tool $name", isError = true)
             }
         } catch (e: Exception) {
@@ -238,6 +257,150 @@ class MixTools(
         )
     }
 
+    // ---------------------------------------------------------------- Pro mode
+
+    /** [LOOK]: a spectrogram of up to [MAX_LOOK_BARS] bars of one track, with its bar lines and where it sings. */
+    private fun look(o: JsonObject): Outcome {
+        val e = ears ?: return Outcome.Result("look is not available in this conversation", isError = true)
+        val incoming = o["track"]?.jsonPrimitive?.contentOrNull == "incoming"
+        val t = if (incoming) inT else outT
+        val bars = if (incoming) brief.inBarsMs else brief.outBarsMs
+        val a = o.int("from_bar").coerceIn(0, bars.size - 1)
+        val b = o.int("to_bar").coerceIn(a, (a + MAX_LOOK_BARS - 1).coerceAtMost(bars.size - 1))
+        val fromMs = bars[a]
+        val toMs = bars.getOrNull(b + 1) ?: t.refined.durationMs
+        val pcm = e.audio(incoming, fromMs, toMs) ?: return Outcome.Result("the audio of the ${if (incoming) "incoming" else "outgoing"} track could not be decoded here", isError = true)
+        val marks = (a..b).map { bar -> Spectrogram.Mark(bars[bar].toDouble(), if (bar % 8 == 0) Spectrogram.Kind.PHRASE else if (bar % 4 == 0) Spectrogram.Kind.BAR4 else Spectrogram.Kind.BAR) }
+        val vocals = t.vocals?.value
+        val strips = listOfNotNull(vocals?.let { v -> Spectrogram.Strip(0xFF4040) { ms -> if (v.any { ms.toLong() in it.startMs until it.endMs }) 1f else 0f } })
+        val png = Spectrogram.png(pcm.left, pcm.right, pcm.sampleRate, fromMs.toDouble(), marks, strips)
+        val text =
+            "${if (incoming) "INCOMING" else "OUTGOING"} bars $a-$b (${clock(fromMs)}-${clock(toMs)}), spectrogram: time left to right, " +
+                "40 Hz at the bottom to 12 kHz at the top (log), brightness = loudness. A thin vertical line on every bar line, " +
+                "brighter on bars divisible by 4, white on bars divisible by 8; the first line is bar $a. Dashed lines at 250 Hz " +
+                "(the bass and kick live below) and 2 kHz (voice, accordion, keys and guitars between; cymbals and güiro above). " +
+                (if (vocals != null) "The red strip on top is where someone sings (synced lyrics, else a trusted detection). " else "Where it sings is not known for this track. ") +
+                "A sung line shows as bright, wavy horizontal harmonics between the dashed lines; a drum-only stretch is vertical streaks."
+        return Outcome.Result(text, image = png)
+    }
+
+    /**
+     * [LISTEN]: the mix at these points rendered by the same renderer the preview uses, as a spectrogram with the faders on
+     * top, plus what try_mix measures and the mix's level bar by bar (a dip or a jump in level is what an ear notices first).
+     */
+    private fun listen(o: JsonObject): Outcome {
+        val e = ears ?: return Outcome.Result("listen is not available in this conversation", isError = true)
+        val measured = tryMix(o)
+        val pts = points(o, "listen")
+        val p = planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliestExitMs, aiPoints = pts))
+        if (p.meta?.source != PlanSource.AI_MIX || p.kind != PlanKind.BEAT_MATCHED) return Outcome.Result(measured)
+        val lead = LISTEN_LEAD_MS
+        val tail = LISTEN_TAIL_MS
+        val settle = p.settleMs
+        val outFrom = (p.exitPointMs - (lead * 1.15).toLong() - 1_500).coerceAtLeast(0)
+        val outTo = (p.outLoop?.let { it.endMs + 1_000 } ?: (p.exitPointMs + (p.overlapMs * 1.15).toLong())) + 1_500
+        val inFrom = (p.entryPointMs - 1_500).coerceAtLeast(0)
+        val inTo = p.entryPointMs + ((settle + tail) * 1.15).toLong() + 1_500
+        val outPcm = e.audio(false, outFrom, outTo) ?: return Outcome.Result("$measured\n(the outgoing's audio could not be decoded, so the mix was not rendered)")
+        val inPcm = e.audio(true, inFrom, inTo) ?: return Outcome.Result("$measured\n(the incoming's audio could not be decoded, so the mix was not rendered)")
+        if (outPcm.sampleRate != inPcm.sampleRate) return Outcome.Result("$measured\n(the two tracks decode at different rates, so the mix was not rendered)")
+        val w =
+            org.simpmusic.dj.render.OfflineMixRenderer.render(
+                p,
+                org.simpmusic.dj.render.AudioSegment(outPcm, outFrom),
+                org.simpmusic.dj.render.AudioSegment(inPcm, inFrom),
+                org.simpmusic.dj.render.OfflineMixRenderer.Options(leadMs = lead, tailMs = tail),
+            )
+        val mix = w.audio
+        val sr = mix.sampleRate
+        val beatMs = 60_000.0 / (p.mixBpm ?: 120f)
+        val barMs = beatMs * (from.beatsPerBar ?: 4).coerceAtLeast(1)
+        val endMs = w.startMs + mix.frames * 1000.0 / sr
+        val marks = ArrayList<Spectrogram.Mark>()
+        var k = kotlin.math.floor(w.startMs / barMs).toInt()
+        while (k * barMs < endMs) {
+            if (k * barMs >= w.startMs) marks += Spectrogram.Mark(k * barMs, if (k % 4 == 0) Spectrogram.Kind.BAR4 else Spectrogram.Kind.BAR)
+            k++
+        }
+        marks += Spectrogram.Mark(0.0, Spectrogram.Kind.MIX_START)
+        marks += Spectrogram.Mark(p.overlapMs.toDouble(), Spectrogram.Kind.MIX_END)
+        val strips =
+            listOf(
+                Spectrogram.Strip(0xFF9930) { t -> p.outgoing.volume.valueAt(t) },
+                Spectrogram.Strip(0x30C0FF) { t -> p.incoming.volume.valueAt(t) },
+            )
+        val png = Spectrogram.png(mix.left, mix.right, sr, w.startMs, marks, strips)
+        val levels =
+            buildString {
+                var bar = kotlin.math.floor(w.startMs / barMs).toInt()
+                while (bar * barMs < endMs) {
+                    val f0 = ((bar * barMs - w.startMs) * sr / 1000).toInt()
+                    val f1 = (((bar + 1) * barMs - w.startMs) * sr / 1000).toInt()
+                    if (f1 > 0) append(if (bar < 0) "$bar" else "+$bar").append(':').append("%.0f".format(java.util.Locale.ROOT, Spectrogram.rmsDb(mix.left, mix.right, f0, f1))).append(' ')
+                    bar++
+                }
+            }.trim()
+        var peak = 0f
+        for (i in 0 until mix.frames) peak = maxOf(peak, abs(mix.left[i]), abs(mix.right[i]))
+        val text =
+            measured.trimEnd() + "\n" +
+                "LISTENED: the mix rendered from %.1f s before T0 to %.1f s after it (the same renderer and lanes the engine plays). ".format(java.util.Locale.ROOT, -w.startMs / 1000.0, endMs / 1000.0) +
+                "Picture: green line = T0 (the incoming starts), red line = the outgoing is silent; thin lines on the mix's bars " +
+                "(brighter every 4 from T0); top strips = the outgoing's fader (orange) and the incoming's (blue). Dashed lines at 250 Hz and 2 kHz.\n" +
+                "mix level per bar from T0 (dBFS RMS; a drop of 3+ dB is a hole the ear hears, a rise of 3+ dB is a bump): $levels\n" +
+                "peak %.1f dBFS".format(java.util.Locale.ROOT, 20 * kotlin.math.log10(peak.coerceAtLeast(1e-6f).toDouble()))
+        return Outcome.Result(text, image = png)
+    }
+
+    /**
+     * [CANDIDATES]: exits and entries spread over the allowed ranges (every 4 bars, plus the incoming's bar 0), each planned
+     * and measured by the engine, the cleanest first. A map to start from, not a decision.
+     */
+    private fun candidates(o: JsonObject): String {
+        val bars = o["overlap_bars"]?.jsonPrimitive?.intOrNull?.coerceIn(MixBrief.MIN_OVERLAP_BARS, 32) ?: 8
+        val exits = (brief.exitFrom..brief.exitTo).filter { (it - brief.exitFrom) % 4 == 0 }.let { if (it.size > 8) it.filterIndexed { i, _ -> i % ((it.size + 7) / 8) == 0 } else it }
+        val entries = (listOf(0) + (4..brief.entryTo step 4)).distinct().let { if (it.size > 6) it.filterIndexed { i, _ -> i % ((it.size + 5) / 6) == 0 } else it }
+        class C(val exit: Int, val entry: Int, val score: Double, val line: String)
+        val found = ArrayList<C>()
+        for (x in exits) for (n in entries) {
+            val pts = AiMixPoints(brief.outBarsMs[x], brief.inBarsMs[n], bars.coerceAtMost((brief.outBarsMs.size - 1 - x).coerceAtLeast(1)), "candidate", org.simpmusic.dj.model.MixMoves())
+            val p = runCatching { planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliestExitMs, aiPoints = pts)) }.getOrNull() ?: continue
+            if (p.meta?.source != PlanSource.AI_MIX || p.kind != PlanKind.BEAT_MATCHED) continue
+            val f = p.meta?.features
+            val vov = voiceOverVoice(p.exitPointMs, p.entryPointMs, p.overlapMs, p.outLoop)
+            val cont = voiceContinuity(p.exitPointMs, p.entryPointMs, f?.rateOut ?: 1f, f?.rateIn ?: 1f, p.mixBpm, p.outLoop)
+            val h = f?.harmonyExcess
+            val harmony = when {
+                h == null -> "harmony ?"
+                f.harmonyClash -> "CLASH"
+                h < 0.025 -> "consonant"
+                else -> "tense"
+            }
+            val gotBars = f?.let { if (it.unitIsBar) it.overlapUnits else (it.overlapUnits + 2) / 4 } ?: bars
+            var score = 0.0
+            score += when (vov) { "none" -> 3.0; else -> if (vov.startsWith("unknown")) 1.0 else -2.0 }
+            score += when (harmony) { "consonant" -> 2.0; "tense" -> 0.5; "CLASH" -> -2.0; else -> 0.0 }
+            if (f?.phraseOnPhrase == true) score += 1.0
+            if (cont?.contains("SEAMLESS") == true) score += 2.0
+            score += 1.5 * (gotBars.toDouble() / bars).coerceAtMost(1.0)
+            score -= 5 * maxOf(abs((f?.rateOut ?: 1f) - 1f), abs((f?.rateIn ?: 1f) - 1f))
+            found += C(
+                x, n, score,
+                "exit_bar $x entry_bar $n: %d bars (%.1f s), %s, voice over voice %s, phrase on phrase %s, bend %.1f%%%s".format(
+                    java.util.Locale.ROOT, gotBars, p.overlapMs / 1000.0, harmony, vov, if (f?.phraseOnPhrase == true) "yes" else "no",
+                    100 * maxOf(abs((f?.rateOut ?: 1f) - 1f), abs((f?.rateIn ?: 1f) - 1f)),
+                    cont?.let { c -> if ("SEAMLESS" in c) ", SEAMLESS" else if ("EARLIER" in c) ", incoming sings early" else if ("LATER" in c) ", incoming sings late" else "" } ?: "",
+                ),
+            )
+        }
+        if (found.isEmpty()) return "no candidate could be beat-matched in the allowed ranges (exits ${brief.exitFrom}-${brief.exitTo}, entries 0-${brief.entryTo}) at $bars bars"
+        return buildString {
+            append("${found.size} candidates planned at $bars bars (exits every 4 bars from ${brief.exitFrom}, entries at 0 and every 4 bars), the cleanest first. ")
+            append("Plain mixes, no moves; only the engine's measurements, not a decision:\n")
+            found.sortedByDescending { it.score }.take(MAX_CANDIDATES).forEach { append(it.line).append('\n') }
+        }
+    }
+
     private fun commit(o: JsonObject): Outcome {
         val why = o["why"]?.jsonPrimitive?.contentOrNull.orEmpty().trim().ifEmpty { "no reason given" }
         return Outcome.Committed(points(o, why))
@@ -247,6 +410,22 @@ class MixTools(
         const val ZOOM = "zoom"
         const val TRY = "try_mix"
         const val COMMIT = "commit_mix"
+        const val LOOK = "look"
+        const val LISTEN = "listen"
+        const val CANDIDATES = "candidates"
+
+        /** Pro mode: tool turns before the conversation is cut. */
+        const val PRO_MAX_TURNS = 20
+
+        /** At most this many bars per look (a spectrogram over more gets too coarse to read a beat). */
+        const val MAX_LOOK_BARS = 16
+
+        /** How much of the mix [LISTEN] renders before T0 and after the outgoing is silent. */
+        const val LISTEN_LEAD_MS = 4_000L
+        const val LISTEN_TAIL_MS = 3_000L
+
+        /** Candidates listed by [CANDIDATES]. */
+        const val MAX_CANDIDATES = 10
 
         /** At most this many bars per zoom (a beat per row). */
         const val MAX_ZOOM_BARS = 16
@@ -293,6 +472,53 @@ class MixTools(
                     obj(POINTS + ("why" to mapOf("type" to "string"))),
                 ),
             )
+
+        /** The extra tools of Pro mode. */
+        val PRO_SPECS: List<Spec> =
+            listOf(
+                Spec(
+                    CANDIDATES,
+                    "Ask the engine for a map first: it plans exits every 4 bars across the allowed range against entries at bar 0 " +
+                        "and every 4 bars of the incoming, measures each (harmony, voice over voice, phrase on phrase, voice " +
+                        "continuity, tempo bend) and lists the cleanest $MAX_CANDIDATES. Plain mixes, no moves.",
+                    obj(mapOf("overlap_bars" to mapOf("type" to "integer", "description" to "Overlap to plan each candidate with."))),
+                ),
+                Spec(
+                    LOOK,
+                    "See up to $MAX_LOOK_BARS bars of one track as a spectrogram image (the audio itself, not the detector's numbers): " +
+                        "where the voice really is, where the bass and the kick drop out or come back, a fill, a break, a coro. " +
+                        "Use it where the tables or the lyrics leave you unsure.",
+                    obj(
+                        mapOf(
+                            "track" to mapOf("type" to "string", "enum" to listOf("outgoing", "incoming")),
+                            "from_bar" to mapOf("type" to "integer"),
+                            "to_bar" to mapOf("type" to "integer"),
+                        ),
+                    ),
+                ),
+                Spec(
+                    LISTEN,
+                    "Render this mix exactly as the engine would play it and see the result: what try_mix measures, the mix as a " +
+                        "spectrogram with both faders on top, and the level of the mix bar by bar (holes and bumps). Listen to your " +
+                        "best one or two candidates before committing; if the result shows two voices, a hole or a bump, fix it.",
+                    obj(POINTS),
+                ),
+            )
+
+        /** Added to the system prompt in Pro mode, after [TOOL_RULES]. */
+        val PRO_RULES: String =
+            """
+
+            PRO MODE. Take your time: up to $PRO_MAX_TURNS turns, and cost is not a concern. You also have candidates (a
+            measured map of the whole allowed range), look (a spectrogram of the real audio of any stretch: the closest you
+            can get to hearing it) and listen (the mix rendered by the engine, as a picture with the faders, plus its level
+            bar by bar). A good order: candidates; look at the outgoing's exit zone and the incoming's landing zone of the
+            two or three best (the detector's voice column is unreliable on cumbia, the picture is the audio); try_mix with
+            the moves you think fit; listen to the best one or two and fix what the picture shows (two voices at once, a
+            hole or a bump in level, the incoming's bass arriving before the outgoing's leaves); then commit. When a song's
+            structure is unclear and you can search the web, its lyrics with section labels ([Coro], [Verso]) or its real
+            tempo and key may settle it.
+            """.trimIndent()
 
         /** Added to the system prompt in tool mode. */
         val TOOL_RULES: String =

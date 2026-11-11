@@ -54,12 +54,20 @@ class ClaudeMixClient {
 
     @Volatile private var client: Pair<String, AnthropicClient>? = null
 
-    private fun clientFor(apiKey: String): AnthropicClient {
-        client?.takeIf { it.first == apiKey }?.let { return it.second }
-        val c = AnthropicOkHttpClient.builder().apiKey(apiKey).timeout(Duration.ofSeconds(TIMEOUT_S)).maxRetries(1).build()
-        client = apiKey to c
+    /** One client per key and timeout (Pro turns at maximum effort can think for minutes). */
+    private fun clientFor(apiKey: String, timeoutS: Long = TIMEOUT_S): AnthropicClient {
+        val id = "$timeoutS:$apiKey"
+        client?.takeIf { it.first == id }?.let { return it.second }
+        val c = AnthropicOkHttpClient.builder().apiKey(apiKey).timeout(Duration.ofSeconds(timeoutS)).maxRetries(1).build()
+        client = id to c
         return c
     }
+
+    /** The owner's own instructions as a system prompt block ("" when none). */
+    private fun ownerInstructions(): String =
+        ClaudeSettings.state.value.instructions.trim().takeIf { it.isNotEmpty() }?.let {
+            "\n\nTHE OWNER'S OWN INSTRUCTIONS (written in the app; they come after the rules above and win when they conflict):\n$it"
+        } ?: ""
 
     /**
      * One mix decision. With [tools] Claude may zoom, try mixes on the planner and must commit (the tool loop below);
@@ -80,12 +88,17 @@ class ClaudeMixClient {
         var cacheWrite = 0L
         val ephemeral = CacheControlEphemeral.builder().build()
         // the system prompt is the same for every pair: cached on its own, it is read back by the next pair's question
-        val system = TextBlockParam.builder().text((if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system) + OwnerLessons.block()).cacheControl(ephemeral).build()
+        val pro = tools?.pro == true
+        val system =
+            TextBlockParam.builder()
+                .text((if (tools != null) brief.system + MixTools.TOOL_RULES else brief.system) + (if (pro) MixTools.PRO_RULES else "") + OwnerLessons.block() + ownerInstructions())
+                .cacheControl(ephemeral)
+                .build()
         return try {
-            val client = clientFor(apiKey)
+            val client = clientFor(apiKey, if (pro) PRO_TIMEOUT_S else TIMEOUT_S)
             // a turn that ends on text with no tool call (a progress note, a plan announced but not taken) is nudged on, at
             // most CONTINUATIONS times, instead of failing the question: those turns count on top of MAX_TURNS
-            val turns = if (tools != null) MixTools.MAX_TURNS + CONTINUATIONS else 1
+            val turns = if (tools != null) tools.maxTurns + CONTINUATIONS + (if (pro) PAUSES else 0) else 1
             var nudges = 0
             for (turn in 1..turns) {
                 val b =
@@ -98,8 +111,10 @@ class ClaudeMixClient {
                 // breakpoint on the last block, so each turn reads all of that back from the cache
                 if (tools != null) b.cacheControl(ephemeral)
                 if (tools != null) {
-                    MixTools.SPECS.forEach { b.addTool(toolOf(it)) }
-                    effortOf(model)?.let { b.outputConfig(OutputConfig.builder().effort(it).build()) }
+                    tools.specs.forEach { b.addTool(toolOf(it)) }
+                    // Pro: Anthropic's own web search (runs on their side, its results come back in the same turn)
+                    if (pro) b.addTool(com.anthropic.models.messages.WebSearchTool20260209.builder().maxUses(WEB_SEARCHES).build())
+                    (if (pro) OutputConfig.Effort.MAX else effortOf(model))?.let { b.outputConfig(OutputConfig.builder().effort(it).build()) }
                 } else {
                     val schema = JsonOutputFormat.Schema.builder().apply { MixBrief.SCHEMA.forEach { (k, v) -> putAdditionalProperty(k, JsonValue.from(v)) } }.build()
                     b.outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(schema).build()).apply { effortOf(model)?.let { effort(it) } }.build())
@@ -112,6 +127,12 @@ class ClaudeMixClient {
                 when (m.stopReason().orElse(null)) {
                     StopReason.REFUSAL -> return Result.failure(IllegalStateException("Claude declined the request${refusalOf(m)}"))
                     StopReason.MAX_TOKENS -> return Result.failure(IllegalStateException("Claude's answer was cut off"))
+                    // a long server-side web search paused the turn: send the conversation back as it is and it resumes
+                    StopReason.PAUSE_TURN -> {
+                        DjLog.i(TAG, "turn $turn: paused by a server tool, resuming")
+                        messages += m.toParam()
+                        continue
+                    }
                     else -> {}
                 }
                 val elapsed = { (System.nanoTime() - t0) / 1_000_000 }
@@ -143,14 +164,26 @@ class ClaudeMixClient {
                             return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite))
                         }
                         is MixTools.Outcome.Result -> {
-                            DjLog.i(TAG, "turn $turn: ${u.name()} $input -> ${o.text.lineSequence().firstOrNull()?.take(160)}")
-                            results += ContentBlockParam.ofToolResult(ToolResultBlockParam.builder().toolUseId(u.id()).content(o.text).isError(o.isError).build())
+                            DjLog.i(TAG, "turn $turn: ${u.name()} $input -> ${o.text.lineSequence().firstOrNull()?.take(160)}${o.image?.let { " [+ picture ${it.size} bytes]" } ?: ""}")
+                            val r = ToolResultBlockParam.builder().toolUseId(u.id()).isError(o.isError)
+                            val img = o.image
+                            if (img == null) {
+                                r.content(o.text)
+                            } else {
+                                r.contentOfBlocks(
+                                    listOf(
+                                        ToolResultBlockParam.Content.Block.ofText(o.text),
+                                        ToolResultBlockParam.Content.Block.ofImage(Base64ImageSource.builder().data(Base64.getEncoder().encodeToString(img)).mediaType(Base64ImageSource.MediaType.IMAGE_PNG).build()),
+                                    ),
+                                )
+                            }
+                            results += ContentBlockParam.ofToolResult(r.build())
                         }
                     }
                 }
                 messages += MessageParam.builder().role(MessageParam.Role.USER).contentOfBlockParams(results).build()
             }
-            Result.failure(IllegalStateException("no commit after ${MixTools.MAX_TURNS} turns"))
+            Result.failure(IllegalStateException("no commit after ${tools?.maxTurns ?: 1} turns"))
         } catch (e: UnauthorizedException) {
             Result.failure(IllegalStateException("the API key was refused (401)"))
         } catch (e: PermissionDeniedException) {
@@ -181,7 +214,7 @@ class ClaudeMixClient {
                 MessageCreateParams.builder()
                     .model(model.id)
                     .maxTokens(MAX_TOKENS)
-                    .systemOfTextBlockParams(listOf(TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()))
+                    .systemOfTextBlockParams(listOf(TextBlockParam.builder().text(system + ownerInstructions()).cacheControl(CacheControlEphemeral.builder().build()).build()))
                     .addUserMessage(user)
                     .outputConfig(OutputConfig.builder().format(JsonOutputFormat.builder().schema(format).build()).apply { effortOf(model)?.let { effort(it) } }.build())
             val m = clientFor(apiKey).messages().create(b.build())
@@ -287,5 +320,14 @@ class ClaudeMixClient {
                 "what you were about to try, or commit_mix the best candidate so far. If something blocks every candidate, " +
                 "commit the cleanest one and say why in its why."
         const val TIMEOUT_S = 90L
+
+        /** Pro: one turn at maximum effort may think for minutes before it answers. */
+        const val PRO_TIMEOUT_S = 300L
+
+        /** Pro: web searches per question (each is billed by Anthropic on top of the tokens). */
+        const val WEB_SEARCHES = 5L
+
+        /** Pro: turns a server-side search may pause, on top of the tool turns. */
+        const val PAUSES = 4
     }
 }

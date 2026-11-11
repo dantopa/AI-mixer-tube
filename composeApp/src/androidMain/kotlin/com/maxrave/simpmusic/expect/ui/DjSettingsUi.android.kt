@@ -76,6 +76,12 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_pro
+import simpmusic.composeapp.generated.resources.ai_dj_claude_pro_description
+import simpmusic.composeapp.generated.resources.ai_dj_claude_instructions
+import simpmusic.composeapp.generated.resources.ai_dj_claude_instructions_message
+import simpmusic.composeapp.generated.resources.ai_dj_claude_instructions_label
+import simpmusic.composeapp.generated.resources.ai_dj_claude_instructions_none
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_label
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_message
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key_none
@@ -323,6 +329,34 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                             subtitle = stringResource(Res.string.ai_dj_claude_tools_description),
                             smallSubtitle = true,
                             switch = (claude.tools to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setTools(on) }),
+                        )
+                        // Pro mode: maximum effort, the real audio (look / listen), web search, more turns. Off by default.
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_claude_pro),
+                            subtitle = stringResource(Res.string.ai_dj_claude_pro_description),
+                            smallSubtitle = true,
+                            isEnable = claude.tools,
+                            switch = (claude.pro to { on -> org.simpmusic.dj.android.ai.ClaudeSettings.setPro(on) }),
+                        )
+                        val instructionsTitle = stringResource(Res.string.ai_dj_claude_instructions)
+                        val instructionsMessage = stringResource(Res.string.ai_dj_claude_instructions_message)
+                        val instructionsLabel = stringResource(Res.string.ai_dj_claude_instructions_label)
+                        SettingItem(
+                            title = instructionsTitle,
+                            subtitle = claude.instructions.takeIf { it.isNotBlank() }?.let { if (it.length > 80) it.take(80) + "…" else it }
+                                ?: stringResource(Res.string.ai_dj_claude_instructions_none),
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = instructionsTitle,
+                                        message = instructionsMessage,
+                                        textField = SettingAlertState.TextFieldData(label = instructionsLabel, value = claude.instructions),
+                                        confirm = confirm to { state -> org.simpmusic.dj.android.ai.ClaudeSettings.setInstructions(state.textField?.value.orEmpty()) },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
                         )
                         SettingItem(
                             title = stringResource(Res.string.ai_dj_claude_auto_order),

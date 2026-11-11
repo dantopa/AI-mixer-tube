@@ -32,6 +32,14 @@ object ClaudeSettings {
         val tools: Boolean = true,
         /** With [auto]: Claude also keeps the radio's upcoming tracks in mixing order by itself ("Order list" on its own). */
         val autoOrder: Boolean = true,
+        /**
+         * Pro mode (the owner: "no matter the tokens, with the whole toolbox"): maximum effort, up to 20 turns, and the
+         * extra tools (a measured map of candidates, spectrograms of the real audio, the mix rendered and measured, web
+         * search). Off by default; one switch turns it off again.
+         */
+        val pro: Boolean = false,
+        /** The owner's own instructions, appended to Claude's system prompt (blank = none). */
+        val instructions: String = "",
     )
 
     private const val PREFS = "dj_claude"
@@ -39,6 +47,11 @@ object ClaudeSettings {
     private const val PREF_AUTO = "auto"
     private const val PREF_TOOLS = "tools"
     private const val PREF_AUTO_ORDER = "auto_order"
+    private const val PREF_PRO = "pro"
+    private const val PREF_INSTRUCTIONS = "instructions"
+
+    /** Longest owner instruction text kept (it rides in every question). */
+    const val MAX_INSTRUCTIONS = 4_000
     private const val KEY_FILE = "dj_claude_key"
 
     @Volatile private var prefs: SharedPreferences? = null
@@ -102,12 +115,25 @@ object ClaudeSettings {
         DjLog.i(TAG, "claude: tools ${if (on) "on" else "off"}")
     }
 
+    fun setPro(on: Boolean) {
+        prefs?.edit()?.putBoolean(PREF_PRO, on)?.apply()
+        publish()
+        DjLog.i(TAG, "claude: pro ${if (on) "on" else "off"}")
+    }
+
+    fun setInstructions(text: String) {
+        val t = text.trim().take(MAX_INSTRUCTIONS)
+        prefs?.edit()?.putString(PREF_INSTRUCTIONS, t)?.apply()
+        publish()
+        DjLog.i(TAG, "claude: owner instructions ${if (t.isEmpty()) "cleared" else "set (${t.length} chars)"}")
+    }
+
     internal fun apiKey(): String? = key
 
     private fun publish() {
         val model = prefs?.getString(PREF_MODEL, null)?.let { n -> ClaudeModel.entries.firstOrNull { it.name == n } } ?: ClaudeModel.HAIKU
         // only the last four characters ever reach the UI
-        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model, auto = prefs?.getBoolean(PREF_AUTO, false) ?: false, tools = prefs?.getBoolean(PREF_TOOLS, true) ?: true, autoOrder = prefs?.getBoolean(PREF_AUTO_ORDER, true) ?: true)
+        _state.value = State(hasKey = key != null, keyHint = key?.takeLast(4)?.let { "…$it" }, model = model, auto = prefs?.getBoolean(PREF_AUTO, false) ?: false, tools = prefs?.getBoolean(PREF_TOOLS, true) ?: true, autoOrder = prefs?.getBoolean(PREF_AUTO_ORDER, true) ?: true, pro = prefs?.getBoolean(PREF_PRO, false) ?: false, instructions = prefs?.getString(PREF_INSTRUCTIONS, "").orEmpty())
     }
 
     private const val TAG = "ai"

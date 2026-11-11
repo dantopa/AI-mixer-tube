@@ -1330,7 +1330,13 @@ class DjEngine(
                 val image = org.simpmusic.dj.android.ai.FingerprintImage.png(brief, tFrom, tTo, titleFrom, titleTo)
                 val tools =
                     if (withTools) {
-                        org.simpmusic.dj.ai.MixTools(brief, from, to, lyrics?.linesOnTrack(fromId), lyrics?.linesOnTrack(toId), settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliestExitMs, planner)
+                        val pro = org.simpmusic.dj.android.ai.ClaudeSettings.state.value.pro
+                        org.simpmusic.dj.ai.MixTools(
+                            brief, from, to, lyrics?.linesOnTrack(fromId), lyrics?.linesOnTrack(toId),
+                            settings.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f), earliestExitMs, planner,
+                            ears = if (pro) earsFor(fromId, toId) else null,
+                            pro = pro,
+                        )
                     } else {
                         null
                     }
@@ -1490,8 +1496,29 @@ class DjEngine(
      * plus a margin, between [AI_ANSWER_BUDGET_MS] and the old fixed budget. Measured on the owner's build-bf export, with
      * tools: Sonnet 16 s, Opus 20 s on average, while 60 s was reserved, which left short tracks no exit at all.
      */
+    /**
+     * Pro mode's ears: a stretch of either track decoded from the player's cache (the network when it is not there), for
+     * Claude's spectrograms and rendered mixes. Called from the question's own IO thread, so blocking is fine; at most
+     * [AI_EARS_MAX_MS] per call.
+     */
+    private fun earsFor(fromId: String, toId: String) =
+        org.simpmusic.dj.ai.MixTools.MixEars { incoming, fromMs, toMs ->
+            runCatching {
+                val id = if (incoming) toId else fromId
+                val pcm = kotlinx.coroutines.runBlocking { decoder.decodeStereoRange(id, fromMs.coerceAtLeast(0), minOf(toMs, fromMs + AI_EARS_MAX_MS)) }
+                val n = pcm.frames
+                val l = FloatArray(n)
+                val r = FloatArray(n)
+                for (i in 0 until n) {
+                    l[i] = pcm.interleaved[2 * i]
+                    r[i] = pcm.interleaved[2 * i + 1]
+                }
+                org.simpmusic.dj.render.StereoPcm(l, r, pcm.sampleRate)
+            }.onFailure { DjLog.w(TAG, "ai pro: could not decode ${if (incoming) toId else fromId} [$fromMs,$toMs): ${it.javaClass.simpleName}: ${it.message}") }.getOrNull()
+        }
+
     private fun answerBudgetMs(tools: Boolean): Long {
-        val fixed = if (tools) AI_TOOLS_BUDGET_MS else AI_ANSWER_BUDGET_MS
+        val fixed = if (tools) (if (org.simpmusic.dj.android.ai.ClaudeSettings.state.value.pro) AI_PRO_BUDGET_MS else AI_TOOLS_BUDGET_MS) else AI_ANSWER_BUDGET_MS
         val seen = answerTimes.filter { it.second == tools }.map { it.first }.sorted()
         if (seen.size < 3) return fixed
         val p90 = seen[((seen.size - 1) * 0.9).toInt()]
@@ -2007,6 +2034,12 @@ private const val AI_ANSWER_BUDGET_MS = 25_000L
 
 /** "AI Mix" with tools: several turns (zoom, try, commit) take longer. */
 private const val AI_TOOLS_BUDGET_MS = 60_000L
+
+/** Pro mode: up to 20 turns at maximum effort, rendering mixes on the phone; the current pair gets this much room. */
+private const val AI_PRO_BUDGET_MS = 180_000L
+
+/** Pro mode: the longest stretch one look / listen decodes. */
+private const val AI_EARS_MAX_MS = 120_000L
 
 /** Above this tempo gap (half/double aware) Claude is not asked: the engine bends each deck at most 10 %. */
 private const val AI_MAX_TEMPO_GAP = 0.12f
