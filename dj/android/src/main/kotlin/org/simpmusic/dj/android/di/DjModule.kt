@@ -116,6 +116,8 @@ val djModule =
             DjSettingsRepository(androidContext()).also {
                 org.simpmusic.dj.android.perfect.UserAnnotations.install(androidContext())
                 org.simpmusic.dj.android.ai.ClaudeSettings.install(androidContext())
+                org.simpmusic.dj.android.stems.StemsSettings.install(androidContext())
+                org.simpmusic.dj.android.stems.StemsCache.install(File(androidContext().filesDir, "dj/stems"))
             }
         }
         single<StateFlow<DjSettings>>(named("djSettings")) {
@@ -187,6 +189,15 @@ val djModule =
             )
         }
 
+        // where the voice, bass and drums really are: Demucs on the owner's stems server (off until they set one up)
+        single {
+            org.simpmusic.dj.android.stems.DjStemsSource(
+                context = androidContext(),
+                decoder = get(ANALYSIS_DECODER),
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+            )
+        }
+
         single<DjHooks> {
             val librarySource = get<LibrarySource>()
             val engine =
@@ -203,6 +214,7 @@ val djModule =
                     titleOf = { id -> librarySource.find(id)?.title },
                     // the lyrics only refine where the voice is: without them (no repository, any failure) the DJ uses the detector
                     lyrics = runCatching { get<DjLyricsSource>() }.onFailure { DjLog.e("boot", "lyric vocals are OFF", it) }.getOrNull(),
+                    stems = runCatching { get<org.simpmusic.dj.android.stems.DjStemsSource>() }.onFailure { DjLog.e("boot", "stems are OFF", it) }.getOrNull(),
                     // the real-time engine: one mixer and ONE audio output for every player (players opt in when they are built)
                     bus = runCatching { org.simpmusic.dj.android.bus.AndroidMixBus() }.onFailure { DjLog.e("boot", "real-time engine is OFF", it) }.getOrNull(),
                     // the mix editor's "Listen": the app's playback pauses while the rendered preview plays, then goes on

@@ -43,6 +43,10 @@ data class DjMixStrings(
     val editBusy: String = "Editing is possible before the mix starts",
     val listen: String = "Listen",
     val listenStop: String = "Stop",
+    val abListenA: String = "A (Claude's pick)",
+    val abListenB: String = "B (runner-up)",
+    val abKeepA: String = "Keep A",
+    val abKeepB: String = "Keep B",
 ) {
     fun kindLabel(kind: DjMixKind?): String = when (kind) {
         DjMixKind.BEAT_MATCHED -> kindBeatMatched

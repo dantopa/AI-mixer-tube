@@ -50,6 +50,8 @@ class TrackTimeline(
     val mixMarks: MixMarks?,
     /** What the track's synced lyrics say about its voice (validated against the track); null when the app has none. */
     val lyricVocals: LyricVocals? = null,
+    /** The track's separated stems, when the owner's stems server measured it: the best map of where the voice is. */
+    val stems: StemProfile? = null,
 ) {
     val videoId: String get() = raw.videoId
 
@@ -98,7 +100,8 @@ class TrackTimeline(
      * detection is trusted ([trustedVocals], [Provenance.DETECTED]), else null = unknown.
      */
     val vocals: Sourced<List<TimeRange>>? =
-        lyricVocals?.takeIf { it.trusted }?.let { Sourced(it.ranges, Provenance.LYRICS, it.confidence) }
+        stems?.takeIf { it.frames > 0 }?.let { Sourced(it.vocalRanges(), Provenance.STEMS, 0.9f) }
+            ?: lyricVocals?.takeIf { it.trusted }?.let { Sourced(it.ranges, Provenance.LYRICS, it.confidence) }
             ?: trustedVocals(refined)?.let { Sourced(it, Provenance.DETECTED, refined.vocals?.confidence ?: 0f) }
 
     /** The lyrics replaced the detector (or an unknown) as the source of the vocals. */
@@ -169,6 +172,7 @@ class TrackTimeline(
             append(" | vocals ")
             append(
                 when {
+                    vocals?.provenance == Provenance.STEMS -> "known from the stems (${stems?.model}), ${vocals.value.size} ranges"
                     vocals != null && lyricVocals != null && vocalsFromLyrics -> "known from ${lyricVocals.describe()}, ${vocals.value.size} ranges"
                     vocals != null -> "known (detected), ${vocals.value.size} ranges"
                     vocalCoverage != null -> "unknown (untrusted)"
@@ -251,7 +255,7 @@ class TrackTimeline(
 object Timelines {
     const val CAPACITY = 256
 
-    private data class Key(val raw: TrackAnalysis, val downbeatAnchorMs: Long?, val phraseAnchorMs: Long?, val marks: MixMarks?, val lyrics: LyricVocals?)
+    private data class Key(val raw: TrackAnalysis, val downbeatAnchorMs: Long?, val phraseAnchorMs: Long?, val marks: MixMarks?, val lyrics: LyricVocals?, val stems: StemProfile?)
 
     private val cache =
         object : LinkedHashMap<Key, TrackTimeline>(64, 0.75f, true) {
@@ -260,9 +264,9 @@ object Timelines {
 
     fun of(raw: TrackAnalysis): TrackTimeline {
         val id = raw.videoId
-        val key = Key(raw, BarPhase.anchors(id), PhraseGrid.anchors(id), MixMarks.of(id), Annotations.installed.lyricVocals(id))
+        val key = Key(raw, BarPhase.anchors(id), PhraseGrid.anchors(id), MixMarks.of(id), Annotations.installed.lyricVocals(id), Annotations.installed.stems(id))
         synchronized(cache) { cache[key]?.let { return it } }
-        val t = TrackTimeline(raw, AnalysisRefiner.cached(raw, key.downbeatAnchorMs, key.phraseAnchorMs), key.downbeatAnchorMs, key.phraseAnchorMs, key.marks, key.lyrics)
+        val t = TrackTimeline(raw, AnalysisRefiner.cached(raw, key.downbeatAnchorMs, key.phraseAnchorMs), key.downbeatAnchorMs, key.phraseAnchorMs, key.marks, key.lyrics, key.stems)
         synchronized(cache) { cache[key] = t }
         return t
     }

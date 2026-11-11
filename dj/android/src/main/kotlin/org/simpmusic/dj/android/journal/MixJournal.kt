@@ -103,6 +103,14 @@ object MixJournal {
     fun rated(mixId: String, up: Boolean, atEpochMs: Long) =
         write(MixRecord(type = "rated", atEpochMs = atEpochMs, mixId = mixId, rating = if (up) 1 else -1))
 
+    /** The owner's A/B choice between two candidates of the same pair, by ear: [kept] over [over] (descriptions). */
+    fun ab(fromId: String, toId: String, kept: String, over: String, atEpochMs: Long) =
+        write(MixRecord(type = "ab", atEpochMs = atEpochMs, mixId = "ab-$atEpochMs", fromId = fromId, toId = toId, reason = "kept: $kept || over: $over"))
+
+    /** Every record on disk, oldest first (blocking: off the main thread). */
+    fun records(): List<MixRecord> =
+        files().flatMap { f -> runCatching { f.readLines() }.getOrDefault(emptyList()) }.mapNotNull { runCatching { decode(it) }.getOrNull() }
+
     /** One JSON line (no newline). */
     fun encode(r: MixRecord): String = json.encodeToString(MixRecord.serializer(), r)
 

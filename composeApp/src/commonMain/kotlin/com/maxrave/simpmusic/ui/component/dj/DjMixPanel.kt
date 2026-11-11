@@ -151,7 +151,15 @@ private fun DjMixEditBar(editor: DjMixEditor, strings: DjMixStrings, editing: Bo
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             // hear the prepared mix (the AI's, the DJ's or the edit) without waiting for the song to get there
-            EditPill(if (editor.isListening) "■ " + strings.listenStop else "▶ " + strings.listen, lit = editor.isListening, enabled = editor.enabled || editor.isListening, onClick = editor.onListen)
+            if (editor.abAvailable && !editor.isListening) {
+                // A/B: Claude's pick against its best other candidate, heard one after the other; the choice teaches Claude
+                EditPill("▶ " + strings.abListenA, enabled = editor.enabled, onClick = editor.onListen)
+                EditPill("▶ " + strings.abListenB, enabled = editor.enabled, onClick = editor.onListenB)
+                EditPill(strings.abKeepA, enabled = editor.enabled) { editor.onKeep(false) }
+                EditPill(strings.abKeepB, enabled = editor.enabled) { editor.onKeep(true) }
+            } else {
+                EditPill(if (editor.isListening) "■ " + strings.listenStop else "▶ " + strings.listen, lit = editor.isListening, enabled = editor.enabled || editor.isListening, onClick = editor.onListen)
+            }
             EditPill(if (editing) strings.editDone else "✎ " + strings.editStart, lit = editing, enabled = true, onClick = onToggle)
             if (editing) {
                 EditPill("−", enabled = editor.enabled) { editor.onBars(-1) }

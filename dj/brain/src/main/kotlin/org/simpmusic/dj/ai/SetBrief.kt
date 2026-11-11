@@ -55,6 +55,10 @@ object SetBrief {
            the incoming's voice can start exactly where the outgoing's voice would have come back. Read the "sections"
            of each track for this.
 
+        THINK OF IT AS ONE SET, not a list of pairs: about half an hour to an hour of music with a shape. Warm up, build
+        to a peak about two thirds of the way in, let it breathe for a track or two, and end strong. Within that arc keep
+        every step mixable (rule 1 first). Say the arc in one line in "why" (where the peak is and why).
+
         The first track is playing now and stays first: order only the others. Name every label once. Answer with the JSON
         only.
         """.trimIndent()

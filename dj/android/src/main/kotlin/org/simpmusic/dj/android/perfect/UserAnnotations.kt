@@ -23,6 +23,9 @@ object UserAnnotations : TrackAnnotations {
     /** The track's synced lyrics, validated (filled by `DjLyricsSource` for the playing and the next track). */
     override fun lyricVocals(videoId: String): LyricVocals? = LyricVocalsCache.get(videoId)
 
+    /** The track's separated stems from the owner's stems server (filled by `DjStemsSource`). */
+    override fun stems(videoId: String): org.simpmusic.dj.timeline.StemProfile? = org.simpmusic.dj.android.stems.StemsCache.get(videoId)
+
     /** Opens the three stores and installs them in the brain. */
     fun install(context: Context) {
         UserDownbeats.install(context)

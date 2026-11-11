@@ -59,7 +59,26 @@ object MixBrief {
             "filter" to mapOf("type" to "string", "enum" to FILTERS.keys.toList(), "description" to "none; lowpass_out = the outgoing sinks under a low-pass; highpass_out = the outgoing washes out from the bass up; highpass_in = the incoming enters thin and opens up by the bass swap."),
             "echo_out" to mapOf("type" to "boolean", "description" to "Throw a beat-synced echo on the outgoing as its fader closes: its last beat rings out over the incoming."),
             "loop_bars" to mapOf("type" to "integer", "description" to "0, 1, 2 or 4. Loop this many bars of the outgoing, starting at exit_bar, for the whole overlap (0 = no loop). A loop of an instrumental bar with the bass makes a clean bed under the incoming when the outgoing has no long instrumental; at most ~9 s (halved when longer)."),
+            "eq" to mapOf(
+                "type" to "array",
+                "description" to "Free-hand EQ, like turning the low and high knobs: each step says, from that bar of the overlap (0 = its first bar) on, whether that deck's bass (below ~250 Hz) and highs (above ~2.5 kHz) are on or killed. A deck with steps takes its filters from them (they replace the bass swap and the filter on that deck); the incoming opens fully by the end of the overlap anyway. [] = the engine's own EQ.",
+                "items" to mapOf(
+                    "type" to "object",
+                    "properties" to mapOf(
+                        "deck" to mapOf("type" to "string", "enum" to listOf("outgoing", "incoming")),
+                        "bar" to mapOf("type" to "integer"),
+                        "bass" to mapOf("type" to "string", "enum" to listOf("on", "kill")),
+                        "highs" to mapOf("type" to "string", "enum" to listOf("on", "kill")),
+                    ),
+                    "required" to listOf("deck", "bar", "bass", "highs"),
+                    "additionalProperties" to false,
+                ),
+            ),
+            "key_shift" to mapOf("type" to "integer", "description" to "-1, 0 or 1: shift the incoming's key by a semitone through the overlap (it glides back after). Only when the two keys clash and a semitone fixes it; 0 almost always."),
         )
+
+    /** At most this many EQ steps per mix (two decks, a few knob turns each). */
+    const val MAX_EQ_STEPS = 16
 
     /** The moves of an answer or a tool call; missing fields are the engine's defaults. */
     fun movesOf(o: JsonObject): MixMoves {
@@ -69,7 +88,15 @@ object MixBrief {
         val echo = o["echo_out"]?.jsonPrimitive?.booleanOrNull ?: false
         // (the largest DJ loop length not above what was asked: 3 -> 2, 8 -> 4)
         val loop = o["loop_bars"]?.jsonPrimitive?.intOrNull?.let { n -> MixMoves.LOOP_BARS.lastOrNull { it <= n } } ?: 0
-        return MixMoves(bassSwapBar = bar, fade = fade, filter = filter, echoOut = echo, loopBars = loop)
+        val eq =
+            (o["eq"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { e ->
+                val x = e as? JsonObject ?: return@mapNotNull null
+                val deck = when (x["deck"]?.jsonPrimitive?.contentOrNull) { "outgoing" -> org.simpmusic.dj.model.EqDeck.OUTGOING; "incoming" -> org.simpmusic.dj.model.EqDeck.INCOMING; else -> return@mapNotNull null }
+                val b = x["bar"]?.jsonPrimitive?.intOrNull?.takeIf { it in 0..64 } ?: return@mapNotNull null
+                org.simpmusic.dj.model.EqStep(deck, b, x["bass"]?.jsonPrimitive?.contentOrNull != "kill", x["highs"]?.jsonPrimitive?.contentOrNull != "kill")
+            }.sortedWith(compareBy({ it.deck }, { it.bar })).distinctBy { it.deck to it.bar }.take(MAX_EQ_STEPS)
+        val key = o["key_shift"]?.jsonPrimitive?.intOrNull?.coerceIn(-1, 1) ?: 0
+        return MixMoves(bassSwapBar = bar, fade = fade, filter = filter, echoOut = echo, loopBars = loop, eq = eq, keyShift = key)
     }
 
     /** The JSON schema of the answer (structured output): bar numbers and an overlap, the moves, one sentence of why. */
@@ -431,12 +458,19 @@ object MixBrief {
             append(", voice from ").append(
                 when {
                     vocals == null -> "nowhere (unknown)"
+                    t.vocals?.provenance == org.simpmusic.dj.timeline.Provenance.STEMS -> "the separated vocal stem (Demucs: the most reliable source)"
                     t.vocalsFromLyrics -> "the synced lyrics"
                     else -> "the vocal detector"
                 },
             ).append('\n')
             org.simpmusic.dj.analysis.SongStructure.describe(t)?.let { append("sections (from the voice and what repeats): ").append(it).append('\n') }
-            append("bar t loud bass high voice line\n")
+            val stems = t.stems?.takeIf { it.frames > 0 }
+            if (stems != null) {
+                append("stems: sbass and drums are the separated bass and drum stems (0-9 of their own range; the band's real bass and drums, not a band filter)\n")
+                append("bar t loud bass high voice sbass drums line\n")
+            } else {
+                append("bar t loud bass high voice line\n")
+            }
             for (i in bars.indices) {
                 val s = bars[i]
                 val e = bars.getOrNull(i + 1) ?: end
@@ -449,6 +483,7 @@ object MixBrief {
                 append(i).append(' ').append(clock(s)).append(' ')
                 append(loud.at(s, e)).append(' ').append(bass.at(s, e)).append(' ').append(high.at(s, e)).append(' ')
                 append(vocals?.let { level(sungShare(it, s, e)) } ?: "-")
+                if (stems != null) append(' ').append(stemLevel(stems, stems.bass, s, e)).append(' ').append(stemLevel(stems, stems.drums, s, e))
                 if (line.isNotEmpty()) append(' ').append(line)
                 append('\n')
             }
@@ -634,6 +669,20 @@ object MixBrief {
             val x = if (hi > lo) (mean - lo) / (hi - lo) else 0.0
             return level(x)
         }
+    }
+
+    /** A stem's mean level over [s, e) as 0-9 of its own 5th..95th percentile range. */
+    private fun stemLevel(p: org.simpmusic.dj.timeline.StemProfile, stem: List<Int>, s: Long, e: Long): String {
+        val n = p.frames
+        if (n == 0) return "-"
+        val sorted = stem.take(n).sorted()
+        val lo = sorted[n * 5 / 100]
+        val hi = sorted[(n * 95 / 100).coerceAtMost(n - 1)]
+        val a = (s / p.hopMs).toInt().coerceIn(0, n)
+        val b = (e / p.hopMs).toInt().coerceIn(a, n)
+        if (b <= a || hi <= lo) return "-"
+        val mean = (a until b).sumOf { stem[it].toDouble() } / (b - a)
+        return level(((mean - lo) / (hi - lo)).coerceIn(0.0, 1.0))
     }
 
     private fun level(x: Double): String = (x * 9).roundToInt().coerceIn(0, 9).toString()

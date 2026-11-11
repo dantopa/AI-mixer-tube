@@ -52,6 +52,8 @@ class ClaudeMixClient {
         val cacheWriteTokens: Long = 0,
         /** Tool mode: Claude chose to play this upcoming track next instead ([MixTools.SWAP]). */
         val swapTo: String? = null,
+        /** Tool mode: Claude's best other candidate, for the owner's A/B. */
+        val runnerUp: org.simpmusic.dj.model.AiMixPoints? = null,
     )
 
     @Volatile private var client: Pair<String, AnthropicClient>? = null
@@ -163,7 +165,7 @@ class ClaudeMixClient {
                             val p = o.points
                             val json = """{"exit_ms":${p.exitMs},"entry_ms":${p.entryMs},"overlap_bars":${p.overlapBars},"why":${JsonPrimitive(p.why)}}"""
                             DjLog.i(TAG, "commit from ${model.id} after $turn turns and ${tools.tries} tries in ${elapsed()} ms ($inTok in / $outTok out / $cacheRead cache read / $cacheWrite cache write tokens): $input")
-                            return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite))
+                            return Result.success(Answer(json, inTok, outTok, model, elapsed(), committed = p, turns = turn, tries = tools.tries, cacheReadTokens = cacheRead, cacheWriteTokens = cacheWrite, runnerUp = o.runnerUp))
                         }
                         is MixTools.Outcome.Swap -> {
                             DjLog.i(TAG, "swap from ${model.id} after $turn turns in ${elapsed()} ms: play ${o.id} next (${o.why})")

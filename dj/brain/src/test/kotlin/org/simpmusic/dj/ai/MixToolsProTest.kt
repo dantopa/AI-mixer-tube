@@ -115,4 +115,21 @@ class MixToolsProTest {
         assertEquals("alt1", sw.id)
         for (s in MixTools.QUEUE_SPECS) assertEquals(false, s.schema["additionalProperties"], s.name)
     }
+
+    @Test
+    fun listenJudgesTheMixAndTheEqMovesReshapeTheLanes() {
+        val exitBar = brief.outBarsMs.indexOfFirst { it >= 93_000L }
+        val entryBar = brief.inBarsMs.indexOfFirst { it >= 80_500L }
+        val base = """"exit_bar":$exitBar,"entry_bar":$entryBar,"overlap_bars":4,"bass_swap_bar":-1,"fade":"hold_then_drop","filter":"none","echo_out":false,"loop_bars":0"""
+        val eq = """$base,"key_shift":0,"eq":[{"deck":"incoming","bar":0,"bass":"kill","highs":"on"},{"deck":"incoming","bar":2,"bass":"on","highs":"on"},{"deck":"outgoing","bar":2,"bass":"kill","highs":"on"}]"""
+        val r = tools.call(MixTools.LISTEN, "{$eq}") as MixTools.Outcome.Result
+        println(r.text)
+        assertTrue(r.text.contains("JUDGE") && r.text.contains("/10"), r.text)
+        assertTrue(r.text.contains("eq on the incoming"), r.text)
+        // a plain one listened too: the commit's runner-up is the other one
+        tools.call(MixTools.LISTEN, """{$base,"key_shift":0,"eq":[]}""")
+        val c = tools.call(MixTools.COMMIT, """{$eq,"why":"eq hand-over"}""") as MixTools.Outcome.Committed
+        assertNotNull(c.runnerUp)
+        assertTrue(c.runnerUp!!.moves.eq.isEmpty())
+    }
 }

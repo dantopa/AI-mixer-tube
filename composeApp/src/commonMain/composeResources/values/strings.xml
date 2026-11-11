@@ -661,6 +661,17 @@
     <string name="ai_dj_claude_prompt_message">The rules Claude reads before every mix question. Edit them freely; clear the field (or leave it unchanged) to go back to the app's own, which then follows the app's updates. Your instructions and lessons are still added after it.</string>
     <string name="ai_dj_claude_prompt_default">The app's own</string>
     <string name="ai_dj_claude_prompt_edited">Edited by you (%1$d characters)</string>
+    <string name="ai_dj_stems">Stems server (Demucs, experiment)</string>
+    <string name="ai_dj_stems_description">Your own computer separates each track into voice, bass, drums and the rest, so the DJ and Claude know where the voice really is (better than the phone's detector on cumbia). Run dj/stems-server from the repo there. Tracks measured: %1$d</string>
+    <string name="ai_dj_stems_url">Stems server address</string>
+    <string name="ai_dj_stems_url_message">For example http://192.168.1.20:8765 on your home network, or your Tailscale address to reach it from anywhere.</string>
+    <string name="ai_dj_stems_url_none">Not set</string>
+    <string name="ai_dj_stems_token">Stems server token</string>
+    <string name="ai_dj_stems_token_message">The same STEMS_TOKEN you started the server with. Kept on this phone only. Leave empty to forget it.</string>
+    <string name="ai_dj_stems_token_set">Set</string>
+    <string name="ai_dj_stems_token_none">Not set</string>
+    <string name="ai_dj_stems_wifi">Only on Wi-Fi</string>
+    <string name="ai_dj_stems_wifi_description">Each track is sent once, about 10 MB.</string>
     <string name="ai_dj_claude_auto">Claude chooses every mix</string>
     <string name="ai_dj_claude_auto_description">Asks Claude once per transition, as soon as both tracks are analysed (also from Now Playing: Auto). The DJ's own mix stays ready if Claude fails or is late. Each answer costs tokens: under a cent per hour with Haiku, about a dollar per hour with Opus (estimate).</string>
     <string name="dj_ai_no_key">AI Mix needs a Claude API key: Settings → AI DJ → Claude</string>

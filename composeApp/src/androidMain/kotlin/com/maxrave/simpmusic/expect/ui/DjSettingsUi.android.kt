@@ -76,6 +76,17 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools_description
+import simpmusic.composeapp.generated.resources.ai_dj_stems
+import simpmusic.composeapp.generated.resources.ai_dj_stems_description
+import simpmusic.composeapp.generated.resources.ai_dj_stems_url
+import simpmusic.composeapp.generated.resources.ai_dj_stems_url_message
+import simpmusic.composeapp.generated.resources.ai_dj_stems_url_none
+import simpmusic.composeapp.generated.resources.ai_dj_stems_token
+import simpmusic.composeapp.generated.resources.ai_dj_stems_token_message
+import simpmusic.composeapp.generated.resources.ai_dj_stems_token_set
+import simpmusic.composeapp.generated.resources.ai_dj_stems_token_none
+import simpmusic.composeapp.generated.resources.ai_dj_stems_wifi
+import simpmusic.composeapp.generated.resources.ai_dj_stems_wifi_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_effort
 import simpmusic.composeapp.generated.resources.ai_dj_claude_effort_default
 import simpmusic.composeapp.generated.resources.ai_dj_claude_effort_description
@@ -300,6 +311,60 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                         )
                     },
                 )
+                // the owner's stems server (Demucs): where the voice, bass and drums really are; nothing is sent while off
+                val stems by org.simpmusic.dj.android.stems.StemsSettings.state.collectAsStateWithLifecycle()
+                val stemsUrlTitle = stringResource(Res.string.ai_dj_stems_url)
+                val stemsUrlMessage = stringResource(Res.string.ai_dj_stems_url_message)
+                val stemsTokenTitle = stringResource(Res.string.ai_dj_stems_token)
+                val stemsTokenMessage = stringResource(Res.string.ai_dj_stems_token_message)
+                SettingItem(
+                    title = stringResource(Res.string.ai_dj_stems),
+                    subtitle = stringResource(Res.string.ai_dj_stems_description, org.simpmusic.dj.android.stems.StemsCache.count()),
+                    smallSubtitle = true,
+                    switch = (stems.enabled to { on -> org.simpmusic.dj.android.stems.StemsSettings.setEnabled(on) }),
+                )
+                AnimatedVisibility(visible = stems.enabled) {
+                    Column {
+                        SettingItem(
+                            title = stemsUrlTitle,
+                            subtitle = stems.url.ifBlank { stringResource(Res.string.ai_dj_stems_url_none) },
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = stemsUrlTitle,
+                                        message = stemsUrlMessage,
+                                        textField = SettingAlertState.TextFieldData(label = stemsUrlTitle, value = stems.url, maxLines = 2),
+                                        confirm = confirm to { st -> org.simpmusic.dj.android.stems.StemsSettings.setUrl(st.textField?.value.orEmpty()) },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        SettingItem(
+                            title = stemsTokenTitle,
+                            subtitle = if (stems.hasToken) stringResource(Res.string.ai_dj_stems_token_set) else stringResource(Res.string.ai_dj_stems_token_none),
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = stemsTokenTitle,
+                                        message = stemsTokenMessage,
+                                        textField = SettingAlertState.TextFieldData(label = stemsTokenTitle, value = "", maxLines = 2),
+                                        confirm = confirm to { st -> org.simpmusic.dj.android.stems.StemsSettings.setToken(st.textField?.value) },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        SettingItem(
+                            title = stringResource(Res.string.ai_dj_stems_wifi),
+                            subtitle = stringResource(Res.string.ai_dj_stems_wifi_description),
+                            smallSubtitle = true,
+                            switch = (stems.unmeteredOnly to { on -> org.simpmusic.dj.android.stems.StemsSettings.setUnmeteredOnly(on) }),
+                        )
+                    }
+                }
                 // "AI Mix": the owner's Claude key (stored on the phone only) and the model to ask
                 val claude by org.simpmusic.dj.android.ai.ClaudeSettings.state.collectAsStateWithLifecycle()
                 val keyTitle = stringResource(Res.string.ai_dj_claude_key)

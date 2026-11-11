@@ -303,6 +303,15 @@ interface DjHooks {
      */
     fun previewMix(): Boolean = false
 
+    /** True when Claude left a runner-up for the prepared pair: the mix sheet offers A (its commit) against B. */
+    fun abAvailable(): Boolean = false
+
+    /** Plays B (the runner-up) as previewMix plays A; again to stop. */
+    fun previewAb(): Boolean = false
+
+    /** The owner's A/B choice: true = keep B (the pair is re-planned on it), false = keep A. Written to the journal. */
+    fun pickAb(keepB: Boolean): Boolean = false
+
     /** Keeps the edited mix for this pair for good (reused every time the pair comes, the AI is not asked). */
     fun saveMixEdit(): Boolean = false
 
@@ -430,6 +439,8 @@ class DjEngine(
     private val splicerRegistry: org.simpmusic.dj.android.splice.SplicerRegistry = org.simpmusic.dj.android.splice.SplicerRegistry(),
     /** Where the voice is from the songs' synced lyrics (fetched for the playing and the next track); null = detector only. */
     private val lyrics: org.simpmusic.dj.android.lyrics.DjLyricsSource? = null,
+    /** Where the voice, bass and drums are, from the owner's stems server (Demucs); null = not wired. */
+    private val stems: org.simpmusic.dj.android.stems.DjStemsSource? = null,
     /** The real-time engine's mixer (one output for every player); null = the window + splice path only. */
     private val bus: org.simpmusic.dj.android.bus.AndroidMixBus? = null,
     /** Plays a rendered preview of the prepared mix (mix editor "Listen"); null = no preview. */
@@ -526,6 +537,7 @@ class DjEngine(
         scope.launch { settingsFlow.collect { s -> _debug.update { it.copy(enabled = s.enabled) } } }
         // lyrics land on a background thread; the pipeline state lives on the engine's scope
         lyrics?.onChanged = { id -> scope.launch { onLyricVocals(id) } }
+        stems?.onChanged = { id -> scope.launch { onLyricVocals(id) } }
     }
 
     @Volatile private var playbackPositionMs: Long = 0L
@@ -941,6 +953,93 @@ class DjEngine(
         scope.launch { if (!_debug.value.previewing) previewMix() }
     }
 
+    /** Claude's runner-up per pair (A/B in the mix sheet). */
+    private val abAlts = LinkedHashMap<String, org.simpmusic.dj.model.AiMixPoints>()
+
+    private fun abAltNow(): org.simpmusic.dj.model.AiMixPoints? {
+        val k = pairKey ?: return null
+        if (aiKey != k || aiPoints == null) return null
+        return synchronized(abAlts) { abAlts[k] }
+    }
+
+    override fun abAvailable(): Boolean = abAltNow() != null && !_debug.value.isMixing
+
+    private fun describePoints(p: org.simpmusic.dj.model.AiMixPoints): String =
+        "out ${clockOf(p.exitMs)} -> in ${clockOf(p.entryMs)}, ${p.overlapBars} bars, ${p.moves.describe()}"
+
+    override fun previewAb(): Boolean {
+        val player = previewPlayer ?: return false
+        if (_debug.value.previewing) return previewMix() // stops
+        val alt = abAltNow() ?: return false
+        val from = pairFrom ?: return false
+        val to = pairTo ?: return false
+        _debug.update { it.copy(previewing = true) }
+        editSay("A/B: preparing B…")
+        previewJob =
+            scope.launch {
+                try {
+                    val a = scheduler.get(from)
+                    val b = scheduler.get(to)
+                    if (a == null || b == null) {
+                        editSay("A/B: the tracks are still being analysed")
+                        _debug.update { it.copy(previewing = false) }
+                        return@launch
+                    }
+                    val anywhere = settingsFlow.value.copy(mixPoint = MixPoint.ANYWHERE, minPlayedFraction = 0f)
+                    val plan = withContext(heavyDispatcher) { planner.plan(a, b, anywhere, PlanConstraints(earliestExitMs = 0L, aiPoints = alt)) }
+                    val tl = org.simpmusic.dj.android.window.WindowTimeline.build(plan)
+                    val file = File(windowDir, "preview.wav")
+                    val rendered =
+                        withContext(heavyDispatcher) {
+                            val cancel = CancelSignal { !isActive }
+                            val out = tl.outgoingDecodeRange()
+                            val inn = tl.incomingDecodeRange()
+                            val outPcm = decoder.decodeStereoRange(from, out.first, out.last, cancel)
+                            val inPcm = decoder.decodeStereoRange(to, inn.first, inn.last, cancel)
+                            renderer.render(RenderRequest(plan, maxOf(tl.startRelMs, -PREVIEW_LEAD_MS), tl.endRelMs, outPcm, inPcm, outPcm.sampleRate, file))
+                        }
+                    if (!_debug.value.previewing) return@launch
+                    editSay("A/B: playing B (${describePoints(alt)}); tap again to stop")
+                    player.play(rendered.file) { _debug.update { it.copy(previewing = false) } }
+                } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    DjLog.w(TAG, "A/B preview failed: ${e.javaClass.simpleName}: ${e.message}")
+                    editSay("A/B: could not render B (${e.javaClass.simpleName})")
+                    _debug.update { it.copy(previewing = false) }
+                }
+            }
+        return true
+    }
+
+    override fun pickAb(keepB: Boolean): Boolean {
+        val k = pairKey ?: return false
+        val from = pairFrom ?: return false
+        val to = pairTo ?: return false
+        val a = aiPoints?.takeIf { aiKey == k } ?: return false
+        val b = abAltNow() ?: return false
+        if (_debug.value.isMixing) return false
+        if (_debug.value.previewing) previewMix()
+        val (kept, over) = if (keepB) b to a else a to b
+        org.simpmusic.dj.android.journal.MixJournal.ab(from, to, describePoints(kept), describePoints(over), System.currentTimeMillis())
+        DjLog.i(TAG, "A/B $from -> $to: the owner kept ${if (keepB) "B" else "A"} (${describePoints(kept)}) over ${describePoints(over)}")
+        synchronized(abAlts) { abAlts.remove(k) }
+        if (!keepB) {
+            editSay("A/B: kept A, noted for Claude")
+            return true
+        }
+        aiPoints = b
+        org.simpmusic.dj.android.ai.AiAnswerCache.put(k, b, org.simpmusic.dj.android.ai.ClaudeSettings.state.value.model.id)
+        mixNowKey = null
+        perfectKey = null
+        cancelPipeline()
+        ready?.let { deleteWindow(it) }
+        ready = null
+        startPipeline(from, to)
+        editSay("A/B: kept B, re-planning on it")
+        return true
+    }
+
     override fun previewMix(): Boolean {
         val player = previewPlayer ?: return false
         if (_debug.value.previewing) {
@@ -1311,7 +1410,11 @@ class DjEngine(
                     requestedBars = settings.overlapBars,
                     positionMs = heardFromMs,
                     // the owner's latest 👍 / 👎 with what those mixes were: Claude's memory of their taste
-                    taste = runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent(fromId = fromId, toId = toId, analysisOf = { id -> kotlinx.coroutines.runBlocking { scheduler.get(id) } })) }.getOrNull(),
+                    taste =
+                        listOfNotNull(
+                            runCatching { org.simpmusic.dj.ai.MixBrief.taste(org.simpmusic.dj.android.ai.OwnerTaste.recent(fromId = fromId, toId = toId, analysisOf = { id -> kotlinx.coroutines.runBlocking { scheduler.get(id) } })) }.getOrNull(),
+                            runCatching { org.simpmusic.dj.android.ai.OwnerAb.block(fromId, toId) }.getOrNull(),
+                        ).joinToString("\n\n").ifEmpty { null },
                     ahead = ahead,
                     entryLatestMs = entryLatest,
                 )
@@ -1356,6 +1459,13 @@ class DjEngine(
             DjLog.w(TAG, "ai mix: unusable answer (${it.message}): ${answer.json}")
             say("AI: unusable answer (${it.message})")
             return null
+        }
+        answer.runnerUp?.let { r ->
+            synchronized(abAlts) {
+                abAlts[key(fromId, toId)] = r
+                while (abAlts.size > AB_MEMORY) abAlts.remove(abAlts.keys.first())
+            }
+            DjLog.i(TAG, "ai mix $fromId -> $toId: runner-up for A/B: exit ${r.exitMs} ms, entry ${r.entryMs} ms, ${r.overlapBars} bars, moves ${r.moves.describe()}")
         }
         val cost = claude.costUsd(answer)
         answerTimes.addLast(answer.elapsedMs to (answer.turns > 1 || answer.tries > 0))
@@ -1460,6 +1570,8 @@ class DjEngine(
     private suspend fun aiAskAhead(k: String, fromId: String, toId: String, heardFromMs: Long, afterId: String?) {
         lyrics?.request(fromId)
         lyrics?.request(toId)
+        stems?.request(fromId)
+        stems?.request(toId)
         // the upcoming tracks are analysed at NEXT_UP priority, one at a time (kept through cancelStale, see setAiAhead)
         scheduler.request(fromId, AnalysisPriority.NEXT_UP)
         scheduler.request(toId, AnalysisPriority.NEXT_UP)
@@ -1624,6 +1736,8 @@ class DjEngine(
         // Where the voice is, from the lyrics: asked once per track per process (a no-op after that).
         lyrics?.request(context.currentId)
         lyrics?.request(next)
+        stems?.request(context.currentId)
+        stems?.request(next)
         // Analyses: the current track matters most, the next one is what the transition is about.
         scope.launch {
             scheduler.cancelStale(context.currentId, next)
@@ -2075,6 +2189,9 @@ private const val AI_TOOLS_BUDGET_MS = 60_000L
 /** Pro mode: up to 20 turns at maximum effort, rendering mixes on the phone; the current pair gets this much room. */
 /** Upcoming tracks offered to Claude's queue tools. */
 private const val AI_REORDER_OPTIONS = 5
+
+/** Runner-ups remembered for the A/B. */
+private const val AB_MEMORY = 20
 private const val AI_PRO_BUDGET_MS = 180_000L
 
 /** Pro mode: the longest stretch one look / listen decodes. */
@@ -2109,7 +2226,7 @@ private const val ANSWER_TIMES = 12
 private const val ANSWER_MARGIN_MS = 8_000L
 
 /** "Order with AI" orders this many upcoming tracks. */
-private const val AI_ORDER_TRACKS = 10
+private const val AI_ORDER_TRACKS = 16
 
 /** The automatic order orders this many tracks after the ones solved ahead... */
 private const val AUTO_ORDER_TRACKS = 8

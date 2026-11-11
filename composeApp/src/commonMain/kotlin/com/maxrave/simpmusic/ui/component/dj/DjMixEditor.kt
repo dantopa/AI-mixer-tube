@@ -19,6 +19,10 @@ class DjMixEditor(
     /** "Listen": play a rendered preview of the prepared mix (again = stop). */
     val onListen: () -> Unit = {},
     val isListening: Boolean = false,
+    /** A/B: Claude left a runner-up; "▶ B" plays it ("▶ Listen" is A), then Keep A / Keep B. */
+    val abAvailable: Boolean = false,
+    val onListenB: () -> Unit = {},
+    val onKeep: (keepB: Boolean) -> Unit = {},
     /** The engine's last word about the edit ("edit: out 1:32 -> in 0:12, 22.4 s", "edit not possible: ..."). */
     val status: String?,
     /** The prepared plan's overlap in bars, and its outgoing loop (0 = none). */

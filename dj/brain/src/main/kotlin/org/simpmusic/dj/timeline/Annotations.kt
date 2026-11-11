@@ -17,6 +17,9 @@ enum class Provenance {
 
     /** Read from the track's time-synced lyrics (where the lines are sung; see [LyricVocals]). */
     LYRICS,
+
+    /** Measured on the track's separated vocal stem (Demucs on the owner's server; see [StemProfile]). */
+    STEMS,
 }
 
 /** A value with where it comes from and how much it is trusted (0..1). */
@@ -42,6 +45,9 @@ interface TrackAnnotations {
      * (yet). Not the owner's by ear, but installed through the same point because the app fetches them, not the brain.
      */
     fun lyricVocals(videoId: String): LyricVocals? = null
+
+    /** The track's separated stems as levels (the owner's stems server); null when none (yet). */
+    fun stems(videoId: String): StemProfile? = null
 
     companion object {
         /** No annotations at all (the default, and every test that sets nothing). */

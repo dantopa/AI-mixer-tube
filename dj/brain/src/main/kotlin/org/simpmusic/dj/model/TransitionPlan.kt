@@ -277,6 +277,16 @@ enum class FilterMove {
     HIGHPASS_IN,
 }
 
+/** Which deck an [EqStep] turns. */
+@Serializable
+enum class EqDeck { OUTGOING, INCOMING }
+
+/** From [bar] of the overlap on, [deck]'s bass and highs are [bass] / [highs] (true = on, false = killed). */
+@Serializable
+data class EqStep(val deck: EqDeck, val bar: Int, val bass: Boolean, val highs: Boolean) {
+    fun describe(): String = "${if (deck == EqDeck.OUTGOING) "out" else "in"}@$bar:${if (bass) "B" else "b"}${if (highs) "H" else "h"}"
+}
+
 /**
  * A DJ's hands on the mixer during the overlap, as Claude chooses them ([AiMixPoints.moves]). The defaults are the
  * engine's own mix: bass swap in the middle, an equal-power fade, no filter, no echo, no loop.
@@ -291,6 +301,14 @@ data class MixMoves(
     val echoOut: Boolean = false,
     /** Loop this many bars of the outgoing from the exit for the whole overlap (0 = no loop): a bed under the incoming. */
     val loopBars: Int = 0,
+    /**
+     * Free-hand EQ, bar by bar: from each step's bar of the overlap on, that deck's bass (below ~250 Hz) and highs (above
+     * ~2.5 kHz) are on or killed, the way a DJ turns the low and high knobs. A deck with steps gets its filter lanes from
+     * them (they replace the bass swap and the filter move on that deck). The incoming opens back up by the end.
+     */
+    val eq: List<EqStep> = emptyList(),
+    /** Shift the incoming's key by this many semitones (-1, 0, +1) through the overlap, gliding back after it. */
+    val keyShift: Int = 0,
 ) {
     val isDefault: Boolean get() = this == MixMoves()
 
@@ -301,6 +319,8 @@ data class MixMoves(
             filter.takeIf { it != FilterMove.NONE }?.name?.lowercase(),
             "echo out".takeIf { echoOut },
             "loop $loopBars bars".takeIf { loopBars > 0 },
+            "eq ${eq.joinToString(" ") { it.describe() }}".takeIf { eq.isNotEmpty() },
+            "key ${if (keyShift > 0) "+" else ""}$keyShift st".takeIf { keyShift != 0 },
         ).joinToString(", ").ifEmpty { "engine defaults" }
 
     companion object {

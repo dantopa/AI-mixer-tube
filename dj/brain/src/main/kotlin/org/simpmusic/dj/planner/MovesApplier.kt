@@ -134,6 +134,45 @@ internal object MovesApplier {
             notes += "echo out: %.0f ms repeats ring %.1f s past the fade".format(java.util.Locale.ROOT, delay, tail / 1000.0)
         }
 
+        // ---- free-hand EQ: the low and high knobs, bar by bar ----
+        for (deck in org.simpmusic.dj.model.EqDeck.entries) {
+            val steps = m.eq.filter { it.deck == deck }.sortedBy { it.bar }
+            if (steps.isEmpty()) continue
+            val isIn = deck == org.simpmusic.dj.model.EqDeck.INCOMING
+            val d = if (isIn) inc else out
+            val turn = max(1L, (beatWallMs / 2).toLong())
+            fun knob(lane: ParamCurve, onHz: Float, killHz: Float, on: (org.simpmusic.dj.model.EqStep) -> Boolean): ParamCurve {
+                val keys = ArrayList<Keyframe>()
+                val t0 = (steps.first().bar * bar).roundToLong().coerceIn(0L, o)
+                keys += Keyframe(t0, lane.valueAt(t0))
+                for (st in steps) {
+                    val t = (st.bar * bar).roundToLong().coerceIn(0L, o)
+                    val prev = keys.last().value
+                    keys += Keyframe(t, prev)
+                    keys += Keyframe(t + turn, if (on(st)) onHz else killHz, Ease.EXPONENTIAL)
+                }
+                // the incoming plays on alone after the overlap: it must be fully open by then
+                if (isIn) {
+                    val end = max(keys.last().tMs + 1, o)
+                    keys += Keyframe(end, keys.last().value)
+                    keys += Keyframe(end + max(turn, beatWallMs.toLong()), onHz, Ease.EXPONENTIAL)
+                }
+                return ParamCurve(dedupe(keys))
+            }
+            val low = knob(d.lowCutHz, 20f, EQ_BASS_KILL_HZ) { it.bass }
+            val high = knob(d.highCutHz, 20_000f, EQ_HIGHS_KILL_HZ) { it.highs }
+            if (isIn) inc = inc.copy(lowCutHz = low, highCutHz = high) else out = out.copy(lowCutHz = low, highCutHz = high)
+            notes += "eq on the ${if (isIn) "incoming" else "outgoing"}: " + steps.joinToString(", ") { "bar ${it.bar} bass ${if (it.bass) "on" else "killed"}, highs ${if (it.highs) "on" else "killed"}" }
+        }
+
+        // ---- key shift on the incoming: a semitone through the overlap, gliding back over two bars after it ----
+        if (m.keyShift != 0) {
+            val st = m.keyShift.coerceIn(-1, 1).toFloat()
+            val back = max(1L, (2 * bar).toLong())
+            inc = inc.copy(pitchSemitones = ParamCurve(listOf(Keyframe(0, st), Keyframe(o, st), Keyframe(o + back, 0f, Ease.SMOOTHSTEP))))
+            notes += "key: the incoming shifted ${if (st > 0) "+1" else "-1"} semitone through the overlap, gliding back over 2 bars"
+        }
+
         return Applied(plan.copy(outgoing = out, incoming = inc, echoOut = echo), notes)
     }
 
@@ -162,6 +201,8 @@ internal object MovesApplier {
     private const val LOWPASS_END_HZ = 700f
     private const val HIGHPASS_OUT_END_HZ = 1_200f
     private const val HIGHPASS_IN_START_HZ = 800f
+    private const val EQ_BASS_KILL_HZ = 250f
+    private const val EQ_HIGHS_KILL_HZ = 2_500f
 
     /** Under a playing incoming the repeats must not bury it: lower than a plain echo-out's (0.6 / 1.0). */
     private const val ECHO_FEEDBACK = 0.45f

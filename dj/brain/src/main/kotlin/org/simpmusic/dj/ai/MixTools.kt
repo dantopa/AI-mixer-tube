@@ -71,13 +71,19 @@ class MixTools(
     /** What a call gave: text for Claude, or the committed points (the end of the conversation). */
     sealed class Outcome {
         class Result(val text: String, val isError: Boolean = false, val image: ByteArray? = null) : Outcome()
-        class Committed(val points: AiMixPoints) : Outcome()
+        /** [runnerUp]: the best other candidate Claude tried or listened to, for the owner's A/B (null = none). */
+        class Committed(val points: AiMixPoints, val runnerUp: AiMixPoints? = null) : Outcome()
         /** Claude chose to play the upcoming track [id] next instead (the conversation ends; the new pair is asked again). */
         class Swap(val id: String, val why: String) : Outcome()
     }
 
     private val outT: TrackTimeline = Timelines.of(from)
     private val inT: TrackTimeline = Timelines.of(to)
+
+    /** Every candidate tried or listened to, with the judge's score when it was listened to (else a neutral 5). */
+    private val scored = LinkedHashMap<String, Pair<AiMixPoints, Double>>()
+
+    private fun keyOf(p: AiMixPoints) = "${p.exitMs}/${p.entryMs}/${p.overlapBars}/${p.moves}"
 
     /** How many mixes Claude tried (for the log). */
     var tries = 0
@@ -188,6 +194,7 @@ class MixTools(
         val pts = points(o, "try")
         val p = planner.plan(from, to, settings, PlanConstraints(earliestExitMs = earliestExitMs, aiPoints = pts))
         val f = p.meta?.features
+        if (p.meta?.source == PlanSource.AI_MIX && p.kind == PlanKind.BEAT_MATCHED) scored.putIfAbsent(keyOf(pts), pts to 5.0)
         return buildString {
             if (p.meta?.source != PlanSource.AI_MIX || p.kind != PlanKind.BEAT_MATCHED) {
                 append("NOT POSSIBLE at these points: ").append(p.reason.substringAfter(AiMixPoints.NOT_USED, p.reason).take(240)).append('\n')
@@ -359,8 +366,14 @@ class MixTools(
             }.trim()
         var peak = 0f
         for (i in 0 until mix.frames) peak = maxOf(peak, abs(mix.left[i]), abs(mix.right[i]))
+        val verdict =
+            runCatching {
+                MixJudge.judge(p, org.simpmusic.dj.render.AudioSegment(outPcm, outFrom), org.simpmusic.dj.render.AudioSegment(inPcm, inFrom), barMs, lead, tail)
+            }.getOrNull()
+        scored[keyOf(pts)] = pts to (verdict?.score ?: 5.0)
         val text =
             measured.trimEnd() + "\n" +
+                (verdict?.let { it.text + "\n" } ?: "") +
                 "LISTENED: the mix rendered from %.1f s before T0 to %.1f s after it (the same renderer and lanes the engine plays). ".format(java.util.Locale.ROOT, -w.startMs / 1000.0, endMs / 1000.0) +
                 "Picture: green line = T0 (the incoming starts), red line = the outgoing is silent; thin lines on the mix's bars " +
                 "(brighter every 4 from T0); top strips = the outgoing's fader (orange) and the incoming's (blue). Dashed lines at 250 Hz and 2 kHz.\n" +
@@ -463,7 +476,12 @@ class MixTools(
 
     private fun commit(o: JsonObject): Outcome {
         val why = o["why"]?.jsonPrimitive?.contentOrNull.orEmpty().trim().ifEmpty { "no reason given" }
-        return Outcome.Committed(points(o, why))
+        val pts = points(o, why)
+        val chosen = keyOf(pts)
+        val runnerUp =
+            scored.entries.filter { it.key != chosen && (it.value.first.exitMs != pts.exitMs || it.value.first.entryMs != pts.entryMs || it.value.first.overlapBars != pts.overlapBars || it.value.first.moves != pts.moves) }
+                .maxByOrNull { it.value.second }?.value?.first
+        return Outcome.Committed(pts, runnerUp)
     }
 
     companion object {
@@ -603,7 +621,11 @@ class MixTools(
             PRO MODE. Take your time: up to $PRO_MAX_TURNS turns, and cost is not a concern. You also have candidates (a
             measured map of the whole allowed range), look (a spectrogram of the real audio of any stretch: the closest you
             can get to hearing it) and listen (the mix rendered by the engine, as a picture with the faders, plus its level
-            bar by bar). A good order: candidates; look at the outgoing's exit zone and the incoming's landing zone of the
+            bar by bar and a JUDGE line measured on the audio: whether the kicks land together or flam, bars where both
+            basslines or both leads are loud, holes and bumps, and a score out of 10; aim for 8 or more). The moves also
+            take the EQ knobs (eq: kill or open each deck's bass and highs from any bar of the overlap) and key_shift (one
+            semitone on the incoming, only for a real clash). The owner compares your commit with your best other candidate
+            by ear (A/B), so listen to at least two different ones. A good order: candidates; look at the outgoing's exit zone and the incoming's landing zone of the
             two or three best (the detector's voice column is unreliable on cumbia, the picture is the audio); try_mix with
             the moves you think fit; listen to the best one or two and fix what the picture shows (two voices at once, a
             hole or a bump in level, the incoming's bass arriving before the outgoing's leaves); then commit. When a song's
