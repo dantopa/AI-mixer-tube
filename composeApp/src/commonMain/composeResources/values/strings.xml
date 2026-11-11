@@ -661,8 +661,13 @@
     <string name="ai_dj_claude_prompt_message">The rules Claude reads before every mix question. Edit them freely; clear the field (or leave it unchanged) to go back to the app's own, which then follows the app's updates. Your instructions and lessons are still added after it.</string>
     <string name="ai_dj_claude_prompt_default">The app's own</string>
     <string name="ai_dj_claude_prompt_edited">Edited by you (%1$d characters)</string>
-    <string name="ai_dj_stems">Stems server (Demucs, experiment)</string>
-    <string name="ai_dj_stems_description">Your own computer separates each track into voice, bass, drums and the rest, so the DJ and Claude know where the voice really is (better than the phone's detector on cumbia). Run dj/stems-server from the repo there. Tracks measured: %1$d</string>
+    <string name="ai_dj_stems">Stems (Demucs, experiment)</string>
+    <string name="ai_dj_stems_description">Each track is separated into voice, bass, drums and the rest (Demucs, on Replicate's cloud or your own computer), so the DJ and Claude know where the voice really is (better than the phone's detector on cumbia). Tracks measured: %1$d</string>
+    <string name="ai_dj_stems_backend">Where Demucs runs</string>
+    <string name="ai_dj_stems_backend_replicate">Replicate (cloud GPU, about half a cent per song)</string>
+    <string name="ai_dj_stems_backend_server">My own server (dj/stems-server)</string>
+    <string name="ai_dj_stems_replicate_token">Replicate API token</string>
+    <string name="ai_dj_stems_replicate_token_message">Create one at replicate.com/account/api-tokens and paste it here. It is kept on this phone only and sent only to api.replicate.com. Leave empty to forget it.</string>
     <string name="ai_dj_stems_url">Stems server address</string>
     <string name="ai_dj_stems_url_message">For example http://192.168.1.20:8765 on your home network, or your Tailscale address to reach it from anywhere.</string>
     <string name="ai_dj_stems_url_none">Not set</string>

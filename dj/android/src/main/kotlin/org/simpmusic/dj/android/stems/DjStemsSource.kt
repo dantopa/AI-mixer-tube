@@ -91,6 +91,15 @@ class DjStemsSource(
         }
         val wav = wav16(pcm.samples, pcm.sampleRate)
         val t0 = System.nanoTime()
+        if (s.backend == StemsSettings.Backend.REPLICATE) {
+            val tok = StemsSettings.replicateToken() ?: return
+            DjLog.i(TAG, "stems of $id: sending ${wav.size / 1024} kB to Replicate (Demucs)")
+            val p = ReplicateStems(tok, context.cacheDir).separate(wav, id)
+            StemsCache.put(id, p)
+            DjLog.i(TAG, "stems of $id: ${p.frames} frames (${p.model}) in ${(System.nanoTime() - t0) / 1_000_000} ms, ${p.vocalRanges().size} sung ranges")
+            onChanged?.invoke(id)
+            return
+        }
         DjLog.i(TAG, "stems of $id: uploading ${wav.size / 1024} kB to the stems server")
         val conn = (URL(s.url + "/v1/stems").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"

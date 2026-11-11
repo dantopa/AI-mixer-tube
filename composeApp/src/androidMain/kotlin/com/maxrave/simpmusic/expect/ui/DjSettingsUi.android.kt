@@ -76,6 +76,11 @@ import simpmusic.composeapp.generated.resources.ai_dj_claude_auto_description
 import simpmusic.composeapp.generated.resources.ai_dj_claude_key
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools
 import simpmusic.composeapp.generated.resources.ai_dj_claude_tools_description
+import simpmusic.composeapp.generated.resources.ai_dj_stems_backend
+import simpmusic.composeapp.generated.resources.ai_dj_stems_backend_replicate
+import simpmusic.composeapp.generated.resources.ai_dj_stems_backend_server
+import simpmusic.composeapp.generated.resources.ai_dj_stems_replicate_token
+import simpmusic.composeapp.generated.resources.ai_dj_stems_replicate_token_message
 import simpmusic.composeapp.generated.resources.ai_dj_stems
 import simpmusic.composeapp.generated.resources.ai_dj_stems_description
 import simpmusic.composeapp.generated.resources.ai_dj_stems_url
@@ -325,7 +330,48 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                 )
                 AnimatedVisibility(visible = stems.enabled) {
                     Column {
+                        val backendTitle = stringResource(Res.string.ai_dj_stems_backend)
+                        val backendLabels =
+                            listOf(
+                                org.simpmusic.dj.android.stems.StemsSettings.Backend.REPLICATE to stringResource(Res.string.ai_dj_stems_backend_replicate),
+                                org.simpmusic.dj.android.stems.StemsSettings.Backend.SERVER to stringResource(Res.string.ai_dj_stems_backend_server),
+                            )
                         SettingItem(
+                            title = backendTitle,
+                            subtitle = backendLabels.first { it.first == stems.backend }.second,
+                            smallSubtitle = true,
+                            onClick = {
+                                viewModel.setAlertData(
+                                    SettingAlertState(
+                                        title = backendTitle,
+                                        selectOne = SettingAlertState.SelectData(listSelect = backendLabels.map { (b, l) -> (b == stems.backend) to l }),
+                                        confirm = confirm to { st -> backendLabels.firstOrNull { it.second == st.selectOne?.getSelected() }?.first?.let { org.simpmusic.dj.android.stems.StemsSettings.setBackend(it) } },
+                                        dismiss = dismiss,
+                                    ),
+                                )
+                            },
+                        )
+                        if (stems.backend == org.simpmusic.dj.android.stems.StemsSettings.Backend.REPLICATE) {
+                            val repTitle = stringResource(Res.string.ai_dj_stems_replicate_token)
+                            val repMessage = stringResource(Res.string.ai_dj_stems_replicate_token_message)
+                            SettingItem(
+                                title = repTitle,
+                                subtitle = if (stems.hasReplicateToken) stringResource(Res.string.ai_dj_stems_token_set) else stringResource(Res.string.ai_dj_stems_token_none),
+                                smallSubtitle = true,
+                                onClick = {
+                                    viewModel.setAlertData(
+                                        SettingAlertState(
+                                            title = repTitle,
+                                            message = repMessage,
+                                            textField = SettingAlertState.TextFieldData(label = repTitle, value = "", maxLines = 2),
+                                            confirm = confirm to { st -> org.simpmusic.dj.android.stems.StemsSettings.setReplicateToken(st.textField?.value) },
+                                            dismiss = dismiss,
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                        if (stems.backend == org.simpmusic.dj.android.stems.StemsSettings.Backend.SERVER) SettingItem(
                             title = stemsUrlTitle,
                             subtitle = stems.url.ifBlank { stringResource(Res.string.ai_dj_stems_url_none) },
                             smallSubtitle = true,
@@ -341,7 +387,7 @@ actual fun DjSettingsSection(castRemote: Boolean) {
                                 )
                             },
                         )
-                        SettingItem(
+                        if (stems.backend == org.simpmusic.dj.android.stems.StemsSettings.Backend.SERVER) SettingItem(
                             title = stemsTokenTitle,
                             subtitle = if (stems.hasToken) stringResource(Res.string.ai_dj_stems_token_set) else stringResource(Res.string.ai_dj_stems_token_none),
                             smallSubtitle = true,

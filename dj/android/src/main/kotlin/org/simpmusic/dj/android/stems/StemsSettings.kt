@@ -19,20 +19,33 @@ object StemsSettings {
         val hasToken: Boolean = false,
         /** Upload audio only on an unmetered network (Wi-Fi): about 10 MB per track. */
         val unmeteredOnly: Boolean = true,
+        /** Where Demucs runs: the owner's own server, or Replicate (a cloud GPU, paid per run). */
+        val backend: Backend = Backend.REPLICATE,
+        val hasReplicateToken: Boolean = false,
     ) {
-        val usable: Boolean get() = enabled && url.isNotBlank()
+        val usable: Boolean
+            get() = enabled && when (backend) {
+                Backend.SERVER -> url.isNotBlank()
+                Backend.REPLICATE -> hasReplicateToken
+            }
     }
+
+    enum class Backend { SERVER, REPLICATE }
 
     private const val PREFS = "dj_stems"
     private const val PREF_ENABLED = "enabled"
     private const val PREF_URL = "url"
     private const val PREF_UNMETERED = "unmetered_only"
     private const val TOKEN_FILE = "dj_stems_token"
+    private const val PREF_BACKEND = "backend"
+    private const val REPLICATE_FILE = "dj_replicate_token"
     private const val TAG = "stems"
 
     @Volatile private var prefs: SharedPreferences? = null
     @Volatile private var tokenFile: File? = null
     @Volatile private var token: String? = null
+    @Volatile private var replicateFile: File? = null
+    @Volatile private var replicate: String? = null
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
@@ -41,6 +54,8 @@ object StemsSettings {
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         tokenFile = File(context.noBackupFilesDir, TOKEN_FILE)
         token = runCatching { tokenFile?.takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() } }.getOrNull()
+        replicateFile = File(context.noBackupFilesDir, REPLICATE_FILE)
+        replicate = runCatching { replicateFile?.takeIf { it.isFile }?.readText()?.trim()?.takeIf { it.isNotEmpty() } }.getOrNull()
         publish()
     }
 
@@ -74,6 +89,24 @@ object StemsSettings {
 
     internal fun token(): String? = token
 
+    fun setBackend(b: Backend) {
+        prefs?.edit()?.putString(PREF_BACKEND, b.name)?.apply()
+        publish()
+        DjLog.i(TAG, "stems backend ${b.name.lowercase()}")
+    }
+
+    /** Stores the Replicate API token (blank = forget it). A file under noBackupFilesDir, never logged or exported. */
+    fun setReplicateToken(t: String?) {
+        val v = t?.trim()?.takeIf { it.isNotEmpty() }
+        val f = replicateFile ?: return
+        runCatching { if (v == null) f.delete() else f.writeText(v) }
+        replicate = v
+        publish()
+        DjLog.i(TAG, "replicate token ${if (v != null) "stored" else "forgotten"}")
+    }
+
+    internal fun replicateToken(): String? = replicate
+
     private fun publish() {
         val p = prefs
         _state.value =
@@ -82,6 +115,8 @@ object StemsSettings {
                 url = p?.getString(PREF_URL, "").orEmpty(),
                 hasToken = token != null,
                 unmeteredOnly = p?.getBoolean(PREF_UNMETERED, true) ?: true,
+                backend = p?.getString(PREF_BACKEND, null)?.let { n -> Backend.entries.firstOrNull { it.name == n } } ?: Backend.REPLICATE,
+                hasReplicateToken = replicate != null,
             )
     }
 }
